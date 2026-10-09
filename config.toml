@@ -1,0 +1,65 @@
+# DeepSeek 群友 —— 配置文件
+# 这里是所有参数的默认值，改完重启生效。
+# 服务器管理员在 Discord 里用 /ds 改的设置会覆盖这里的默认值（存在数据库里）。
+
+[deepseek]
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"          # V4.1 Flash
+timeout_seconds = 90
+max_retries = 2                   # 429 / 5xx 时自动重试几次
+
+[bot]
+timezone = "Asia/Taipei"          # 每日预算按这个时区的自然日算；聊天记录里的时间也用它
+database = "data/dsbot.sqlite3"
+sync_commands_on_start = true     # 启动时注册斜杠命令
+log_level = "INFO"
+tick_seconds = 5                  # 多久检查一次各频道要不要主动判断
+
+[pricing]
+# 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
+# DeepSeek 调价时改这里：https://api-docs.deepseek.com/quick_start/pricing
+cache_hit = 0.006
+cache_miss = 0.30
+output = 1.20
+offpeak_factor = 0.5
+peak_hours_utc = [[1, 4], [6, 10]]  # 周一到周五，UTC
+
+[defaults]
+# —— 管理员可以在 Discord 里用 /ds 改的 ——
+proactive = false                 # 主动发言默认关，在需要的频道里用 /ds 主动 打开
+refill_turns = 15                 # 别人每说 15 轮，恢复 1 次主动发言额度
+quota_capacity = 3                # 额度最多攒 3 次（热聊时最多连插 3 句）
+min_speak_gap = 120               # 两次发言至少隔 120 秒
+quiet_seconds = 30                # 30 秒没人说话、也没人在打字，算冷场
+max_wait_seconds = 180            # 一直没冷场的话，最多等 180 秒也判断一次
+mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
+aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
+persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
+
+# —— 只有你能改的（这里，或私人服务器里的 /dsowner）——
+min_eval_interval = 60            # 两次主动判断至少隔 60 秒
+proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
+mention_thinking = "off"          # 被叫到时思考强度：off 最快
+daily_budget_usd = 1.0            # 单个服务器每天最多花多少美元，超了只回点名；超过 2 倍连点名也不回
+global_daily_budget_usd = 3.0     # 所有服务器加起来的上限
+context_budget_tokens = 30000     # 上下文超过这么多 token，就把最早的一半压成摘要（最大 200000）
+vision = true                     # 是否把群里的图片发给模型
+
+[engine]
+# 一般不用动
+max_batch_messages = 40           # 一轮最多带多少条新消息
+max_pending_messages = 120        # 没轮到时最多缓存多少条
+pending_max_age_seconds = 21600   # 缓存里超过 6 小时的旧消息直接丢掉
+max_chars_per_message = 1200      # 单条消息进上下文前截断
+max_images_per_round = 4
+image_max_side = 1024             # 叫到它的那条消息里的图片
+low_detail_max_side = 512         # 其他图片（模型那边也只按 512×512 看）
+turn_merge_seconds = 20           # 同一个人 20 秒内连发算一轮
+react_cost = 0.3                  # 只加表情消耗多少额度
+typing_chars_per_second = 3.0     # “打字”速度
+typing_min_seconds = 2.0
+typing_max_seconds = 10.0
+max_output_tokens = 2000
+max_thinking_tokens = 6000
+hard_stop_multiplier = 2.0
+summary_max_chars = 600
