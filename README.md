@@ -13,6 +13,17 @@
 - **省钱**：对话历史只追加不改写，尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：群友发的截图、梗图会一起发给模型（可关）。
 
+A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like a regular member:
+
+- **Answers when called**: replies right away when someone @mentions it, replies to one of its messages, or uses one of its aliases.
+- **Chimes in on its own** (enabled per channel): waits until the chat goes quiet for a moment (or until it has waited too long), then lets the model decide whether to say something. It leans toward staying silent.
+- **Feels human**: short, casual replies; shows "typing…" and waits a few seconds based on length before sending; may split a reply into two or three messages, or just react with an emoji.
+- **Controllable chattiness**: proactive messages draw from a quota that refills with the channel's message volume, so the busier the chat, the faster it refills. Presets and individual settings can all be changed inside Discord.
+- **Cheap to run**: conversation history is append-only to get the most out of DeepSeek's prefix cache; no model call at all when the quota is empty; automatic fallback when the daily budget runs out.
+- **Sees images**: screenshots and memes posted in the chat are sent to the model too (can be turned off).
+
+Setup, commands and settings in English: [README.en.md](README.en.md)
+
 ---
 
 ## 一、准备工作
