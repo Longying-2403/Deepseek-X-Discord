@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -93,6 +94,16 @@ class Store:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         self.db.commit()
+        if self.path != ":memory:":
+            self._make_private()
+
+    def _make_private(self) -> None:
+        """聊天记录和读过的文件内容都在数据库里：只让 bot 自己读写（NAS 上别的账号看不到）。尽力而为。"""
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.chmod(self.path + suffix, 0o600)
+            except OSError:
+                pass
 
     def close(self) -> None:
         self.db.close()

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
-from .models import ImageAttachment, IncomingMessage
-from .textutil import clean_custom_emoji
+from .models import FileAttachment, ImageAttachment, IncomingMessage
+from .textutil import clean_custom_emoji, clean_text, one_line
 
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FORWARD = 1  # MessageReferenceType.forward
+STICKER_IMAGE_FORMATS = {1, 2, 4}  # png / apng / gif；lottie(3) 是动画数据，不是图片
+URL_RE = re.compile(r"https?://\S+")
+
+FetchUrl = Callable[[str], Awaitable[bytes]]
 
 
 def parse_aliases(raw: Any) -> list[str]:
@@ -29,22 +33,49 @@ def alias_called(text: str, aliases: list[str]) -> bool:
     return False
 
 
+def safe_category_id(channel: Any) -> int | None:
+    """帖子的 category_id 要通过所在频道取，所在频道没缓存时 discord.py 会抛异常。"""
+    try:
+        return getattr(channel, "category_id", None)
+    except Exception:
+        return None
+
+
+def _fetcher(fetch_url: FetchUrl, url: str) -> Callable[[], Awaitable[bytes]]:
+    async def fetch() -> bytes:
+        return await fetch_url(url)
+
+    return fetch
+
+
+def _embed_media(embed: Any) -> str | None:
+    """GIF / 图片链接预览里能直接下载的那张静态图（优先走 Discord 的图片代理）。"""
+    for media in (getattr(embed, "thumbnail", None), getattr(embed, "image", None)):
+        if media is None:
+            continue
+        url = getattr(media, "proxy_url", None) or getattr(media, "url", None)
+        if url:
+            return url
+    return None
+
+
 def convert_message(
     message: Any,
     *,
     me_id: int,
     aliases: list[str],
     is_ours: Callable[[int], bool],
+    fetch_url: FetchUrl | None = None,
 ) -> IncomingMessage:
     channel = message.channel
     parent_id = getattr(channel, "parent_id", None)  # 只有帖子（Thread）有 parent_id
 
-    text = clean_custom_emoji(message.clean_content or "")
+    text = clean_text(clean_custom_emoji(message.clean_content or ""))
     ref = message.reference
     forwarded = ref is not None and getattr(getattr(ref, "type", None), "value", 0) == FORWARD
     if forwarded:
         snapshots = getattr(message, "message_snapshots", None) or []
-        inner = clean_custom_emoji(getattr(snapshots[0], "content", "") or "") if snapshots else ""
+        inner = clean_text(clean_custom_emoji(getattr(snapshots[0], "content", "") or "")) if snapshots else ""
         text = f"[转发] {inner}".strip() if not text else f"{text}\n[转发] {inner}".strip()
 
     mentions_bot = any(user.id == me_id for user in message.mentions)
@@ -64,21 +95,52 @@ def convert_message(
         reply_to_bot = author.id == me_id if author is not None else is_ours(ref.message_id)
 
     images: list[ImageAttachment] = []
-    files: list[str] = []
+    files: list[FileAttachment] = []
     for att in message.attachments:
         ctype = (att.content_type or "").split(";")[0].strip().lower()
         if ctype in IMAGE_TYPES or att.filename.lower().endswith(IMAGE_EXTS):
-            images.append(ImageAttachment(att.filename, ctype or None, att.size, fetch=att.read))
+            images.append(ImageAttachment(clean_text(att.filename), ctype or None, att.size, fetch=att.read))
         else:
-            files.append(att.filename)
+            files.append(FileAttachment(clean_text(att.filename), ctype or None, att.size, fetch=att.read))
+
+    # 链接预览（embed）：GIF 选单发的 GIF、贴的图片链接，正文里只有一个链接，图在预览里
+    embeds = list(getattr(message, "embeds", None) or [])
+    notes: list[str] = []
+    for embed in embeds:
+        etype = getattr(embed, "type", None)
+        if etype in ("gifv", "image"):
+            url = _embed_media(embed)
+            if url and fetch_url is not None:
+                kind = "gif" if etype == "gifv" or url.lower().split("?")[0].endswith(".gif") else "image"
+                images.append(ImageAttachment(url.rsplit("/", 1)[-1][:60], None, 0, fetch=_fetcher(fetch_url, url), kind=kind))
+                link = getattr(embed, "url", None)
+                if link:
+                    text = text.replace(link, "").strip()  # 有了 [GIF]/[图片] 标记，就不用再给模型看一长串链接
+        else:
+            title = getattr(embed, "title", None)
+            if title:
+                provider = getattr(getattr(embed, "provider", None), "name", None)
+                label = "卡片" if etype == "rich" else "链接预览"
+                notes.append(f"[{label}: {one_line((provider + ' - ' if provider else '') + title, 80)}]")
+    if notes:
+        text = f"{text} {' '.join(notes)}".strip()
+
+    stickers: list[str] = []
+    for sticker in message.stickers:
+        stickers.append(clean_text(sticker.name))
+        fmt = getattr(getattr(sticker, "format", None), "value", None)
+        url = getattr(sticker, "url", None)
+        if url and fmt in STICKER_IMAGE_FORMATS and fetch_url is not None:
+            images.append(ImageAttachment(sticker.name, None, 0, fetch=_fetcher(fetch_url, url), kind="sticker"))
 
     return IncomingMessage(
         message_id=message.id,
         channel_id=channel.id,
         guild_id=message.guild.id,
         parent_id=parent_id,
+        category_id=safe_category_id(channel),
         author_id=message.author.id,
-        author_name=message.author.display_name,
+        author_name=clean_text(message.author.display_name),
         text=text,
         is_bot=bool(message.author.bot),
         reply_to_id=reply_to_id,
@@ -86,5 +148,6 @@ def convert_message(
         mentions_bot=mentions_bot,
         images=images,
         files=files,
-        stickers=[sticker.name for sticker in message.stickers],
+        stickers=stickers,
+        awaiting_embeds=not embeds and bool(URL_RE.search(message.clean_content or "")),
     )

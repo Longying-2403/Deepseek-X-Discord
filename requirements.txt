@@ -2,3 +2,5 @@ discord.py>=2.6,<3
 python-dotenv>=1.0
 Pillow>=10.0
 tzdata>=2024.1
+pypdf[crypto]>=5.0
+charset-normalizer>=3.0

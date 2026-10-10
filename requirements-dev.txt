@@ -1,0 +1,9 @@
+# 开发和跑测试用：pip install -r requirements-dev.txt
+# bot 运行只需要 requirements.txt
+-r requirements.txt
+
+# 读文件的测试用它们现场生成真实的 Word / Excel / PPT / PDF 文件
+python-docx>=1.0
+openpyxl>=3.1
+python-pptx>=1.0
+reportlab>=4.0

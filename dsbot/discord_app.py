@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 
 from .config import AppConfig, Secrets
-from .convert import convert_message, parse_aliases
+from .convert import convert_message, parse_aliases, safe_category_id
 from .engine import Engine
 from .ledger import Ledger
 from .llm import DeepSeekClient
@@ -240,11 +240,39 @@ class DSBot(discord.Client):
             return
         self.engine.handle_typing(payload.channel_id)
 
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """消息被编辑，或 Discord 补上了链接预览（GIF 选单发的 GIF 就是这样）。"""
+        if self.user is None or payload.guild_id is None:
+            return
+        if self.engine.find_message(payload.channel_id, payload.message_id) is None:
+            return  # 已经处理过（或不在允许的区域），不用管
+        message = getattr(payload, "message", None)
+        if message is None or message.guild is None or message.author.id == self.user.id:
+            return
+        try:
+            self.engine.refresh_message(self.to_incoming(message))
+        except Exception:
+            log.exception("更新消息 %s 失败", payload.message_id)
+
+    async def fetch_url(self, url: str) -> bytes:
+        """下载链接预览、贴图的图片（走 discord.py 自己的 HTTP 会话，代理设置也一致）。"""
+        return await self.http.get_from_cdn(url)
+
     def to_incoming(self, message: discord.Message) -> IncomingMessage:
         assert self.user is not None and message.guild is not None
         channel = message.channel
         parent_id = channel.parent_id if isinstance(channel, discord.Thread) else None
-        aliases = self.settings.get("aliases", guild_id=message.guild.id, channel_id=channel.id, parent_id=parent_id)
+        aliases = self.settings.get(
+            "aliases",
+            guild_id=message.guild.id,
+            channel_id=channel.id,
+            parent_id=parent_id,
+            category_id=safe_category_id(channel),
+        )
         return convert_message(
-            message, me_id=self.user.id, aliases=parse_aliases(aliases), is_ours=self.transport.is_ours
+            message,
+            me_id=self.user.id,
+            aliases=parse_aliases(aliases),
+            is_ours=self.transport.is_ours,
+            fetch_url=self.fetch_url,
         )

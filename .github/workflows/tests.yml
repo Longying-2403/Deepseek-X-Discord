@@ -33,19 +33,28 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
-      - name: 安装依赖
-        run: python -m pip install -r requirements.txt
+      - name: 安装依赖（含测试用的库）
+        run: python -m pip install -r requirements-dev.txt
 
       - name: 单元测试
         run: python -m unittest discover -s tests -v
 
-      - name: 离线自检（配置文件、斜杠命令定义）
+      - name: 离线自检（配置文件、读文件组件、斜杠命令定义）
         # 填的都是假值，只为让自检走完整流程；自检不会连 Discord，也不会调用 DeepSeek
         env:
           DISCORD_TOKEN: ci-dummy-token
           DEEPSEEK_API_KEY: ci-dummy-key
           OWNER_ID: "1"
           CONTROL_GUILD_ID: "1"
-        run: python -m dsbot --check
+        shell: bash # 带 pipefail：自检本身崩溃时这一步也会失败
+        run: |
+          python -m dsbot --check | tee check.log
+          # 自检里有些检查失败只打印 ✗、不报错退出，这里把它们也算作失败
+          if grep -q '✗' check.log; then
+            echo "::error::自检有失败项，见上面带 ✗ 的行"
+            exit 1
+          fi

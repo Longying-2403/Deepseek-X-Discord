@@ -1,6 +1,6 @@
 """斜杠命令。
 
-/ds …       服务器管理员（默认需要“管理服务器”权限）：话量、档位、人设、状态。
+/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、状态。
 /dsowner …  只注册在 CONTROL_GUILD_ID 那个私人服务器里，并且只认 OWNER_ID：预算、思考强度等。
 """
 
@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.app_commands import Choice
 
 from .config import ADMIN_KEYS, OWNER_KEYS, PRESETS, RESET_WORDS, SPECS, format_value
+from .convert import safe_category_id
 from .prompts import DEFAULT_PERSONA
 
 if TYPE_CHECKING:
@@ -22,9 +23,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCOPE_CHOICES = [Choice(name="本频道", value="channel"), Choice(name="全服务器", value="guild")]
-# 主动开关、人设有专门的命令；其余管理员参数走 /ds 设置
-ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("proactive", "persona")]
+SCOPE_CHOICES = [
+    Choice(name="本频道", value="channel"),
+    Choice(name="本类别", value="category"),
+    Choice(name="全服务器", value="guild"),
+]
+AREA_ACTIONS = [
+    Choice(name="允许", value="on"),
+    Choice(name="禁止", value="off"),
+    Choice(name="跟随上级", value="inherit"),
+]
+NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
+# 区域、主动开关、人设有专门的命令；其余管理员参数走 /ds 设置
+ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona")]
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
 
 
@@ -36,16 +47,40 @@ async def _reply(interaction: discord.Interaction, text: str) -> None:
         await interaction.response.send_message(text, ephemeral=True)
 
 
-def _where(interaction: discord.Interaction, scope: Optional[Choice[str]], default: str = "channel"):
-    value = scope.value if scope is not None else default
-    if value == "guild":
-        return "guild", interaction.guild_id, "全服务器（默认）"
-    return "channel", interaction.channel_id, f"<#{interaction.channel_id}>"
-
-
 def _parent_id(interaction: discord.Interaction) -> int | None:
     channel = interaction.channel
     return channel.parent_id if isinstance(channel, discord.Thread) else None
+
+
+def _category(interaction: discord.Interaction) -> tuple[int | None, str | None]:
+    """当前频道所在的类别（帖子取它所在频道的类别）。"""
+    channel = interaction.channel
+    try:
+        category = getattr(channel, "category", None)
+    except Exception:  # 帖子的所在频道没缓存时 discord.py 会抛异常
+        category = None
+    if category is not None:
+        return category.id, category.name
+    return safe_category_id(channel), None
+
+
+def _ids(interaction: discord.Interaction) -> tuple[int, int, int | None, int | None]:
+    return interaction.guild_id, interaction.channel_id, _parent_id(interaction), _category(interaction)[0]
+
+
+def _target(
+    interaction: discord.Interaction, scope: Optional[Choice[str]], default: str = "channel"
+) -> tuple[str, int, str] | None:
+    """范围选项 → (存储范围, id, 给人看的名字)。选了“本类别”但频道不在类别里时返回 None。"""
+    value = scope.value if scope is not None else default
+    if value == "guild":
+        return "guild", interaction.guild_id, "全服务器"
+    if value == "category":
+        category_id, name = _category(interaction)
+        if category_id is None:
+            return None
+        return "category", category_id, f"类别「{name or category_id}」"
+    return "channel", interaction.channel_id, f"<#{interaction.channel_id}>"
 
 
 def _preset_text(values: dict[str, int]) -> str:
@@ -92,7 +127,7 @@ class PersonaModal(discord.ui.Modal):
         if not value or value == self.inherited.strip():
             # 没改（和上一级一样）就不单独存，以后上一级改了这里也会跟着变
             self.bot.settings.unset(self.scope, self.scope_id, "persona")
-            done = "已改为沿用上一级的人设" if self.scope == "channel" else "已恢复默认人设"
+            done = "已恢复默认人设" if self.scope == "guild" else "已改为沿用上一级的人设"
         else:
             self.bot.settings.set(self.scope, self.scope_id, "persona", value)
             done = "人设已更新"
@@ -107,9 +142,9 @@ class PersonaModal(discord.ui.Modal):
 
 
 def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
-    guild_id, channel_id, parent_id = interaction.guild_id, interaction.channel_id, _parent_id(interaction)
-    view = bot.settings.view(guild_id, channel_id, parent_id)
-    st = bot.engine.status(guild_id, channel_id, parent_id)
+    guild_id, channel_id, parent_id, category_id = _ids(interaction)
+    view = bot.settings.view(guild_id, channel_id, parent_id, category_id)
+    st = bot.engine.status(guild_id, channel_id, parent_id, category_id)
     channel_stats = bot.store.day_stats(st["day"], channel_id=channel_id)
     guild_stats = bot.store.day_stats(st["day"], guild_id=guild_id)
     outcomes = channel_stats["outcomes"]
@@ -117,8 +152,10 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         (name for name, values in PRESETS.items() if all(getattr(view, k) == v for k, v in values.items())),
         "自定义",
     )
-    lines = [
-        f"**<#{channel_id}> 的状态**",
+    lines = [f"**<#{channel_id}> 的状态**"]
+    if not view.enabled:
+        lines.append(f"🚫 这里不在允许的区域（来自{view.source('enabled')}），它不会看也不会回这里的消息")
+    lines += [
         f"主动发言：{'开' if view.proactive else '关'}（来自{view.source('proactive')}）· 档位：{preset}",
         f"主动额度：{st['tokens']:.1f} / {view.quota_capacity}（每 {view.refill_turns} 轮恢复 1 次，"
         f"已攒 {st['turns_since_refill']} 轮）",
@@ -147,6 +184,37 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     return "\n".join(lines)
 
 
+def area_list_text(bot: "DSBot", guild: discord.Guild) -> str:
+    def mark(value: bool) -> str:
+        return "✅ 允许" if value else "🚫 禁止"
+
+    guild_enabled = bot.settings.get("enabled", guild_id=guild.id)
+    source = "单独设置" if "enabled" in bot.settings.overrides("guild", guild.id) else "默认"
+    lines = ["**它会在哪里回应**", f"全服务器：{mark(guild_enabled)}（{source}）"]
+    rows = []
+    for category_id, value in bot.settings.scoped("category", "enabled").items():
+        category = guild.get_channel(category_id)
+        if category is not None:
+            rows.append((category.position, f"类别「{category.name}」：{mark(value)}"))
+    for channel_id, value in bot.settings.scoped("channel", "enabled").items():
+        if guild.get_channel_or_thread(channel_id) is not None:
+            rows.append((10_000, f"<#{channel_id}>：{mark(value)}"))
+    lines += [text for _, text in sorted(rows)] or ["（没有单独设置过的类别或频道）"]
+
+    proactive = []
+    for scope in ("category", "channel"):
+        for scope_id, value in bot.settings.scoped(scope, "proactive").items():
+            obj = guild.get_channel(scope_id) if scope == "category" else guild.get_channel_or_thread(scope_id)
+            if value and obj is not None:
+                proactive.append(f"类别「{obj.name}」" if scope == "category" else f"<#{scope_id}>")
+    if bot.settings.get("proactive", guild_id=guild.id):
+        lines.append("主动发言：全服务器默认开")
+    elif proactive:
+        lines.append("主动发言开着的地方：" + "、".join(proactive))
+    lines.append("（帖子跟着所在频道走；频道的设置优先于类别，类别优先于全服务器）")
+    return "\n".join(lines)
+
+
 def register_commands(bot: "DSBot") -> None:
     admin = app_commands.Group(
         name="ds",
@@ -155,20 +223,54 @@ def register_commands(bot: "DSBot") -> None:
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
+    @admin.command(name="区域", description="限制它在哪些频道或类别里回应（不允许的地方完全不看消息）")
+    @app_commands.rename(action="操作", scope="范围")
+    @app_commands.describe(action="允许 / 禁止 / 跟随上级（删掉这一层的设置）", scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @app_commands.choices(action=AREA_ACTIONS, scope=SCOPE_CHOICES)
+    async def area_cmd(interaction: discord.Interaction, action: Choice[str], scope: Optional[Choice[str]] = None) -> None:
+        target = _target(interaction, scope)
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
+        if action.value == "inherit":
+            bot.settings.unset(scope_name, scope_id, "enabled")
+        else:
+            bot.settings.set(scope_name, scope_id, "enabled", action.value)
+        view = bot.settings.view(*_ids(interaction))
+        lines = [
+            f"{where}：已设为「{action.name}」。",
+            f"现在这个频道：{'会回应' if view.enabled else '不回应'}（来自{view.source('enabled')}）",
+        ]
+        if scope_name == "guild" and action.value == "off":
+            lines.append("现在是白名单模式：在要用的频道里执行 `/ds 区域 操作:允许`（或选“本类别”放开整个区）。")
+        await _reply(interaction, "\n".join(lines))
+
+    @admin.command(name="区域列表", description="看看它在这个服务器的哪些地方会回应")
+    async def area_list_cmd(interaction: discord.Interaction) -> None:
+        await _reply(interaction, area_list_text(bot, interaction.guild))
+
     @admin.command(name="主动", description="开关主动发言（没被叫到时，自己判断要不要说话）")
     @app_commands.rename(state="开关", scope="范围")
-    @app_commands.describe(state="开还是关", scope="只改本频道，还是作为全服务器默认（不选 = 本频道）")
+    @app_commands.describe(state="开还是关", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）")
     @app_commands.choices(state=[Choice(name="开", value="on"), Choice(name="关", value="off")], scope=SCOPE_CHOICES)
     async def proactive_cmd(
         interaction: discord.Interaction, state: Choice[str], scope: Optional[Choice[str]] = None
     ) -> None:
-        scope_name, scope_id, where = _where(interaction, scope)
+        target = _target(interaction, scope)
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
         bot.settings.set(scope_name, scope_id, "proactive", state.value)
-        await _reply(interaction, f"{where}：主动发言已{'打开' if state.value == 'on' else '关闭'}。")
+        text = f"{where}：主动发言已{'打开' if state.value == 'on' else '关闭'}。"
+        if state.value == "on" and not bot.settings.view(*_ids(interaction)).enabled:
+            text += "\n⚠️ 但这个频道不在允许的区域，它不会说话。先用 `/ds 区域 操作:允许`。"
+        await _reply(interaction, text)
 
     @admin.command(name="档位", description="一键套用发言频率：安静 / 普通 / 话痨")
     @app_commands.rename(preset="档位", scope="范围")
-    @app_commands.describe(preset="选一个档位", scope="只改本频道，还是作为全服务器默认（不选 = 本频道）")
+    @app_commands.describe(preset="选一个档位", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）")
     @app_commands.choices(
         preset=[Choice(name=f"{name}：{_preset_text(values)}", value=name) for name, values in PRESETS.items()],
         scope=SCOPE_CHOICES,
@@ -176,7 +278,11 @@ def register_commands(bot: "DSBot") -> None:
     async def preset_cmd(
         interaction: discord.Interaction, preset: Choice[str], scope: Optional[Choice[str]] = None
     ) -> None:
-        scope_name, scope_id, where = _where(interaction, scope)
+        target = _target(interaction, scope)
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
         for key, value in PRESETS[preset.value].items():
             bot.settings.set(scope_name, scope_id, key, value)
         await _reply(interaction, f"{where}：已切到「{preset.value}」档（{_preset_text(PRESETS[preset.value])}）。")
@@ -184,13 +290,17 @@ def register_commands(bot: "DSBot") -> None:
     @admin.command(name="设置", description="调整单项参数（值填“默认”恢复）")
     @app_commands.rename(key="参数", value="值", scope="范围")
     @app_commands.describe(
-        key="要改哪个参数", value="新的值；填“默认”恢复成上一级的设置", scope="只改本频道，还是作为全服务器默认（不选 = 本频道）"
+        key="要改哪个参数", value="新的值；填“默认”恢复成上一级的设置", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）"
     )
     @app_commands.choices(key=[Choice(name=SPECS[k].label, value=k) for k in ADMIN_SET_KEYS], scope=SCOPE_CHOICES)
     async def set_cmd(
         interaction: discord.Interaction, key: Choice[str], value: str, scope: Optional[Choice[str]] = None
     ) -> None:
-        scope_name, scope_id, where = _where(interaction, scope)
+        target = _target(interaction, scope)
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
         spec = SPECS[key.value]
         if value.strip() in RESET_WORDS:
             bot.settings.unset(scope_name, scope_id, key.value)
@@ -205,15 +315,22 @@ def register_commands(bot: "DSBot") -> None:
 
     @admin.command(name="人设", description="修改人设（会弹出编辑框）")
     @app_commands.rename(scope="范围")
-    @app_commands.describe(scope="改全服务器的人设，还是只改本频道（不选 = 全服务器）")
+    @app_commands.describe(scope="全服务器、本类别，还是只改本频道（不选 = 全服务器）")
     @app_commands.choices(scope=SCOPE_CHOICES)
     async def persona_cmd(interaction: discord.Interaction, scope: Optional[Choice[str]] = None) -> None:
-        scope_name, scope_id, where = _where(interaction, scope, default="guild")
-        # “上一级”：服务器的上一级是全局默认；频道的上一级是帖子所在频道 → 服务器 → 全局
+        target = _target(interaction, scope, default="guild")
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
+        guild_id, _, parent_id, category_id = _ids(interaction)
+        # “上一级”：服务器 → 全局；类别 → 服务器；频道 → 帖子所在频道 → 类别 → 服务器
         if scope_name == "guild":
             inherited = bot.settings.get("persona")
+        elif scope_name == "category":
+            inherited = bot.settings.get("persona", guild_id=guild_id)
         else:
-            inherited = bot.settings.get("persona", guild_id=interaction.guild_id, channel_id=_parent_id(interaction))
+            inherited = bot.settings.get("persona", guild_id=guild_id, channel_id=parent_id, category_id=category_id)
         inherited = inherited or DEFAULT_PERSONA
         current = bot.settings.overrides(scope_name, scope_id).get("persona") or inherited
         await interaction.response.send_modal(PersonaModal(bot, scope_name, scope_id, where, current, inherited))
@@ -266,7 +383,7 @@ def register_commands(bot: "DSBot") -> None:
         if not await is_owner(interaction):
             return
         if target and target.strip():
-            if not target.strip().isdigit():
+            if not target.strip().isdecimal():
                 await _reply(interaction, "服务器 ID 应该是一串数字（右键服务器 → 复制服务器 ID）。")
                 return
             scope_name, scope_id = "guild", int(target.strip())

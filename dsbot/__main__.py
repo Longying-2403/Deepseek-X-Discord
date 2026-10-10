@@ -19,6 +19,42 @@ def _load_dotenv() -> None:
     load_dotenv()
 
 
+def check_files() -> None:
+    """读文件需要的组件：真的开一个解析子进程读一个小 Word 文件。"""
+    import asyncio
+    import io
+    import zipfile
+
+    try:
+        import pypdf
+
+        print(f"✓ PDF 支持：pypdf {pypdf.__version__}")
+    except ImportError:
+        print("✗ 没装 pypdf，读不了 PDF（pip install -r requirements.txt）")
+
+    from .files import read_file
+
+    xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>自检</w:t></w:r></w:p></w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", xml)
+    result = asyncio.run(read_file(buf.getvalue(), "check.docx", None, 100))
+    if result.text == "自检":
+        print("✓ 文件解析子进程正常")
+    else:
+        print(f"✗ 文件解析子进程出问题：{result.error or result}")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        from .files import _child_user
+
+        if _child_user():
+            print("✓ 解析子进程以 nobody 用户运行，读不到 token 和 API key")
+        else:
+            print("! 解析子进程没法降成 nobody（bot 的代码或装的库别的用户读不到），会以 root 运行")
+
+
 def check(config_path: str) -> int:
     """离线自检：配置能不能读、斜杠命令定义是否合法（不连 Discord、不花钱）。"""
     from .discord_app import DSBot
@@ -35,6 +71,7 @@ def check(config_path: str) -> int:
     except SystemExit as exc:
         print(f"✗ {exc}")
         secrets = Secrets("x", "x", 0, control_guild_id=1)
+    check_files()
 
     store = Store(":memory:")
     bot = DSBot(
@@ -85,6 +122,7 @@ def main() -> int:
     from .settings import Settings
     from .store import Store
 
+    os.umask(0o077)  # 数据库里有聊天记录：新建的文件只给自己读写
     store = Store(cfg.bot.database)
     bot = DSBot(
         cfg,

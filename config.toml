@@ -26,6 +26,7 @@ peak_hours_utc = [[1, 4], [6, 10]]  # 周一到周五，UTC
 
 [defaults]
 # —— 管理员可以在 Discord 里用 /ds 改的 ——
+enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /ds 区域 允许 的地方回（白名单）
 proactive = false                 # 主动发言默认关，在需要的频道里用 /ds 主动 打开
 refill_turns = 15                 # 别人每说 15 轮，恢复 1 次主动发言额度
 quota_capacity = 3                # 额度最多攒 3 次（热聊时最多连插 3 句）
@@ -44,6 +45,7 @@ daily_budget_usd = 1.0            # 单个服务器每天最多花多少美元�
 global_daily_budget_usd = 3.0     # 所有服务器加起来的上限
 context_budget_tokens = 30000     # 上下文超过这么多 token，就把最早的一半压成摘要（最大 200000）
 vision = true                     # 是否把群里的图片发给模型
+files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
 
 [engine]
 # 一般不用动
@@ -54,6 +56,11 @@ max_chars_per_message = 1200      # 单条消息进上下文前截断
 max_images_per_round = 4
 image_max_side = 1024             # 叫到它的那条消息里的图片
 low_detail_max_side = 512         # 其他图片（模型那边也只按 512×512 看）
+file_max_bytes = 20000000         # 文件超过 20 MB 不读
+file_max_chars = 20000            # 单个文件最多读 2 万字（太长只读前面）
+file_round_max_chars = 40000      # 一轮里所有文件加起来最多 4 万字
+max_files_per_round = 3
+file_timeout_seconds = 30         # 解析一个文件最多等 30 秒
 turn_merge_seconds = 20           # 同一个人 20 秒内连发算一轮
 react_cost = 0.3                  # 只加表情消耗多少额度
 typing_chars_per_second = 3.0     # “打字”速度

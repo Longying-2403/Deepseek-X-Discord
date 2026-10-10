@@ -10,9 +10,59 @@ from typing import Any, Awaitable, Callable
 class ImageAttachment:
     filename: str
     content_type: str | None
-    size: int
+    size: int  # 0 = 不知道（链接预览、贴图）
     # 下载原图的协程函数（Discord 层传 attachment.read），测试里可以塞假的
     fetch: Callable[[], Awaitable[bytes]] | None = field(default=None, repr=False, compare=False)
+    kind: str = "image"  # image（上传的图）/ gif（GIF 链接的预览帧）/ sticker（贴图）
+
+
+@dataclass
+class FileAttachment:
+    """群友上传的非图片文件。"""
+
+    filename: str
+    content_type: str | None
+    size: int
+    fetch: Callable[[], Awaitable[bytes]] | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass
+class FileText:
+    """读文件的结果。error 不为空表示没读出来（error 是给模型看的原因）。"""
+
+    kind: str = ""  # 给模型看的类型：文本 / PDF / Word 文档 / Excel 表格 / PPT
+    text: str = ""
+    detail: str = ""  # 比如“共 12 页，只读到第 8 页”
+    error: str = ""
+    images: list[str] = field(default_factory=list)  # 扫描版 PDF 的页面图（data URI）
+    transient: bool = False  # 没读成是暂时的（下载失败、名额用完），之后可以再试
+    truncated: bool = False  # 文件太长，只读了前面一部分
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "FileText":
+        if not isinstance(data, dict):
+            return cls(error="解析失败")
+        from .textutil import clean_text
+
+        images = [x for x in data.get("images") or [] if isinstance(x, str) and x.startswith("data:image/")]
+        return cls(
+            kind=clean_text(str(data.get("kind") or "")),
+            text=clean_text(str(data.get("text") or "")),
+            detail=clean_text(str(data.get("detail") or "")),
+            error=clean_text(str(data.get("error") or "")),
+            images=images,
+            transient=bool(data.get("transient")),
+            truncated=bool(data.get("truncated")),
+        )
+
+
+@dataclass
+class DocBlock:
+    """要放进聊天记录的一个文件内容块。"""
+
+    label: str  # 文件所在的消息，比如 "#12"；不知道编号时是 "之前"
+    filename: str
+    result: FileText
 
 
 @dataclass
@@ -25,14 +75,16 @@ class IncomingMessage:
     text: str
     is_bot: bool = False
     parent_id: int | None = None  # 帖子（thread）所属的频道
+    category_id: int | None = None  # 所在类别（Discord 里的“XX区”）
     reply_to_id: int | None = None
     reply_to_bot: bool = False  # 回复的是 bot 自己的消息
     mentions_bot: bool = False  # @了 bot（含 @bot 的身份组、别名）
     images: list[ImageAttachment] = field(default_factory=list)
-    files: list[str] = field(default_factory=list)
+    files: list[FileAttachment] = field(default_factory=list)
     stickers: list[str] = field(default_factory=list)
     received_at: float = 0.0
     trigger: bool = False  # 引擎设置：这条点名通过了限速，需要立刻回应
+    awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
 
     @property
     def addressed(self) -> bool:
@@ -42,12 +94,14 @@ class IncomingMessage:
 
 @dataclass
 class Action:
-    kind: str  # "reply" | "react"
+    kind: str  # "reply" | "react" | "read"
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
 
     def to_json(self) -> dict[str, Any]:
+        if self.kind == "read":
+            return {"type": "read", "to": self.to}
         if self.kind == "react":
             d: dict[str, Any] = {"type": "react"}
             if self.to is not None:

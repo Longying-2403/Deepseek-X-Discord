@@ -79,7 +79,7 @@ class Convert(unittest.TestCase):
         m = convert(fake_message(attachments=atts, stickers=[NS(name="猫猫")], clean_content="<:pepe:123456789012345678>"))
         self.assertEqual([i.filename for i in m.images], ["cat.PNG", "photo"])
         self.assertEqual(m.images[1].content_type, "image/jpeg")
-        self.assertEqual(m.files, ["report.pdf"])
+        self.assertEqual([(f.filename, f.content_type, f.size) for f in m.files], [("report.pdf", "application/pdf", 30)])
         self.assertEqual(m.stickers, ["猫猫"])
         self.assertEqual(m.text, ":pepe:")
 
@@ -107,6 +107,111 @@ class ConvertRegressions(unittest.TestCase):
     def test_reply_type_still_reply(self):
         ref = NS(message_id=400, channel_id=100, resolved=NS(author=NS(id=ME)), type=NS(value=0))
         self.assertTrue(convert(fake_message(reference=ref)).reply_to_bot)
+
+
+
+def embed(etype, *, url=None, thumb=None, proxy=None, image=None, title=None, provider=None):
+    return NS(
+        type=etype,
+        url=url,
+        title=title,
+        provider=NS(name=provider),
+        thumbnail=NS(url=thumb, proxy_url=proxy),
+        image=NS(url=image, proxy_url=None),
+    )
+
+
+class Embeds(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.fetched = []
+
+        async def fetch_url(url):
+            self.fetched.append(url)
+            return b"img"
+
+        self.fetch_url = fetch_url
+
+    def conv(self, message):
+        return convert_message(message, me_id=ME, aliases=[], is_ours=lambda mid: False, fetch_url=self.fetch_url)
+
+    async def test_gif_picker_tenor(self):
+        link = "https://tenor.com/view/cat-tongue-123"
+        m = self.conv(fake_message(
+            clean_content=link,
+            embeds=[embed("gifv", url=link, thumb="https://media.tenor.com/x.png", proxy="https://images-ext-1.discordapp.net/x.png")],
+        ))
+        self.assertEqual([(i.kind, i.size) for i in m.images], [("gif", 0)])
+        self.assertEqual(m.text, "")  # 链接换成了 [GIF] 标记
+        self.assertFalse(m.awaiting_embeds)
+        self.assertEqual(await m.images[0].fetch(), b"img")
+        self.assertEqual(self.fetched, ["https://images-ext-1.discordapp.net/x.png"])  # 走 Discord 的图片代理
+
+    async def test_image_links(self):
+        m = self.conv(fake_message(
+            clean_content="看 https://x.com/a.png 和 https://x.com/b.gif",
+            embeds=[
+                embed("image", url="https://x.com/a.png", thumb="https://x.com/a.png"),
+                embed("image", url="https://x.com/b.gif", thumb="https://x.com/b.gif"),
+            ],
+        ))
+        self.assertEqual([i.kind for i in m.images], ["image", "gif"])
+        self.assertEqual(m.text, "看  和")
+
+    async def test_article_preview_becomes_text(self):
+        m = self.conv(fake_message(
+            clean_content="https://youtu.be/abc",
+            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", title="猫猫合集", provider="YouTube")],
+        ))
+        self.assertEqual(m.images, [])
+        self.assertEqual(m.text, "https://youtu.be/abc [链接预览: YouTube - 猫猫合集]")
+
+    async def test_stickers(self):
+        stickers = [
+            NS(name="猫猫", format=NS(value=1), url="https://media.discordapp.net/stickers/1.png"),
+            NS(name="动画", format=NS(value=3), url="https://media.discordapp.net/stickers/2.json"),
+        ]
+        m = self.conv(fake_message(stickers=stickers))
+        self.assertEqual(m.stickers, ["猫猫", "动画"])
+        self.assertEqual([(i.filename, i.kind) for i in m.images], [("猫猫", "sticker")])
+
+    async def test_awaiting_embeds_flag(self):
+        self.assertTrue(self.conv(fake_message(clean_content="https://tenor.com/view/x")).awaiting_embeds)
+        self.assertFalse(self.conv(fake_message(clean_content="没有链接")).awaiting_embeds)
+
+    async def test_without_fetcher_no_link_images(self):
+        m = convert_message(
+            fake_message(clean_content="x", embeds=[embed("gifv", url="x", proxy="https://p/x.png")]),
+            me_id=ME, aliases=[], is_ours=lambda mid: False,
+        )
+        self.assertEqual(m.images, [])
+
+    async def test_category(self):
+        self.assertEqual(self.conv(fake_message(channel=NS(id=100, category_id=50))).category_id, 50)
+
+        class Thread:  # 所在频道没缓存时 discord.py 的 category_id 会抛异常
+            id = 300
+            parent_id = 100
+
+            @property
+            def category_id(self):
+                raise RuntimeError("Parent channel not found")
+
+        m = self.conv(fake_message(channel=Thread()))
+        self.assertEqual((m.parent_id, m.category_id), (100, None))
+
+
+
+class MoreAttachments(unittest.TestCase):
+    def test_other_attachments_become_files(self):
+        atts = [NS(filename="old.bmp", content_type="image/bmp", size=10), NS(filename="周报.docx", content_type=None, size=20)]
+        m = convert(fake_message(attachments=atts))
+        self.assertEqual(m.images, [])  # BMP 不在主进程里解码，按文件处理（会告诉对方发 PNG/JPG）
+        self.assertEqual([f.filename for f in m.files], ["old.bmp", "周报.docx"])
+        self.assertIsNotNone(m.files[1].fetch)
+
+    def test_lone_surrogates_are_cleaned(self):
+        m = convert(fake_message(clean_content="坏\ud800字", author=NS(id=11, display_name="名\udfff", bot=False)))
+        self.assertEqual((m.text, m.author_name), ("坏?字", "名?"))
 
 
 if __name__ == "__main__":
