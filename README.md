@@ -11,7 +11,9 @@
 - **像真人**：回复短、口语化；先显示“正在输入”，按字数等几秒再发；可以把一段话拆成两三条，或只加个表情。
 - **话量可控**：主动发言额度按群里的消息量恢复，群越热闹恢复越快；档位和各项参数都能在 Discord 里调。
 - **省钱**：对话历史只追加不改写，尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
-- **能看图**：群友发的截图、梗图会一起发给模型（可关）。
+- **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
+- **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
+- **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
 A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like a regular member:
 
@@ -20,7 +22,9 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Feels human**: short, casual replies; shows "typing…" and waits a few seconds based on length before sending; may split a reply into two or three messages, or just react with an emoji.
 - **Controllable chattiness**: proactive messages draw from a quota that refills with the channel's message volume, so the busier the chat, the faster it refills. Presets and individual settings can all be changed inside Discord.
 - **Cheap to run**: conversation history is append-only to get the most out of DeepSeek's prefix cache; no model call at all when the quota is empty; automatic fallback when the daily budget runs out.
-- **Sees images**: screenshots and memes posted in the chat are sent to the model too (can be turned off).
+- **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links and Discord stickers are all sent to the model (only the first frame of animated images; can be turned off).
+- **Reads files**: text and code, PDF (for scanned PDFs it looks at the first few pages as images), Word, Excel and PowerPoint. Files attached when someone calls it are read right away; for requests like "take a look at that file above", it opens the file itself.
+- **Stays where you want it**: you can limit where it responds by channel, category or the whole server.
 
 Setup, commands and settings in English: [README.en.md](README.en.md)
 
@@ -84,12 +88,13 @@ python -m dsbot
 
 在服务器里（需要“管理服务器”权限）：
 
-1. 在想让它主动聊天的频道里：`/ds 主动 开关:开`
-2. 选个话量：`/ds 档位`（安静 / 普通 / 话痨）
-3. 给它定人设：`/ds 人设`（弹出编辑框）
-4. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率）
+1. 先圈定它能待的地方（可选）：`/ds 区域 操作:禁止 范围:全服务器`，再到要用的频道执行 `/ds 区域 操作:允许`，或者选 `范围:本类别` 放开整个区
+2. 在想让它主动聊天的频道里：`/ds 主动 开关:开`
+3. 选个话量：`/ds 档位`（安静 / 普通 / 话痨）
+4. 给它定人设：`/ds 人设`（弹出编辑框）
+5. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率）；`/ds 区域列表` 看它在哪些地方会回应
 
-没开主动发言的频道里，它只在被叫到时说话。
+不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
 
 > 建议在频道说明里告诉大家：这个频道的消息会发给 DeepSeek（服务托管在中国）处理。
 
@@ -101,14 +106,20 @@ python -m dsbot
 
 | 命令 | 作用 |
 |---|---|
-| `/ds 主动` | 开关主动发言。范围默认是本频道，也可以设为全服务器默认 |
+| `/ds 区域` | 允许 / 禁止 / 跟随上级。不允许的地方它完全不看消息：不回 @、不主动说话，也不发给 DeepSeek |
+| `/ds 区域列表` | 列出这个服务器里允许和禁止的类别、频道，以及主动发言开着的地方 |
+| `/ds 主动` | 开关主动发言 |
 | `/ds 档位` | 一键套用：安静 / 普通 / 话痨 |
 | `/ds 设置` | 调整单项参数，值填“默认”可恢复 |
-| `/ds 人设` | 修改人设（全服务器或本频道） |
+| `/ds 人设` | 修改人设（弹出编辑框） |
 | `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费 |
 | `/ds 清空记忆` | 清空本频道的对话记录和摘要 |
 
-设置的优先级：**本频道 > 帖子所在的频道 > 本服务器 > 主人设的全局值 > config.toml**。
+除了“区域列表”“状态”和“清空记忆”，这些命令都有一个“范围”选项：**本频道**（默认，人设除外）、**本类别**（Discord 里的“XX区”）、**全服务器**。
+
+设置的优先级：**本频道 > 帖子所在的频道 > 所在类别 > 本服务器 > 主人设的全局值 > config.toml**。比如全服务器禁止、“闲聊区”类别允许、其中某个频道又单独禁止，结果就是只有闲聊区里除那个频道以外的地方会回应。
+
+> 想彻底隔开某些频道，也可以直接在 Discord 的频道权限里去掉 bot 的“查看频道”，那样消息根本不会传给 bot。
 
 ### `/dsowner`（只有你；只注册在 `CONTROL_GUILD_ID` 那个服务器）
 
@@ -133,7 +144,9 @@ python -m dsbot
 | 冷场秒数 | 30 | 多久没人说话、也没人在打字，算冷场 |
 | 最长等待秒 | 180 | 一直没冷场时，最多等多久也判断一次 |
 | 每人每分钟点名 | 3 | 防止有人连续 @ 刷它 |
-| 别名 | 空 | 消息里出现这些名字也算叫它，逗号分隔，如 `DS,小D` |
+| 别名 | 空 | 消息里出现这些名字也算叫它，逗号分隔，如 `DS,小D`。英文别名要整词出现（`DS` 不会匹配 words） |
+
+区域（`/ds 区域`）对应的参数叫“允许回应”，默认开。想让所有服务器一开始就是白名单模式，把 `config.toml` 里的 `enabled` 改成 `false`。
 
 只有你能调（`config.toml` 或 `/dsowner 设置`）：
 
@@ -146,12 +159,41 @@ python -m dsbot
 | 全局每日预算美元 | 3.0 | 所有服务器加起来的上限 |
 | 上下文预算 | 30000 | 上下文超过这么多 token，就把最早的一半压成摘要 |
 | 看图 | 开 | 是否把图片发给模型 |
+| 读文件 | 开 | 是否读取群友上传的文件 |
 
 “一轮”的意思：同一个人 20 秒内连发的几条算一轮，免得分行打字刷额度。
 
 ---
 
-## 六、它是怎么工作的
+## 六、读文件
+
+**能读的**：
+
+| 类型 | 说明 |
+|---|---|
+| 文本、代码 | txt、md、csv、json、py、js、ts、html、日志、字幕……；UTF-8 以外，老的 GBK / Big5 文件也能认，日文（Shift_JIS / EUC-JP）、韩文（EUC-KR）的老文件也行。只有一两行的老编码文件可能认错，认不准时按中文处理 |
+| PDF | 读文字，标出页码；没有文字的扫描件改成看前 3 页的图；只限制了打印/复制的 PDF 也能读，有打开密码的读不了 |
+| Word / Excel / PPT | .docx、.xlsx、.pptx。表格按行列转成文字，Excel 的日期、百分比按显示格式转换；很大的表只读前面 |
+
+读不了的会直接告诉对方原因：老格式（.doc / .xls / .ppt，另存为新格式就行）、设了密码的文件、压缩包、音频、视频、HEIC/BMP 之类的图片格式等。
+
+**什么时候读**：
+
+- 直接读：叫它的那条消息里带的文件、叫它时回复的那条消息里的文件、同一个人两分钟内刚发的文件。
+- 被叫到时按需读：比如“帮小雨看看上面那个 PDF”，模型会先说要打开哪条消息的文件，bot 读完再交给它回答。这样多一次调用，回复会慢几秒。
+- 没人叫它时不读文件，只知道有人发了什么文件。例外是 Discord 把太长的消息自动转成的 message.txt，会像普通长消息一样看开头。
+
+**限制**（都在 `config.toml` 的 `[engine]` 里改）：单个文件 20 MB 以内；每个文件最多读 2 万字，太长只读前面，会告诉模型读到了哪里；一轮最多 3 个文件、总共 4 万字（包括它自己要求打开的）。读不了的文件不占名额；一条消息里文件太多、或者额度只够读一部分时，剩下的之后叫它会接着读。确定读不了的文件（格式不支持、坏文件）只说一次，之后不会每次都再试，除非明确让它再打开。
+
+**内容会留在对话记忆里**，所以可以接着问“第三页说了什么”。文件比较大时会多占一些上下文，但之后的请求基本都是缓存命中，费用很低；等它变成旧记录后，会和别的旧聊天一起压成摘要。上下文实在太长时（超过预算两倍、而且超过 10 万 token，比如连着读了好几个大文件）会马上压一次，不等它变旧。
+
+**安全**：所有文件都在单独的子进程里解析，限制了内存（1 GB）、CPU 和时间（30 秒），坏文件或恶意文件最多让这一次读取失败，不会卡住 bot。用 Docker 部署时 bot 以 root 运行，解析子进程会降成 `nobody` 用户，读不到 bot 进程里的 token 和 API key。不用 Docker 时不一定有这一层隔离：以普通用户运行不会降权；以 root 运行时，只有 Python、bot 的代码和装的库别的用户也读得到才会降权（比如库装在 `/root` 下就不会），否则照常以当前用户解析，日志里会提醒一次。`python -m dsbot --check` 会显示有没有降权。文件内容和聊天记录一样，会发给 DeepSeek 处理。
+
+**隐私**：聊天记录和读过的文件内容存在 `./data/` 的数据库里，文件权限是只有 bot 自己能读写（NAS 上别的账号看不到）。
+
+---
+
+## 七、它是怎么工作的
 
 ```
 消息进来 ──► 存进该频道的缓冲区
@@ -161,22 +203,24 @@ python -m dsbot
               └─ 每 5 秒检查：开了主动 + 有新消息 + (冷场 或 等太久)
                               + 有额度 + 间隔够 + 没超预算 ──► 跑一轮
 
-一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息
+一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息（该读的文件内容跟在后面）
       → 连同全部历史发给 DeepSeek（JSON 输出）
-      → 模型返回 {"actions": [...]}：回复 / 加表情 / 什么都不做
+      → 模型返回 {"actions": [...]}：回复 / 加表情 / 看文件 / 什么都不做
+        （要看文件时：读完把内容追加进去，再问它一次）
       → 这一轮的 user + assistant 原样追加进历史（沉默也记）
       → 显示“正在输入”，按字数等几秒再发
 ```
 
-**缓存**：历史只追加、不改写，system prompt 固定（时间等会变的信息放在每轮消息里），所以每次请求都以上一次的请求开头，绝大部分输入按缓存命中价计费（便宜约 50 倍）。上下文太长时一次性把旧的一半压成摘要，只在那一次 miss。日志里每轮都会打印输入 token 数和命中数。
+**缓存**：历史只追加、不改写，system prompt 固定（时间等会变的信息放在每轮消息里），所以每次请求都以上一次的请求开头，绝大部分输入按缓存命中价计费（便宜约 50 倍）。上下文太长时把较旧的一半（按 token 估算）压成摘要，最近 6 轮不动，只在那一次 miss。日志里每轮都会打印输入 token 数和命中数。
 
 **费用参考**（高峰价，3 万 token 上下文，缓存正常时只有新消息那几百 token 未命中）：一次判断约 0.04–0.06 美分（开思考会多一些推理 token）；一个频道全天热聊、每 3 分钟判断一次，一天约 5–10 美分。非高峰时段（含周末）半价。价格变动时改 `config.toml` 的 `[pricing]`。
 
 ---
 
-## 七、常见问题
+## 八、常见问题
 
 **@ 它没反应**
+- 这个频道不在允许的区域：`/ds 状态` 第一行会提示，`/ds 区域列表` 看整体设置。
 - 后台的 Message Content Intent 没打开（日志里会报 4014 之类的错误）。
 - 频道里没给 bot 发送消息的权限。
 - 你 @ 的可能是它的身份组而不是它本人——这也能识别，但如果服务器把它的身份组隐藏了就看不到。
@@ -186,6 +230,10 @@ python -m dsbot
 - 模型默认倾向沉默。想让它更活跃：`/ds 档位 话痨`，或在人设里写“你很爱聊天”。
 
 **换了人设但说话风格没变**：历史里还有旧风格的发言，`/ds 清空记忆` 后重新开始。
+
+**GIF 说看不到**：GIF 选单发的 GIF 其实是一个链接，Discord 过一两秒才补上预览图。它会读这个预览图（动图的第一帧）；如果 @ 它的那条消息自己就带链接，它会先等两秒再回。网页链接（比如 YouTube）只读标题，不看缩略图。
+
+**它说文件读不了**：看它说的原因。常见的是老格式（.doc/.xls/.ppt）、设了打开密码的文件、超过 20 MB。如果它说“解析文件的进程启动不了”，是 bot 这边的问题（日志里有详细原因，多半是权限），修好后再叫它读就行。`python -m dsbot --check`（Docker 里是 `docker compose exec dsbot python -m dsbot --check`）会检查 PDF 组件和解析子进程是否正常。
 
 **DeepSeek 余额不足**：bot 会暂停调用 10 分钟并在日志里提示，充值后自动恢复。暂停期间有人叫它，会给那条消息加个 ⚠️。
 
@@ -197,7 +245,7 @@ python -m dsbot
 
 ---
 
-## 八、开发
+## 九、开发
 
 欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤和几条设计约束。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。
 
@@ -205,11 +253,14 @@ python -m dsbot
 python -m unittest discover -s tests      # 核心逻辑测试，不需要装 discord.py
 ```
 
+读文件的测试会用 python-docx、openpyxl、python-pptx、reportlab 现场生成真实文件（只是测试用，bot 运行不需要它们；`pip install -r requirements-dev.txt` 会一起装上），没装的话对应测试会跳过。
+
 | 文件 | 作用 |
 |---|---|
 | `dsbot/engine.py` | 调度引擎：缓冲、时机判断、额度、预算、执行动作、压缩摘要 |
 | `dsbot/render.py` / `prompts.py` | 聊天记录渲染格式、system prompt |
 | `dsbot/llm.py` | DeepSeek HTTP 客户端（思考开关、JSON 模式、用量解析） |
+| `dsbot/files.py` | 读文件：分类、解码、PDF / Office 解析、解析子进程 |
 | `dsbot/discord_app.py` / `convert.py` | Discord 事件与消息转换、发送、表情、“正在输入” |
 | `dsbot/commands.py` | 斜杠命令和人设编辑框 |
 | `dsbot/config.py` / `settings.py` | 配置、参数定义与分层覆盖 |

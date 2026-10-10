@@ -99,6 +99,9 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
             if isinstance(emoji, str) and 0 < len(emoji.strip()) <= 64 and to not in reacted:
                 reacted.add(to)
                 actions.append(Action("react", to, emoji=emoji.strip()))
+        elif kind in ("read", "read_file", "open", "look"):
+            if to is not None and not any(a.kind == "read" and a.to == to for a in actions):
+                actions.append(Action("read", to))
         elif kind in ("pass", "none", "silence"):
             continue
     return actions, True

@@ -10,6 +10,15 @@ _CUSTOM_EMOJI = re.compile(r"<a?:(\w{1,64}):\d{5,25}>")
 _FENCE = re.compile(r"^\s*```(\S*)")
 
 
+def clean_text(text: str) -> str:
+    """去掉不成对的代理字符（\\ud800 之类）。它们存数据库、发请求时都会出错。"""
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def clean_custom_emoji(text: str) -> str:
     """<:pepe:123> -> :pepe:"""
     return _CUSTOM_EMOJI.sub(r":\1:", text)

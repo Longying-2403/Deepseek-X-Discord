@@ -33,6 +33,7 @@ class Spec:
 
 _SPEC_LIST = [
     # —— 管理员 ——
+    Spec("enabled", "允许回应", bool, "admin", "关掉后这里的消息它完全不看：不回 @、不主动说话，也不会发给 DeepSeek"),
     Spec("proactive", "主动发言", bool, "admin", "没被点名时，是否自己判断要不要说话"),
     Spec("refill_turns", "额度恢复轮数", int, "admin", "别人每说这么多轮，恢复 1 次主动发言额度", 1, 500),
     Spec("quota_capacity", "额度上限", int, "admin", "主动发言额度最多攒几次", 1, 20),
@@ -48,8 +49,9 @@ _SPEC_LIST = [
     Spec("mention_thinking", "点名回复思考", str, "owner", "被叫到时的思考强度", choices=("off", "low", "high")),
     Spec("daily_budget_usd", "每日预算美元", float, "owner", "单个服务器每天最多花多少美元，超了只回点名", 0, 1000),
     Spec("global_daily_budget_usd", "全局每日预算美元", float, "owner", "所有服务器加起来每天最多花多少美元", 0, 10000),
-    Spec("context_budget_tokens", "上下文预算", int, "owner", "上下文超过这么多 token 就把旧记录压成摘要", 4000, 200000),
+    Spec("context_budget_tokens", "上下文预算", int, "owner", "上下文超过这么多 token 就把旧记录压成摘要", 8000, 200000),
     Spec("vision", "看图", bool, "owner", "是否把群里的图片发给模型"),
+    Spec("files", "读文件", bool, "owner", "是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）"),
 ]
 
 SPECS: dict[str, Spec] = {s.key: s for s in _SPEC_LIST}
@@ -57,6 +59,7 @@ ADMIN_KEYS = [s.key for s in _SPEC_LIST if s.level == "admin"]
 OWNER_KEYS = [s.key for s in _SPEC_LIST if s.level == "owner"]
 
 BUILTIN_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
     "proactive": False,
     "refill_turns": 15,
     "quota_capacity": 3,
@@ -73,6 +76,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "global_daily_budget_usd": 3.0,
     "context_budget_tokens": 30000,
     "vision": True,
+    "files": True,
 }
 
 # 一键档位：只动“话量”相关的三个参数
@@ -170,6 +174,11 @@ class EngineConfig:
     max_images_per_round: int = 4
     image_max_side: int = 1024  # 叫到它的那条消息里的图片：缩到最长边多少像素
     low_detail_max_side: int = 512  # 其他图片（detail=low，模型那边也只看 512×512）
+    file_max_bytes: int = 20_000_000  # 文件超过这个大小不读
+    file_max_chars: int = 20000  # 单个文件最多读多少字
+    file_round_max_chars: int = 40000  # 一轮里所有文件加起来最多多少字
+    max_files_per_round: int = 3
+    file_timeout_seconds: float = 30.0  # 解析一个文件最多等多久
     turn_merge_seconds: float = 20.0  # 同一个人这么多秒内连发算一轮
     react_cost: float = 0.3  # 只加表情时消耗多少额度
     typing_chars_per_second: float = 3.0

@@ -4,6 +4,7 @@ import unittest
 from helpers import CHANNEL, GUILD, make_engine, msg
 
 from dsbot.llm import LLMError
+from dsbot.render import content_text
 from dsbot.models import ImageAttachment
 
 REPLY = lambda to, *texts: json.dumps(  # noqa: E731
@@ -25,7 +26,7 @@ class MentionPath(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.sent, [(CHANNEL, "在呢", 501, True)])
         user = call["messages"][-1]["content"]
         self.assertIn("#1 阿明：@小D 在吗 〔@你〕", user)
-        self.assertIn("（#1 在叫你，回应一下。）", user)
+        self.assertIn("（#1 在叫你，回应一下，用对方那条消息的语言回。）", user)
         st = engine.states[CHANNEL]
         self.assertEqual(st.pending, [])
         self.assertEqual(len(st.conversation.turns), 2)
@@ -83,7 +84,7 @@ class MentionPath(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(llm.calls), 1)  # 三条合并成一轮
         user = llm.calls[0]["messages"][-1]["content"]
         self.assertEqual(user.count("〔@你〕"), 3)  # 都标出来了
-        self.assertIn("（#1、#2 在叫你，回应一下。）", user)  # 但只有前两次算数
+        self.assertIn("（#1、#2 在叫你，回应一下，用对方那条消息的语言回。）", user)  # 但只有前两次算数
 
     async def test_other_bots_never_trigger(self):
         engine, llm, transport, clock = make_engine(defaults={"proactive": True})
@@ -280,7 +281,7 @@ class Errors(unittest.IsolatedAsyncioTestCase):
 
 
 class Memory(unittest.IsolatedAsyncioTestCase):
-    async def test_compaction_replaces_oldest_half_with_summary(self):
+    async def test_compaction_keeps_recent_rounds_and_summarizes_old_ones(self):
         def responder(call):
             if not call["json_mode"]:
                 return "阿明喜欢火锅；小雨在找工作"
@@ -288,19 +289,22 @@ class Memory(unittest.IsolatedAsyncioTestCase):
 
         engine, llm, transport, clock = make_engine(responder, defaults={"context_budget_tokens": 4000})
         llm.prompt_tokens = 5000
-        for i in range(2):
+        for i in range(14):
             await engine.handle_message(msg(501 + i, f"@小D 第{i}轮", mentions_bot=True))
             await engine.drain()
             clock.advance(30)
 
         summary_calls = [c for c in llm.calls if not c["json_mode"]]
-        self.assertEqual(len(summary_calls), 1)
+        self.assertEqual(len(summary_calls), 1)  # 只压了一次，不是每轮都压
         self.assertIn("第0轮", summary_calls[0]["messages"][1]["content"])
         conv = engine.states[CHANNEL].conversation
         self.assertEqual(conv.summary, "阿明喜欢火锅；小雨在找工作")
-        self.assertEqual(len(conv.turns), 2)
+        last_rounds = [content_text(t.content) for t in conv.turns if t.role == "user"]
+        self.assertTrue(any("第13轮" in x for x in last_rounds))
+        self.assertGreaterEqual(len(conv.turns), 12)  # 最近 6 轮完整保留
+        self.assertFalse(any("第0轮" in x for x in last_rounds))
 
-        await engine.handle_message(msg(510, "@小D 还记得吗", mentions_bot=True))
+        await engine.handle_message(msg(520, "@小D 还记得吗", mentions_bot=True))
         await engine.drain()
         chat_calls = [c for c in llm.calls if c["json_mode"]]
         system = chat_calls[-1]["messages"][0]["content"]
@@ -488,7 +492,7 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
         await engine.drain()
         user = llm.calls[0]["messages"][-1]["content"]
         self.assertIn("#1 阿明：@小D 帮个忙 〔@你〕", user)
-        self.assertIn("（#1 在叫你，回应一下。）", user)
+        self.assertIn("（#1 在叫你，回应一下，用对方那条消息的语言回。）", user)
         self.assertIn("（前面还有 5 条消息没显示）", user)
         self.assertEqual(transport.sent[0][2], 501)
 
@@ -543,6 +547,119 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
         await engine.tick()
         await engine.drain()
         self.assertEqual(llm.calls, [])
+
+
+
+class Areas(unittest.IsolatedAsyncioTestCase):
+    """区域开关：频道 > 帖子所在频道 > 类别 > 服务器。"""
+
+    async def test_disabled_channel_is_ignored_completely(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
+        engine.settings.set("channel", CHANNEL, "enabled", "关")
+        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.drain()
+        self.assertEqual(llm.calls, [])
+        self.assertNotIn(CHANNEL, engine.states)  # 连缓冲都没有
+
+    async def test_whitelist_by_category(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "在"))
+        engine.settings.set("guild", GUILD, "enabled", "关")
+        engine.settings.set("category", 50, "enabled", "开")
+        await engine.handle_message(msg(501, "@小D", mentions_bot=True, category_id=50))
+        await engine.handle_message(msg(502, "@小D", mentions_bot=True, channel_id=200, category_id=60))
+        await engine.drain()
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual([s[0] for s in transport.sent], [CHANNEL])
+
+    async def test_channel_setting_beats_category(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "在"))
+        engine.settings.set("category", 50, "enabled", "关")
+        engine.settings.set("channel", CHANNEL, "enabled", "开")
+        await engine.handle_message(msg(501, "@小D", mentions_bot=True, category_id=50))
+        await engine.drain()
+        self.assertEqual(len(llm.calls), 1)
+
+    async def test_thread_follows_parent_then_category(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "在"))
+        engine.settings.set("category", 50, "enabled", "关")
+        thread = dict(channel_id=300, parent_id=CHANNEL, category_id=50, mentions_bot=True)
+        await engine.handle_message(msg(501, "@小D", **thread))
+        await engine.drain()
+        self.assertEqual(llm.calls, [])
+        engine.settings.set("channel", CHANNEL, "enabled", "开")  # 放开帖子所在的频道
+        await engine.handle_message(msg(502, "@小D", **thread))
+        await engine.drain()
+        self.assertEqual(len(llm.calls), 1)
+
+    async def test_disabling_drops_buffered_messages(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "嗯"), defaults={"proactive": True})
+        await engine.handle_message(msg(501, "攒着的消息"))
+        engine.settings.set("channel", CHANNEL, "enabled", "关")
+        clock.advance(60)
+        await engine.tick()
+        await engine.drain()
+        self.assertEqual(llm.calls, [])  # 主动发言也停了
+        engine.settings.set("channel", CHANNEL, "enabled", "开")
+        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        await engine.drain()
+        self.assertIn("攒着的消息", llm.calls[0]["messages"][-1]["content"])  # 关掉期间没再处理，重新打开时还在
+        engine.settings.set("channel", CHANNEL, "enabled", "关")
+        await engine.handle_message(msg(503, "关掉后说的话"))
+        self.assertEqual(engine.states[CHANNEL].pending, [])
+
+
+class LinkPreviews(unittest.IsolatedAsyncioTestCase):
+    """GIF 选单 / 图片链接：预览图晚一两秒才通过“消息更新”补上。"""
+
+    async def test_late_preview_is_merged_into_pending_message(self):
+        async def loader(att, max_side):
+            return "data:image/jpeg;base64," + att.filename
+
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(2, "笑死"), image_loader=loader)
+        await engine.handle_message(msg(501, "https://tenor.com/view/cat-123", awaiting_embeds=True))
+        updated = msg(501, "", images=[ImageAttachment("cat.png", None, 0, kind="gif")])
+        self.assertTrue(engine.refresh_message(updated))
+        await engine.handle_message(msg(502, "@小D 看这个", mentions_bot=True, author=12, name="小雨"))
+        await engine.drain()
+        content = llm.calls[0]["messages"][-1]["content"]
+        text = "".join(p.get("text", "") for p in content)
+        self.assertIn("#1 阿明：[GIF]", text)
+        self.assertNotIn("tenor.com", text)
+        self.assertEqual([p["image_url"]["url"] for p in content if p["type"] == "image_url"], ["data:image/jpeg;base64,cat.png"])
+
+    async def test_mention_with_link_waits_for_preview(self):
+        async def loader(att, max_side):
+            return "data:image/jpeg;base64," + att.filename
+
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "这猫好丑"), image_loader=loader)
+        waits = []
+
+        async def sleep(seconds):
+            waits.append(seconds)
+            if seconds == 2.0:  # 等待期间 Discord 推来了带预览的消息更新
+                engine.refresh_message(
+                    msg(501, "@小D 你看", mentions_bot=True, images=[ImageAttachment("cat.png", None, 0, kind="gif")])
+                )
+
+        engine.sleep = sleep
+        await engine.handle_message(msg(501, "@小D 你看 https://tenor.com/view/cat-1", mentions_bot=True, awaiting_embeds=True))
+        await engine.drain()
+        self.assertEqual(waits[0], 2.0)
+        content = llm.calls[0]["messages"][-1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[1]["image_url"]["detail"], "auto")  # 叫它的人发的图看清楚点
+
+    async def test_no_wait_without_links(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
+        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.drain()
+        self.assertEqual(len(engine.test_sleeps), 1)  # 只有“打字”那一次，没有等预览
+
+    async def test_refresh_after_round_is_ignored(self):
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
+        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.drain()
+        self.assertFalse(engine.refresh_message(msg(501, "改过的")))
 
 
 if __name__ == "__main__":
