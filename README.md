@@ -1,5 +1,7 @@
 # DeepSeek 群友（Discord Bot）
 
+**中文** | [English](README.en.md)
+
 [![tests](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml/badge.svg)](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml)
 
 一个用 DeepSeek V4.1 Flash（`deepseek-flash`）驱动、像普通群友一样待在 Discord 服务器里的 bot：

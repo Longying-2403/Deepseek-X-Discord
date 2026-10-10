@@ -60,6 +60,7 @@ python -m dsbot --check                # 离线自检：读配置、检查所有
 - 修 bug 时，尽量先补一个能复现它的测试。
 - 测试里不要真的连 Discord 或 DeepSeek。`tests/helpers.py` 里有现成的替身：`FakeLLM`（假模型）、`FakeTransport`（假 Discord）、`FakeClock`（可以手动拨快的时钟）。
 - 新增可调参数时，在 `dsbot/config.py` 的 `_SPEC_LIST` 和 `BUILTIN_DEFAULTS` 里各加一项，再同步更新 `config.toml` 和 README 的参数表。
+- 改了 `README.md` 的话，请同步更新英文版 `README.en.md`。英文不熟也可以只改中文，在 PR 里说一声就行。
 
 ## 提交 PR
 
