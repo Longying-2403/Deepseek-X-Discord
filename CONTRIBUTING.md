@@ -19,7 +19,7 @@ git clone https://github.com/<你的用户名>/Deepseek-X-Discord.git
 cd Deepseek-X-Discord
 python -m venv .venv
 source .venv/bin/activate          # Windows：.venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # 运行要的库，加上读文件的测试要用的库
 ```
 
 每次改完代码，跑这两条（都不连网、不花钱）：
@@ -52,6 +52,8 @@ python -m dsbot --check                # 离线自检：读配置、检查所有
 2. **没额度时连判断都不做。** 主动发言额度为 0 时，要跳过整次模型调用，而不是调用完再丢掉结果，那样照样花钱。
 3. **说话要像真人。** 短、口语化，不用标题、列表这类格式（贴代码除外），没有客服腔。改提示词时请保持这个风格。
 4. **不要提交密钥和数据。** `.env`（token、API key）和 `data/`（聊天记录数据库）已经写进 `.gitignore`，提交前用 `git status` 再确认一遍。
+5. **没被允许的区域完全不看。** 用 `/ds 区域` 禁止的地方，消息不处理、不回应，也绝不能发给 DeepSeek。新加处理消息的入口（比如新的 Discord 事件）时，也要先过这一关。
+6. **群友上传的文件只在子进程里解析。** 读文件要走 `dsbot/files.py` 里那个限制了内存、CPU 和时间的子进程（bot 以 root 运行时会降成 `nobody`），不要在 bot 主进程里直接解析上传的文件。
 
 ## 代码风格
 
@@ -60,7 +62,7 @@ python -m dsbot --check                # 离线自检：读配置、检查所有
 - 修 bug 时，尽量先补一个能复现它的测试。
 - 测试里不要真的连 Discord 或 DeepSeek。`tests/helpers.py` 里有现成的替身：`FakeLLM`（假模型）、`FakeTransport`（假 Discord）、`FakeClock`（可以手动拨快的时钟）。
 - 新增可调参数时，在 `dsbot/config.py` 的 `_SPEC_LIST` 和 `BUILTIN_DEFAULTS` 里各加一项，再同步更新 `config.toml` 和 README 的参数表。
-- 改了 `README.md` 的话，请同步更新英文版 `README.en.md`。英文不熟也可以只改中文，在 PR 里说一声就行。
+- 改了 `README.md` 的话，请同步更新英文版 `README.en.md`，`README.md` 开头那段英文介绍也是。英文不熟也可以只改中文，在 PR 里说一声就行。
 
 ## 提交 PR
 
