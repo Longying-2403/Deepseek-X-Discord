@@ -11,9 +11,11 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Feels human**: short, casual replies; shows "typing…" and waits a few seconds based on length before sending; may split a reply into two or three messages, or just react with an emoji.
 - **Controllable chattiness**: proactive messages draw from a quota that refills with the channel's message volume, so the busier the chat, the faster it refills. Presets and individual settings can all be changed inside Discord.
 - **Cheap to run**: conversation history is append-only to get the most out of DeepSeek's prefix cache; no model call at all when the quota is empty; automatic fallback when the daily budget runs out.
-- **Sees images**: screenshots and memes posted in the chat are sent to the model too (can be turned off).
+- **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links and Discord stickers are all sent to the model (only the first frame of animated images; can be turned off).
+- **Reads files**: text and code, PDF (for scanned PDFs it looks at the first few pages as images), Word, Excel and PowerPoint. Files attached when someone calls it are read right away; for requests like "take a look at that file above", it opens the file itself.
+- **Stays where you want it**: you can limit where it responds by channel, category or the whole server.
 
-> **Language note:** the slash commands, settings and log messages are in Chinese; this README explains what each one means. The bot itself replies in whatever language your group is chatting in, and you can write its persona in English.
+> **Language note:** the slash commands, settings and log messages are in Chinese; this README explains what each one means. The bot itself replies in the language of the message it's answering, and you can write its persona in English.
 
 ---
 
@@ -75,12 +77,13 @@ python -m dsbot
 
 In your server (requires the Manage Server permission):
 
-1. In a channel where you want it to join conversations on its own: `/ds 主动 开关:开` (proactive → on)
-2. Pick how chatty it is: `/ds 档位` (preset: 安静 quiet / 普通 normal / 话痨 chatty)
-3. Give it a persona: `/ds 人设` (opens an editor)
-4. Check on it any time: `/ds 状态` (status: quota, its last decision and reasoning, today's spending, cache hit rate)
+1. Decide where it may respond (optional): run `/ds 区域 操作:禁止 范围:全服务器` (area → deny, scope → whole server), then run `/ds 区域 操作:允许` (allow) in each channel you want it in, or choose `范围:本类别` (scope → this category) to open up a whole category
+2. In a channel where you want it to join conversations on its own: `/ds 主动 开关:开` (proactive → on)
+3. Pick how chatty it is: `/ds 档位` (preset: 安静 quiet / 普通 normal / 话痨 chatty)
+4. Give it a persona: `/ds 人设` (opens an editor)
+5. Check on it any time: `/ds 状态` (status: quota, its last decision and reasoning, today's spending, cache hit rate); `/ds 区域列表` (area list) shows where it will respond
 
-In channels where proactive mode is off, it only speaks when called.
+If you don't set any areas, it answers mentions in every channel it can see; in channels where proactive mode is off, it only speaks when called.
 
 > Consider telling your members in the channel description that messages in this channel are sent to DeepSeek (a service hosted in China) for processing.
 
@@ -88,20 +91,26 @@ In channels where proactive mode is off, it only speaks when called.
 
 ## Commands
 
-Discord shows command and option names in Chinese; the English in parentheses is a translation. Commands that take a `范围` (scope) option let you pick 本频道 (this channel) or 全服务器 (whole server).
+Discord shows command and option names in Chinese; the English in parentheses is a translation.
 
 ### `/ds` (server admins)
 
 | Command | What it does |
 |---|---|
-| `/ds 主动` (proactive) | Turn proactive mode on or off. Applies to this channel by default, or can be set as the server-wide default |
+| `/ds 区域` (area) | 允许 allow / 禁止 deny / 跟随上级 inherit. Where it isn't allowed, it ignores messages completely: no replies to @mentions, no proactive messages, and nothing is sent to DeepSeek |
+| `/ds 区域列表` (area list) | Lists the categories and channels in this server where it's allowed or denied, and where proactive mode is on |
+| `/ds 主动` (proactive) | Turn proactive mode on or off |
 | `/ds 档位` (preset) | Apply a preset in one go: 安静 quiet / 普通 normal / 话痨 chatty |
 | `/ds 设置` (settings) | Change a single setting; enter `默认` or `default` as the value to reset it |
-| `/ds 人设` (persona) | Edit the persona (whole server or this channel only) |
+| `/ds 人设` (persona) | Edit the persona (opens an editor) |
 | `/ds 状态` (status) | Show this channel's settings, quota, last decision and today's spending |
 | `/ds 清空记忆` (clear memory) | Clear this channel's conversation history and summary |
 
-Settings priority: **this channel > the thread's parent channel > this server > the owner's global value > config.toml**.
+Apart from 区域列表 (area list), 状态 (status) and 清空记忆 (clear memory), these commands all have a `范围` (scope) option: **本频道** (this channel; the default, except for the persona), **本类别** (this category, i.e. a group of channels in Discord) or **全服务器** (whole server).
+
+Settings priority: **this channel > the thread's parent channel > its category > this server > the owner's global value > config.toml**. For example, if you deny the whole server, allow a "Chat" category, and then deny one channel inside it, the bot responds everywhere in that category except that channel.
+
+> To wall off certain channels completely, you can also remove the bot's View Channel permission in Discord's channel settings; then those messages never reach the bot at all.
 
 ### `/dsowner` (you only; registered only in the `CONTROL_GUILD_ID` server)
 
@@ -126,7 +135,9 @@ Admins can change these with `/ds 设置`:
 | 冷场秒数 | `quiet_seconds` | 30 | Seconds with nobody talking or typing before the chat counts as quiet |
 | 最长等待秒 | `max_wait_seconds` | 180 | If the chat never goes quiet, the longest it waits before deciding anyway |
 | 每人每分钟点名 | `mention_rate_limit` | 3 | How many times per minute each person can call it, to stop mention spam |
-| 别名 | `aliases` | empty | Names that also count as calling it, comma-separated, e.g. `DS,小D` |
+| 别名 | `aliases` | empty | Names that also count as calling it, comma-separated, e.g. `DS,小D`. English aliases must appear as a whole word (`DS` won't match "words") |
+
+The area setting (`/ds 区域`) is stored as a setting called 允许回应 (allowed to respond), `enabled` in `config.toml`, which is on by default. To have every server start in whitelist mode, set `enabled` to `false` in `config.toml`.
 
 Only you can change these (`config.toml` or `/dsowner 设置`):
 
@@ -139,10 +150,39 @@ Only you can change these (`config.toml` or `/dsowner 设置`):
 | 全局每日预算美元 | `global_daily_budget_usd` | 3.0 | Daily spending cap across all servers, in USD |
 | 上下文预算 | `context_budget_tokens` | 30000 | Once the context exceeds this many tokens, the oldest half is compressed into a summary |
 | 看图 | `vision` | on | Whether images are sent to the model |
+| 读文件 | `files` | on | Whether to read files people upload |
 
 On/off settings accept `on` / `off` as well as `开` / `关`.
 
 What counts as a "turn": several messages one person sends within 20 seconds count as one turn, so typing in short bursts doesn't refill the quota faster.
+
+---
+
+## Reading files
+
+**What it can read**:
+
+| Type | Notes |
+|---|---|
+| Text and code | txt, md, csv, json, py, js, ts, html, logs, subtitles… Besides UTF-8, it recognizes older GBK / Big5 files, as well as older Japanese (Shift_JIS / EUC-JP) and Korean (EUC-KR) files. Legacy-encoded files with only a line or two may be misdetected; when unsure, it assumes Chinese |
+| PDF | Reads the text and marks page numbers; for scanned PDFs without text, it looks at the first 3 pages as images instead. PDFs that only restrict printing or copying can be read; PDFs with an open password can't |
+| Word / Excel / PowerPoint | .docx, .xlsx, .pptx. Tables are turned into text row by row, and Excel dates and percentages are converted as displayed; for very large sheets it only reads the top part |
+
+When it can't read a file, it tells the person why: old formats (.doc / .xls / .ppt; saving in the newer format fixes it), password-protected files, archives, audio, video, image formats such as HEIC or BMP, and so on.
+
+**When it reads files**:
+
+- Right away: files in the message that calls it, files in the message it's replying to when called, and files the same person posted within the last two minutes.
+- On request when called: for example, "help 小雨 look at that PDF above". The model first says which message's file to open; the bot reads it and hands the contents back to the model to answer. That takes one extra call, so the reply comes a few seconds later.
+- When nobody calls it, it doesn't read files; it only knows that someone posted one. The exception is message.txt, which Discord creates automatically from overly long messages: it reads the beginning of it like any long message.
+
+**Limits** (all adjustable under `[engine]` in `config.toml`): up to 20 MB per file; up to 20,000 characters per file (longer files are read from the start, and the model is told where it stopped); up to 3 files and 40,000 characters per round in total, including files it asked to open itself. Files it can't read don't count toward these limits. If a message has too many files, or the limit only covers some of them, it picks up the rest the next time it's called. A file that definitely can't be read (unsupported format, corrupted) is reported only once and not retried every time, unless someone explicitly asks it to open it again.
+
+**File contents stay in the conversation memory**, so you can follow up with "what does page 3 say?". Large files take up more context, but later requests are mostly cache hits, so the cost stays low; once they become old history, they're compressed into the summary along with other older chat. If the context gets far too long (more than twice the budget and over 100k tokens, e.g. after reading several large files in a row), it's compressed right away instead of waiting.
+
+**Security**: every file is parsed in a separate subprocess with limits on memory (1 GB), CPU and time (30 seconds), so a broken or malicious file can at most make that one read fail, without hanging the bot. When deployed with Docker, the bot runs as root, and the parsing subprocess drops to the `nobody` user so it can't read the token and API key in the bot's process. Without Docker this isolation isn't guaranteed: when running as a regular user, there's no privilege drop; when running as root, it only drops privileges if Python, the bot's code and its installed libraries are readable by other users (not the case if, say, the libraries are installed under `/root`); otherwise it parses as the current user and logs a one-time warning. `python -m dsbot --check` shows whether the privilege drop is in effect. Like chat messages, file contents are sent to DeepSeek for processing.
+
+**Privacy**: chat history and the contents of files it has read are stored in the database under `./data/`, with file permissions that let only the bot itself read and write it (other accounts on a NAS can't see it).
 
 ---
 
@@ -156,14 +196,15 @@ message arrives ──► stored in that channel's buffer
                      └─ check every 5 s: proactive on + new messages + (quiet OR waited too long)
                                          + quota left + gap long enough + within budget ──► run a round
 
-one round = number the new messages (#12, #13…) and render them as one user message
+one round = number the new messages (#12, #13…) and render them as one user message (contents of files to read go after them)
           → send it to DeepSeek together with the full history (JSON output)
-          → the model returns {"actions": [...]}: reply / react / do nothing
+          → the model returns {"actions": [...]}: reply / react / open a file / do nothing
+            (to open a file: read it, append the contents, then ask the model again)
           → append this round's user + assistant messages to the history unchanged (silence is recorded too)
           → show "typing…", wait a few seconds based on length, then send
 ```
 
-**Caching**: the history is only ever appended to, never rewritten, and the system prompt is fixed (anything that changes, like the time, goes into each round's message). So every request starts with the previous request, and most input tokens are billed at the cache-hit price, which is about 50 times cheaper. When the context gets too long, the oldest half is compressed into a summary in one go, so the cache misses only that once. The log prints the input token count and cache hits for every round.
+**Caching**: the history is only ever appended to, never rewritten, and the system prompt is fixed (anything that changes, like the time, goes into each round's message). So every request starts with the previous request, and most input tokens are billed at the cache-hit price, which is about 50 times cheaper. When the context gets too long, the older half (estimated in tokens) is compressed into a summary while the latest 6 rounds are left alone, so the cache misses only that once. The log prints the input token count and cache hits for every round.
 
 **Cost estimate** (peak-hour prices, 30k-token context; with a healthy cache only the few hundred tokens of new messages miss): about 0.04–0.06 US cents per decision (a bit more with thinking on, because of reasoning tokens). A channel chatting all day, with a decision every 3 minutes, costs about 5–10 cents a day. Off-peak hours (including weekends) are half price. If prices change, update `[pricing]` in `config.toml`.
 
@@ -172,6 +213,7 @@ one round = number the new messages (#12, #13…) and render them as one user me
 ## FAQ
 
 **It doesn't respond when @mentioned**
+- The channel isn't in an allowed area: the first line of `/ds 状态` (status) will say so, and `/ds 区域列表` (area list) shows the overall setup.
 - Message Content Intent isn't turned on in the Developer Portal (the log shows an error such as 4014).
 - The bot doesn't have permission to send messages in that channel.
 - You may have mentioned its role rather than the bot itself. That works too, unless the server hides its role.
@@ -181,6 +223,10 @@ one round = number the new messages (#12, #13…) and render them as one user me
 - The model leans toward silence by default. To make it more active, try `/ds 档位 话痨` (chatty), or write "you love to chat" into its persona.
 
 **Changed the persona, but it still talks the same way**: its earlier messages in the history are in the old style. Run `/ds 清空记忆` (clear memory) to start fresh.
+
+**It says it can't see a GIF**: a GIF sent from the GIF picker is really a link, and Discord adds the preview image a second or two later. The bot reads that preview (the first frame of the animation); if the message that @mentions it contains a link itself, it waits two seconds before replying. For web links (YouTube, for example) it only reads the title, not the thumbnail.
+
+**It says it can't read a file**: check the reason it gives. Common ones are old formats (.doc/.xls/.ppt), password-protected files and files over 20 MB. If it says the file-parsing process couldn't start, the problem is on the bot's side (the log has the details; usually permissions); once that's fixed, just ask it to read the file again. `python -m dsbot --check` (with Docker: `docker compose exec dsbot python -m dsbot --check`) checks the PDF component and the parsing subprocess.
 
 **DeepSeek balance runs out**: the bot pauses API calls for 10 minutes and logs a warning, and resumes on its own after you top up. If someone calls it while it's paused, it adds a ⚠️ reaction to their message.
 
@@ -200,11 +246,14 @@ Contributions are welcome! Before opening a PR, please read [CONTRIBUTING.md](CO
 python -m unittest discover -s tests      # core logic tests; no need to install discord.py
 ```
 
+The file-reading tests use python-docx, openpyxl, python-pptx and reportlab to generate real files on the fly (for testing only; the bot doesn't need them to run, and `pip install -r requirements-dev.txt` installs them). Without them, those tests are skipped.
+
 | File | Purpose |
 |---|---|
 | `dsbot/engine.py` | Scheduler: buffering, timing, quota, budget, carrying out actions, summary compression |
 | `dsbot/render.py` / `prompts.py` | Chat log rendering format, system prompt |
 | `dsbot/llm.py` | DeepSeek HTTP client (thinking toggle, JSON mode, usage parsing) |
+| `dsbot/files.py` | Reading files: type detection, decoding, PDF / Office parsing, the parsing subprocess |
 | `dsbot/discord_app.py` / `convert.py` | Discord events and message conversion, sending, reactions, "typing…" |
 | `dsbot/commands.py` | Slash commands and the persona editor |
 | `dsbot/config.py` / `settings.py` | Config, setting definitions and layered overrides |
