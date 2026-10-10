@@ -1,0 +1,51 @@
+# 每次 push 到 main、以及每个 PR，都自动在几个 Python 版本上跑单元测试和离线自检。
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # 也可以在 Actions 页面手动运行
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  # 同一个 PR 又推了新提交时，取消还没跑完的旧一轮
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 是 README 写的最低版本；Docker 镜像用的是 3.12
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+
+      - name: 单元测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 离线自检（配置文件、斜杠命令定义）
+        # 填的都是假值，只为让自检走完整流程；自检不会连 Discord，也不会调用 DeepSeek
+        env:
+          DISCORD_TOKEN: ci-dummy-token
+          DEEPSEEK_API_KEY: ci-dummy-key
+          OWNER_ID: "1"
+          CONTROL_GUILD_ID: "1"
+        run: python -m dsbot --check

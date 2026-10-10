@@ -1,5 +1,7 @@
 # DeepSeek 群友（Discord Bot）
 
+[![tests](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml/badge.svg)](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml)
+
 一个用 DeepSeek V4.1 Flash（`deepseek-flash`）驱动、像普通群友一样待在 Discord 服务器里的 bot：
 
 - **被叫到就回**：有人 @ 它、回复它的消息、或叫它的别名，立刻回应。
@@ -184,6 +186,8 @@ python -m dsbot
 
 ## 八、开发
 
+欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤和几条设计约束。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。
+
 ```bash
 python -m unittest discover -s tests      # 核心逻辑测试，不需要装 discord.py
 ```
@@ -197,3 +201,5 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 | `dsbot/commands.py` | 斜杠命令和人设编辑框 |
 | `dsbot/config.py` / `settings.py` | 配置、参数定义与分层覆盖 |
 | `dsbot/store.py` / `ledger.py` | SQLite 存储、每日花费 |
+
+本项目采用 [MIT 许可证](LICENSE)。
