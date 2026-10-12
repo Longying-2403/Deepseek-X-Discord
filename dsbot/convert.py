@@ -1,4 +1,4 @@
-"""把 discord.Message 转成 IncomingMessage。只用鸭子类型访问属性，方便不装 discord.py 也能测试。"""
+"""Turn a discord.Message into an IncomingMessage. Attributes are only accessed duck-typed, so it can be tested without discord.py installed."""
 
 from __future__ import annotations
 
@@ -11,18 +11,19 @@ from .textutil import clean_custom_emoji, clean_text, one_line
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FORWARD = 1  # MessageReferenceType.forward
-STICKER_IMAGE_FORMATS = {1, 2, 4}  # png / apng / gif；lottie(3) 是动画数据，不是图片
+STICKER_IMAGE_FORMATS = {1, 2, 4}  # png / apng / gif; lottie (3) is animation data, not an image
 URL_RE = re.compile(r"https?://\S+")
 
 FetchUrl = Callable[[str], Awaitable[bytes]]
 
 
 def parse_aliases(raw: Any) -> list[str]:
+    # a full-width comma (typed by Chinese/Japanese keyboards) separates aliases too
     return [a.strip().lower() for a in str(raw or "").replace("，", ",").split(",") if a.strip()]
 
 
 def alias_called(text: str, aliases: list[str]) -> bool:
-    """英文/数字别名要求整词出现（DS 不该匹配 words）；中文别名直接找子串。"""
+    """Aliases made of English letters/digits must appear as a whole word (DS shouldn't match "words"); other aliases (e.g. Chinese ones) match anywhere."""
     lowered = text.lower()
     for alias in aliases:
         if alias.isascii():
@@ -34,7 +35,7 @@ def alias_called(text: str, aliases: list[str]) -> bool:
 
 
 def safe_category_id(channel: Any) -> int | None:
-    """帖子的 category_id 要通过所在频道取，所在频道没缓存时 discord.py 会抛异常。"""
+    """A thread's category_id comes from its parent channel, and discord.py raises if the parent isn't cached."""
     try:
         return getattr(channel, "category_id", None)
     except Exception:
@@ -49,7 +50,7 @@ def _fetcher(fetch_url: FetchUrl, url: str) -> Callable[[], Awaitable[bytes]]:
 
 
 def _embed_media(embed: Any) -> str | None:
-    """GIF / 图片链接预览里能直接下载的那张静态图（优先走 Discord 的图片代理）。"""
+    """The still image in a GIF / image link preview that can be downloaded directly (preferring Discord's image proxy)."""
     for media in (getattr(embed, "thumbnail", None), getattr(embed, "image", None)):
         if media is None:
             continue
@@ -68,7 +69,7 @@ def convert_message(
     fetch_url: FetchUrl | None = None,
 ) -> IncomingMessage:
     channel = message.channel
-    parent_id = getattr(channel, "parent_id", None)  # 只有帖子（Thread）有 parent_id
+    parent_id = getattr(channel, "parent_id", None)  # only threads have parent_id
 
     text = clean_text(clean_custom_emoji(message.clean_content or ""))
     ref = message.reference
@@ -76,11 +77,11 @@ def convert_message(
     if forwarded:
         snapshots = getattr(message, "message_snapshots", None) or []
         inner = clean_text(clean_custom_emoji(getattr(snapshots[0], "content", "") or "")) if snapshots else ""
-        text = f"[转发] {inner}".strip() if not text else f"{text}\n[转发] {inner}".strip()
+        text = f"[forwarded] {inner}".strip() if not text else f"{text}\n[forwarded] {inner}".strip()
 
     mentions_bot = any(user.id == me_id for user in message.mentions)
     if not mentions_bot:
-        # 有人会 @ 到 bot 自带的那个身份组
+        # people sometimes @ the role that comes with the bot
         mentions_bot = any(
             getattr(role, "tags", None) is not None and role.tags.bot_id == me_id for role in message.role_mentions
         )
@@ -91,7 +92,7 @@ def convert_message(
     reply_to_bot = False
     if ref is not None and not forwarded and ref.message_id is not None and ref.channel_id == channel.id:
         reply_to_id = ref.message_id
-        author = getattr(ref.resolved, "author", None)  # 被删掉的消息没有 author
+        author = getattr(ref.resolved, "author", None)  # deleted messages have no author
         reply_to_bot = author.id == me_id if author is not None else is_ours(ref.message_id)
 
     images: list[ImageAttachment] = []
@@ -103,7 +104,7 @@ def convert_message(
         else:
             files.append(FileAttachment(clean_text(att.filename), ctype or None, att.size, fetch=att.read))
 
-    # 链接预览（embed）：GIF 选单发的 GIF、贴的图片链接，正文里只有一个链接，图在预览里
+    # link previews (embeds): GIFs from the GIF picker and pasted image links have only a link in the text; the image is in the preview
     embeds = list(getattr(message, "embeds", None) or [])
     notes: list[str] = []
     for embed in embeds:
@@ -115,12 +116,12 @@ def convert_message(
                 images.append(ImageAttachment(url.rsplit("/", 1)[-1][:60], None, 0, fetch=_fetcher(fetch_url, url), kind=kind))
                 link = getattr(embed, "url", None)
                 if link:
-                    text = text.replace(link, "").strip()  # 有了 [GIF]/[图片] 标记，就不用再给模型看一长串链接
+                    text = text.replace(link, "").strip()  # with the [GIF]/[image] marker in place, the model doesn't need the long link too
         else:
             title = getattr(embed, "title", None)
             if title:
                 provider = getattr(getattr(embed, "provider", None), "name", None)
-                label = "卡片" if etype == "rich" else "链接预览"
+                label = "card" if etype == "rich" else "link preview"
                 notes.append(f"[{label}: {one_line((provider + ' - ' if provider else '') + title, 80)}]")
     if notes:
         text = f"{text} {' '.join(notes)}".strip()

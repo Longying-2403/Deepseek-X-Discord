@@ -3,8 +3,8 @@ services:
     build: .
     container_name: dsbot
     restart: unless-stopped
-    stop_grace_period: 30s                  # 给它时间把正在发的消息发完
+    stop_grace_period: 30s                  # give it time to finish sending the messages it's in the middle of
     env_file: .env
     volumes:
-      - ./config.toml:/app/config.toml:ro   # 改配置不用重新构建，重启即可
-      - ./data:/app/data                    # 数据库：对话记录、设置、花费
+      - ./config.toml:/app/config.toml:ro   # config changes don't need a rebuild, just a restart
+      - ./data:/app/data                    # database: chat history, settings, spending

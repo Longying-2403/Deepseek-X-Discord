@@ -1,4 +1,4 @@
-"""运行时参数：config.toml 默认值 ← 全局 ← 服务器 ← 类别 ← 频道（帖子先看自己，再看所在频道）。"""
+"""Runtime settings: config.toml defaults ← global ← server ← category ← channel (a thread checks itself first, then its parent channel)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ SCOPES = ("global", "guild", "category", "channel")
 
 
 class View:
-    """某个频道当前生效的全部参数，用属性访问：view.refill_turns"""
+    """All settings currently in effect for a channel, accessed as attributes: view.refill_turns"""
 
     def __init__(
         self,
@@ -44,14 +44,14 @@ class Settings:
 
     def _chain(self, guild_id, channel_id, parent_id, category_id) -> Iterator[tuple[str, tuple[str, int]]]:
         if channel_id is not None:
-            yield "本频道", ("channel", channel_id)
+            yield "this channel", ("channel", channel_id)
         if parent_id is not None:
-            yield "所在频道", ("channel", parent_id)
+            yield "the parent channel", ("channel", parent_id)
         if category_id is not None:
-            yield "所在类别", ("category", category_id)
+            yield "the category", ("category", category_id)
         if guild_id is not None:
-            yield "本服务器", ("guild", guild_id)
-        yield "全局", ("global", 0)
+            yield "this server", ("guild", guild_id)
+        yield "the global setting", ("global", 0)
 
     def get(self, key: str, *, guild_id=None, channel_id=None, parent_id=None, category_id=None) -> Any:
         if key not in SPECS:
@@ -67,7 +67,7 @@ class Settings:
             values = self._overrides.get(scope_key)
             if values is not None and key in values:
                 return label
-        return "默认"
+        return "config.toml"
 
     def view(
         self,
@@ -82,13 +82,13 @@ class Settings:
         return dict(self._overrides.get((scope, scope_id), {}))
 
     def scoped(self, scope: str, key: str) -> dict[int, Any]:
-        """某个范围里，所有单独设置过 key 的 id -> 值（列出区域设置时用）。"""
+        """In one scope, every id that has its own value for key -> that value (used to list the area settings)."""
         return {sid: values[key] for (sc, sid), values in self._overrides.items() if sc == scope and key in values}
 
     def set(self, scope: str, scope_id: int, key: str, raw: Any) -> Any:
-        """校验并保存，返回解析后的值。"""
+        """Validate and save; returns the parsed value."""
         if scope not in SCOPES:
-            raise ValueError(f"未知范围：{scope}")
+            raise ValueError(f"Unknown scope: {scope}")
         spec = SPECS[key]
         value = parse_value(spec, raw)
         self.store.set_override(scope, scope_id, key, value)

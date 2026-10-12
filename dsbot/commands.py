@@ -1,8 +1,8 @@
-"""斜杠命令。
+"""Slash commands.
 
-/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、状态。
-/dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索等。
-            和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
+/ds …       Server admins (need the "Manage Server" permission by default): areas, how much it talks, presets, persona, status.
+/dsowner …  Registered only in the CONTROL_GUILD_ID server, and only accepts OWNER_ID: budget, thinking level, web search, etc.
+            Like /ds, by default only people with "Manage Server" can see it (if the bot is in a friend's server where you're a moderator, you'll see it too).
 """
 
 from __future__ import annotations
@@ -25,22 +25,24 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCOPE_CHOICES = [
-    Choice(name="本频道", value="channel"),
-    Choice(name="本类别", value="category"),
-    Choice(name="全服务器", value="guild"),
+    Choice(name="This channel", value="channel"),
+    Choice(name="This category", value="category"),
+    Choice(name="Whole server", value="guild"),
 ]
 AREA_ACTIONS = [
-    Choice(name="允许", value="on"),
-    Choice(name="禁止", value="off"),
-    Choice(name="跟随上级", value="inherit"),
+    Choice(name="Allow", value="on"),
+    Choice(name="Block", value="off"),
+    Choice(name="Inherit", value="inherit"),
 ]
 SHARE_ACTIONS = [
-    Choice(name="开", value="on"),
-    Choice(name="关", value="off"),
-    Choice(name="跟随上级", value="inherit"),
+    Choice(name="On", value="on"),
+    Choice(name="Off", value="off"),
+    Choice(name="Inherit", value="inherit"),
 ]
-NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
-# 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
+NO_CATEGORY = 'This channel isn\'t in any category, so pick "This channel" or "Whole server" as the scope.'
+SCOPE_HELP = "This channel, this category, or the whole server (default: this channel)"
+SCOPE_DEFAULT_HELP = "This channel, this category, or the server-wide default (default: this channel)"
+# Areas, proactive on/off, persona and memory sharing have their own commands; the other admin settings go through /ds set
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
 
@@ -59,11 +61,11 @@ def _parent_id(interaction: discord.Interaction) -> int | None:
 
 
 def _category(interaction: discord.Interaction) -> tuple[int | None, str | None]:
-    """当前频道所在的类别（帖子取它所在频道的类别）。"""
+    """The category the current channel is in (for a thread, its parent channel's category)."""
     channel = interaction.channel
     try:
         category = getattr(channel, "category", None)
-    except Exception:  # 帖子的所在频道没缓存时 discord.py 会抛异常
+    except Exception:  # discord.py raises when a thread's parent channel isn't cached
         category = None
     if category is not None:
         return category.id, category.name
@@ -77,53 +79,58 @@ def _ids(interaction: discord.Interaction) -> tuple[int, int, int | None, int | 
 def _target(
     interaction: discord.Interaction, scope: Optional[Choice[str]], default: str = "channel"
 ) -> tuple[str, int, str] | None:
-    """范围选项 → (存储范围, id, 给人看的名字)。选了“本类别”但频道不在类别里时返回 None。"""
+    """Scope option → (storage scope, id, name to show people). Returns None if "This category" was picked but the channel isn't in one."""
     value = scope.value if scope is not None else default
     if value == "guild":
-        return "guild", interaction.guild_id, "全服务器"
+        return "guild", interaction.guild_id, "Whole server"
     if value == "category":
         category_id, name = _category(interaction)
         if category_id is None:
             return None
-        return "category", category_id, f"类别「{name or category_id}」"
+        return "category", category_id, f'Category "{name or category_id}"'
     return "channel", interaction.channel_id, f"<#{interaction.channel_id}>"
 
 
 def _preset_text(values: dict[str, int]) -> str:
     gap = values["min_speak_gap"]
-    gap_text = f"{gap // 60} 分钟" if gap >= 60 else f"{gap} 秒"
-    return f"每 {values['refill_turns']} 轮恢复 1 次，最多攒 {values['quota_capacity']} 次，间隔 {gap_text}"
+    gap_text = f"{gap // 60} min" if gap >= 60 else f"{gap} s"
+    return f"+1 quota every {values['refill_turns']} turns, stores up to {values['quota_capacity']}, at least {gap_text} apart"
+
+
+def _n(count: int, word: str, plural: str | None = None) -> str:
+    """'1 call', '3 calls', '2 replies'."""
+    return f"{count} {word if count == 1 else (plural or word + 's')}"
 
 
 def _ago(seconds: float | None) -> str:
     if seconds is None:
-        return "还没说过"
+        return "never"
     if seconds < 60:
-        return f"{seconds:.0f} 秒前"
+        return f"{seconds:.0f}s ago"
     if seconds < 3600:
-        return f"{seconds / 60:.0f} 分钟前"
-    return f"{seconds / 3600:.1f} 小时前"
+        return f"{seconds / 60:.0f} min ago"
+    return f"{seconds / 3600:.1f} h ago"
 
 
 class PersonaModal(discord.ui.Modal):
     def __init__(self, bot: "DSBot", scope: str, scope_id: int, where: str, current: str, inherited: str):
-        super().__init__(title="修改人设", timeout=900)
+        super().__init__(title="Edit persona", timeout=900)
         self.bot = bot
         self.scope = scope
         self.scope_id = scope_id
         self.where = where
-        self.inherited = inherited  # 这个范围不单独设置时会用到的人设
+        self.inherited = inherited  # the persona used when this scope has no setting of its own
         self.text = discord.ui.TextInput(
             style=discord.TextStyle.long,
             default=current[:4000] or None,
             required=False,
             max_length=4000,
-            placeholder="留空 = 恢复默认人设",
+            placeholder="Leave empty to use the persona from the level above",
         )
         self.add_item(
             discord.ui.Label(
-                text="人设",
-                description="写它是谁、什么性格、和群友是什么关系。清空就是默认人设。",
+                text="Persona",
+                description="Who it is, its personality, how it relates to the group. Clear it to inherit from the level above.",
                 component=self.text,
             )
         )
@@ -131,39 +138,40 @@ class PersonaModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         value = self.text.value.strip()
         if not value or value == self.inherited.strip():
-            # 没改（和上一级一样）就不单独存，以后上一级改了这里也会跟着变
+            # unchanged (same as the level above): don't store it separately, so later changes to the level above apply here too
             self.bot.settings.unset(self.scope, self.scope_id, "persona")
-            done = "已恢复默认人设" if self.scope == "guild" else "已改为沿用上一级的人设"
+            done = "back to the default persona" if self.scope == "guild" else "now uses the persona from the level above"
         else:
             self.bot.settings.set(self.scope, self.scope_id, "persona", value)
-            done = "人设已更新"
+            done = "persona updated"
         await _reply(
             interaction,
-            f"{self.where}：{done}，下一轮对话生效。\n改动比较大的话，可以用 `/ds 清空记忆` 让它不受之前说话风格的影响。",
+            f"{self.where}: {done}. It takes effect from the next round.\n"
+            "If it's a big change, `/ds clear-memory` keeps it from being influenced by how it talked before.",
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log.exception("保存人设失败", exc_info=error)
-        await _reply(interaction, f"保存失败：{error}")
+        log.exception("Saving the persona failed", exc_info=error)
+        await _reply(interaction, f"Couldn't save it: {error}")
 
 
 def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
-    """这个频道的记忆共享情况：能不能看别的频道、自己的内容会不会分享出去、现在和哪些频道互通。"""
+    """This channel's memory sharing: whether it can see other channels, whether its own content is shared out, and which channels it's connected with now."""
     guild_id, channel_id, parent_id, category_id = _ids(interaction)
     view = bot.settings.view(guild_id, channel_id, parent_id, category_id)
     if not view.share_memory:
-        return f"记忆共享：关（来自{view.source('share_memory')}）"
+        return f"Memory sharing: off (from {view.source('share_memory')})"
     place = bot.transport.locate(channel_id)
     shares_out = place is not None and bot.engine.shares_out(channel_id, place)
     if shares_out:
-        out_text = "这里的内容也会分享给别的共享频道"
+        out_text = "this channel's content is shared with the other sharing channels too"
     elif place is not None and not place.public:
-        out_text = "🔒 这是私密频道，这里的内容不会分享出去（要分享就在这里单独执行 `/ds 记忆共享 操作:开`）"
+        out_text = "🔒 this is a private channel, so its content isn't shared out (to share it, run `/ds share-memory action:On` here)"
     else:
-        out_text = "这里的内容不会分享出去"
+        out_text = "this channel's content isn't shared out"
     sources = bot.engine.shared_sources(guild_id, channel_id)
-    names = "、".join(f"<#{cid}>" for cid, _ in sources[:15]) or "暂时没有（别的频道开了共享、并且跟它聊过之后才会出现）"
-    return f"记忆共享：开（来自{view.source('share_memory')}）· {out_text}\n能翻记录的频道：{names}"
+    names = ", ".join(f"<#{cid}>" for cid, _ in sources[:15]) or "none yet (channels show up once they have sharing on and have chatted with it)"
+    return f"Memory sharing: on (from {view.source('share_memory')}) · {out_text}\nChannels it can look through: {names}"
 
 
 def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
@@ -175,87 +183,89 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     outcomes = channel_stats["outcomes"]
     preset = next(
         (name for name, values in PRESETS.items() if all(getattr(view, k) == v for k, v in values.items())),
-        "自定义",
+        "custom",
     )
-    lines = [f"**<#{channel_id}> 的状态**"]
+    lines = [f"**Status of <#{channel_id}>**"]
     if not view.enabled:
-        lines.append(f"🚫 这里不在允许的区域（来自{view.source('enabled')}），它不会看也不会回这里的消息")
+        lines.append(f"🚫 This channel isn't in an allowed area (from {view.source('enabled')}), so it won't read or reply to messages here")
     lines += [
-        f"主动发言：{'开' if view.proactive else '关'}（来自{view.source('proactive')}）· 档位：{preset}",
-        f"主动额度：{st['tokens']:.1f} / {view.quota_capacity}（每 {view.refill_turns} 轮恢复 1 次，"
-        f"已攒 {st['turns_since_refill']} 轮）",
-        f"发言间隔 ≥ {view.min_speak_gap}s · 冷场 {view.quiet_seconds}s · 最长等待 {view.max_wait_seconds}s"
-        f" · 每人每分钟点名 ≤ {view.mention_rate_limit} 次",
-        f"别名：{view.aliases or '（无）'} · 人设：{format_value(SPECS['persona'], view.persona)}",
-        f"待处理消息 {st['pending']} 条 · 上次发言：{_ago(st['last_speak_ago'])}",
+        f"Proactive chat: {'on' if view.proactive else 'off'} (from {view.source('proactive')}) · preset: {preset}",
+        f"Proactive quota: {st['tokens']:.1f} / {view.quota_capacity} (+1 every {view.refill_turns} turns, "
+        f"{st['turns_since_refill']} so far)",
+        f"Gap between messages ≥ {view.min_speak_gap}s · lull {view.quiet_seconds}s · max wait {view.max_wait_seconds}s"
+        f" · mentions per person per minute ≤ {view.mention_rate_limit}",
+        f"Aliases: {view.aliases or '(none)'} · persona: {format_value(SPECS['persona'], view.persona)}",
+        f"Pending messages: {st['pending']} · last spoke: {_ago(st['last_speak_ago'])}",
     ]
     lines.append(share_text(bot, interaction))
     if st["can_search"]:
-        lines.append(f"联网搜索：开 · 今天本服务器已搜 {st['searches']} / {view.daily_search_limit} 次")
+        lines.append(f"Web search: on · searches on this server today: {st['searches']} / {view.daily_search_limit}")
     else:
-        lines.append("联网搜索：关")
+        lines.append("Web search: off")
     if st["last_decision"]:
-        lines.append(f"上次：{st['last_decision']}")
+        lines.append(f"Last round: {st['last_decision']}")
     lines.append(
-        f"今天本频道：调用 {channel_stats['calls']} 次（说话 {outcomes.get('reply', 0)}、表情 {outcomes.get('react', 0)}、"
-        f"沉默 {outcomes.get('pass', 0)}、出错 {outcomes.get('error', 0)}）"
+        f"Today in this channel: {_n(channel_stats['calls'], 'call')} ({_n(outcomes.get('reply', 0), 'reply', 'replies')}, "
+        f"{_n(outcomes.get('react', 0), 'reaction')}, {outcomes.get('pass', 0)} silent, {_n(outcomes.get('error', 0), 'error')})"
     )
     hit = guild_stats["hit_rate"]
     lines.append(
-        f"今天本服务器花费：${st['guild_spent']:.4f} / ${view.daily_budget_usd:g}"
-        + (f" · 缓存命中率 {hit:.0%}" if hit is not None else "")
+        f"Spent on this server today: ${st['guild_spent']:.4f} / ${view.daily_budget_usd:g}"
+        + (f" · cache hit rate {hit:.0%}" if hit is not None else "")
     )
     if st["guild_spent"] >= view.daily_budget_usd:
-        lines.append("⚠️ 今天已超预算：只回应点名，不主动说话")
+        lines.append("⚠️ Over today's budget: it only answers mentions and doesn't speak up on its own")
     if st["paused"]:
-        lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
+        lines.append("⚠️ DeepSeek calls are paused (insufficient balance or invalid key; see the logs)")
     if st["send_blocked"]:
-        lines.append("⚠️ 最近几轮在这里发不出消息（检查 bot 的发言权限），主动发言暂停 30 分钟")
+        lines.append(
+            "⚠️ It couldn't send messages here for the last few rounds (check the bot's permission to send messages), "
+            "so proactive chat is paused for 30 minutes"
+        )
     return "\n".join(lines)
 
 
 def area_list_text(bot: "DSBot", guild: discord.Guild) -> str:
     def mark(value: bool) -> str:
-        return "✅ 允许" if value else "🚫 禁止"
+        return "✅ allowed" if value else "🚫 blocked"
 
     guild_enabled = bot.settings.get("enabled", guild_id=guild.id)
-    source = "单独设置" if "enabled" in bot.settings.overrides("guild", guild.id) else "默认"
-    lines = ["**它会在哪里回应**", f"全服务器：{mark(guild_enabled)}（{source}）"]
+    source = "set explicitly" if "enabled" in bot.settings.overrides("guild", guild.id) else "default"
+    lines = ["**Where it responds**", f"Whole server: {mark(guild_enabled)} ({source})"]
     rows = []
     for category_id, value in bot.settings.scoped("category", "enabled").items():
         category = guild.get_channel(category_id)
         if category is not None:
-            rows.append((category.position, f"类别「{category.name}」：{mark(value)}"))
+            rows.append((category.position, f'Category "{category.name}": {mark(value)}'))
     for channel_id, value in bot.settings.scoped("channel", "enabled").items():
         if guild.get_channel_or_thread(channel_id) is not None:
-            rows.append((10_000, f"<#{channel_id}>：{mark(value)}"))
-    lines += [text for _, text in sorted(rows)] or ["（没有单独设置过的类别或频道）"]
+            rows.append((10_000, f"<#{channel_id}>: {mark(value)}"))
+    lines += [text for _, text in sorted(rows)] or ["(no category or channel has a setting of its own)"]
 
     proactive = []
     for scope in ("category", "channel"):
         for scope_id, value in bot.settings.scoped(scope, "proactive").items():
             obj = guild.get_channel(scope_id) if scope == "category" else guild.get_channel_or_thread(scope_id)
             if value and obj is not None:
-                proactive.append(f"类别「{obj.name}」" if scope == "category" else f"<#{scope_id}>")
+                proactive.append(f'category "{obj.name}"' if scope == "category" else f"<#{scope_id}>")
     if bot.settings.get("proactive", guild_id=guild.id):
-        lines.append("主动发言：全服务器默认开")
+        lines.append("Proactive chat: on by default for the whole server")
     elif proactive:
-        lines.append("主动发言开着的地方：" + "、".join(proactive))
-    lines.append("（帖子跟着所在频道走；频道的设置优先于类别，类别优先于全服务器）")
+        lines.append("Proactive chat is on in: " + ", ".join(proactive))
+    lines.append("(Threads follow their parent channel; a channel's setting beats its category's, and a category's beats the server's)")
     return "\n".join(lines)
 
 
 def register_commands(bot: "DSBot") -> None:
     admin = app_commands.Group(
         name="ds",
-        description="DeepSeek 群友：本服务器的设置",
+        description="DeepSeek Buddy: settings for this server",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
-    @admin.command(name="区域", description="限制它在哪些频道或类别里回应（不允许的地方完全不看消息）")
-    @app_commands.rename(action="操作", scope="范围")
-    @app_commands.describe(action="允许 / 禁止 / 跟随上级（删掉这一层的设置）", scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @admin.command(name="area", description="Limit which channels or categories it responds in (it ignores messages everywhere else)")
+    @app_commands.describe(action="Allow / Block / Inherit (remove the setting at this level)", scope=SCOPE_HELP)
     @app_commands.choices(action=AREA_ACTIONS, scope=SCOPE_CHOICES)
     async def area_cmd(interaction: discord.Interaction, action: Choice[str], scope: Optional[Choice[str]] = None) -> None:
         target = _target(interaction, scope)
@@ -268,17 +278,20 @@ def register_commands(bot: "DSBot") -> None:
         else:
             bot.settings.set(scope_name, scope_id, "enabled", action.value)
         view = bot.settings.view(*_ids(interaction))
+        state = "responds" if view.enabled else "doesn't respond"
         lines = [
-            f"{where}：已设为「{action.name}」。",
-            f"现在这个频道：{'会回应' if view.enabled else '不回应'}（来自{view.source('enabled')}）",
+            f'{where}: set to "{action.name}".',
+            f"Right now it {state} in this channel (from {view.source('enabled')})",
         ]
         if scope_name == "guild" and action.value == "off":
-            lines.append("现在是白名单模式：在要用的频道里执行 `/ds 区域 操作:允许`（或选“本类别”放开整个区）。")
+            lines.append(
+                "It's in allowlist mode now: run `/ds area action:Allow` in the channels where you want it "
+                '(or pick "This category" to open up a whole category).'
+            )
         await _reply(interaction, "\n".join(lines))
 
-    @admin.command(name="记忆共享", description="让它在开了共享的频道之间互通记忆（私密频道要单独开才会分享出去）")
-    @app_commands.rename(action="操作", scope="范围")
-    @app_commands.describe(action="开 / 关 / 跟随上级（删掉这一层的设置）", scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @admin.command(name="share-memory", description="Share memory between channels that have sharing on (private channels must opt in themselves)")
+    @app_commands.describe(action="On / Off / Inherit (remove the setting at this level)", scope=SCOPE_HELP)
     @app_commands.choices(action=SHARE_ACTIONS, scope=SCOPE_CHOICES)
     async def share_cmd(interaction: discord.Interaction, action: Choice[str], scope: Optional[Choice[str]] = None) -> None:
         target = _target(interaction, scope)
@@ -288,23 +301,22 @@ def register_commands(bot: "DSBot") -> None:
         scope_name, scope_id, where = target
         if action.value == "inherit":
             bot.settings.unset(scope_name, scope_id, "share_memory")
-            done = "改为跟随上级"
+            done = "now follows the level above"
         else:
             bot.settings.set(scope_name, scope_id, "share_memory", action.value)
-            done = "打开" if action.value == "on" else "关闭"
-        lines = [f"{where}：记忆共享已{done}。", share_text(bot, interaction)]
+            done = "turned on" if action.value == "on" else "turned off"
+        lines = [f"{where}: memory sharing {done}.", share_text(bot, interaction)]
         if action.value == "on" and scope_name != "channel":
-            lines.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
+            lines.append("(Private channels in this scope still don't share their content out unless it's turned on in that channel itself.)")
         await _reply(interaction, "\n".join(lines))
 
-    @admin.command(name="区域列表", description="看看它在这个服务器的哪些地方会回应")
+    @admin.command(name="area-list", description="See where on this server it responds")
     async def area_list_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, area_list_text(bot, interaction.guild))
 
-    @admin.command(name="主动", description="开关主动发言（没被叫到时，自己判断要不要说话）")
-    @app_commands.rename(state="开关", scope="范围")
-    @app_commands.describe(state="开还是关", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）")
-    @app_commands.choices(state=[Choice(name="开", value="on"), Choice(name="关", value="off")], scope=SCOPE_CHOICES)
+    @admin.command(name="proactive", description="Turn proactive chat on or off (when nobody calls it, it decides by itself whether to speak)")
+    @app_commands.describe(state="On or off", scope=SCOPE_DEFAULT_HELP)
+    @app_commands.choices(state=[Choice(name="On", value="on"), Choice(name="Off", value="off")], scope=SCOPE_CHOICES)
     async def proactive_cmd(
         interaction: discord.Interaction, state: Choice[str], scope: Optional[Choice[str]] = None
     ) -> None:
@@ -314,16 +326,15 @@ def register_commands(bot: "DSBot") -> None:
             return
         scope_name, scope_id, where = target
         bot.settings.set(scope_name, scope_id, "proactive", state.value)
-        text = f"{where}：主动发言已{'打开' if state.value == 'on' else '关闭'}。"
+        text = f"{where}: proactive chat turned {state.value}."
         if state.value == "on" and not bot.settings.view(*_ids(interaction)).enabled:
-            text += "\n⚠️ 但这个频道不在允许的区域，它不会说话。先用 `/ds 区域 操作:允许`。"
+            text += "\n⚠️ But this channel isn't in an allowed area, so it won't speak. Run `/ds area action:Allow` first."
         await _reply(interaction, text)
 
-    @admin.command(name="档位", description="一键套用发言频率：安静 / 普通 / 话痨")
-    @app_commands.rename(preset="档位", scope="范围")
-    @app_commands.describe(preset="选一个档位", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）")
+    @admin.command(name="preset", description="Apply a talkativeness preset in one go: Quiet / Normal / Chatty")
+    @app_commands.describe(preset="Pick a preset", scope=SCOPE_DEFAULT_HELP)
     @app_commands.choices(
-        preset=[Choice(name=f"{name}：{_preset_text(values)}", value=name) for name, values in PRESETS.items()],
+        preset=[Choice(name=f"{name}: {_preset_text(values)}", value=name) for name, values in PRESETS.items()],
         scope=SCOPE_CHOICES,
     )
     async def preset_cmd(
@@ -336,12 +347,12 @@ def register_commands(bot: "DSBot") -> None:
         scope_name, scope_id, where = target
         for key, value in PRESETS[preset.value].items():
             bot.settings.set(scope_name, scope_id, key, value)
-        await _reply(interaction, f"{where}：已切到「{preset.value}」档（{_preset_text(PRESETS[preset.value])}）。")
+        await _reply(interaction, f'{where}: switched to the "{preset.value}" preset ({_preset_text(PRESETS[preset.value])}).')
 
-    @admin.command(name="设置", description="调整单项参数（值填“默认”恢复）")
-    @app_commands.rename(key="参数", value="值", scope="范围")
+    @admin.command(name="set", description='Adjust a single setting (enter "default" as the value to reset it)')
+    @app_commands.rename(key="setting")
     @app_commands.describe(
-        key="要改哪个参数", value="新的值；填“默认”恢复成上一级的设置", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）"
+        key="Which setting to change", value='New value; enter "default" to go back to the level above', scope=SCOPE_DEFAULT_HELP
     )
     @app_commands.choices(key=[Choice(name=SPECS[k].label, value=k) for k in ADMIN_SET_KEYS], scope=SCOPE_CHOICES)
     async def set_cmd(
@@ -353,20 +364,19 @@ def register_commands(bot: "DSBot") -> None:
             return
         scope_name, scope_id, where = target
         spec = SPECS[key.value]
-        if value.strip() in RESET_WORDS:
+        if value.strip().lower() in RESET_WORDS:
             bot.settings.unset(scope_name, scope_id, key.value)
-            await _reply(interaction, f"{where}：「{spec.label}」已恢复默认。")
+            await _reply(interaction, f'{where}: "{spec.label}" now follows the level above.')
             return
         try:
             parsed = bot.settings.set(scope_name, scope_id, key.value, value)
         except ValueError as exc:
-            await _reply(interaction, f"没改成：{exc}")
+            await _reply(interaction, f"Not changed: {exc}")
             return
-        await _reply(interaction, f"{where}：「{spec.label}」= {format_value(spec, parsed)}\n（{spec.help}）")
+        await _reply(interaction, f'{where}: "{spec.label}" = {format_value(spec, parsed)}\n({spec.help})')
 
-    @admin.command(name="人设", description="修改人设（会弹出编辑框）")
-    @app_commands.rename(scope="范围")
-    @app_commands.describe(scope="全服务器、本类别，还是只改本频道（不选 = 全服务器）")
+    @admin.command(name="persona", description="Edit the persona (opens an editor)")
+    @app_commands.describe(scope="Whole server, this category, or only this channel (default: whole server)")
     @app_commands.choices(scope=SCOPE_CHOICES)
     async def persona_cmd(interaction: discord.Interaction, scope: Optional[Choice[str]] = None) -> None:
         target = _target(interaction, scope, default="guild")
@@ -375,7 +385,7 @@ def register_commands(bot: "DSBot") -> None:
             return
         scope_name, scope_id, where = target
         guild_id, _, parent_id, category_id = _ids(interaction)
-        # “上一级”：服务器 → 全局；类别 → 服务器；频道 → 帖子所在频道 → 类别 → 服务器
+        # "the level above": server → global; category → server; channel → the thread's parent channel → category → server
         if scope_name == "guild":
             inherited = bot.settings.get("persona")
         elif scope_name == "category":
@@ -386,48 +396,48 @@ def register_commands(bot: "DSBot") -> None:
         current = bot.settings.overrides(scope_name, scope_id).get("persona") or inherited
         await interaction.response.send_modal(PersonaModal(bot, scope_name, scope_id, where, current, inherited))
 
-    @admin.command(name="状态", description="查看本频道的设置、额度和今天的花费")
+    @admin.command(name="status", description="Show this channel's settings, quota and today's spending")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, status_text(bot, interaction))
 
-    @admin.command(name="清空记忆", description="清空本频道的对话记录和摘要，让它从头开始")
+    @admin.command(name="clear-memory", description="Clear this channel's chat history and summary so it starts fresh")
     async def reset_cmd(interaction: discord.Interaction) -> None:
         bot.engine.reset_channel(interaction.channel_id)
-        await _reply(interaction, "已清空本频道的对话记录和摘要。")
+        await _reply(interaction, "Cleared this channel's chat history and summary.")
 
     bot.tree.add_command(admin)
 
     @bot.tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        log.error("斜杠命令出错：%s", error, exc_info=error)
+        log.error("Slash command error: %s", error, exc_info=error)
         try:
-            await _reply(interaction, f"出错了：{error}")
+            await _reply(interaction, f"Something went wrong: {error}")
         except discord.HTTPException:
             pass
 
     if not bot.secrets.control_guild_id:
-        log.info("没有设置 CONTROL_GUILD_ID，不注册主人命令；预算等参数请改 config.toml")
+        log.info("CONTROL_GUILD_ID isn't set, so the owner commands aren't registered; change the budget and such in config.toml")
         return
 
-    # 能不能用由 is_owner 决定；default_permissions 只是让普通成员看不到。用“管理服务器”而不是“管理员”：
-    # bot 放在朋友的服务器时，你在那里多半只是管理（能用 /ds），不一定有“管理员”权限
+    # Who can use it is decided by is_owner; default_permissions only hides it from regular members. It's "Manage Server" rather than
+    # "Administrator": when the bot is in a friend's server you're probably a moderator there (able to use /ds), not necessarily an Administrator
     owner = app_commands.Group(
         name="dsowner",
-        description="DeepSeek 群友：主人专用",
+        description="DeepSeek Buddy: owner only",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
     async def is_owner(interaction: discord.Interaction) -> bool:
         if interaction.user.id != bot.secrets.owner_id:
-            await _reply(interaction, "只有 bot 的主人能用这个命令。")
+            await _reply(interaction, "Only the bot's owner can use this command.")
             return False
         return True
 
-    @owner.command(name="设置", description="调整参数：全局默认，或者指定某个服务器")
-    @app_commands.rename(key="参数", value="值", target="服务器id")
+    @owner.command(name="set", description="Adjust a setting: the global default, or for one specific server")
+    @app_commands.rename(key="setting", target="server-id")
     @app_commands.describe(
-        key="要改哪个参数", value="新的值；填“默认”恢复", target="只改某个服务器就填它的 ID；不填 = 全局默认"
+        key="Which setting to change", value='New value; enter "default" to reset it', target="To change only one server, enter its ID; leave empty for the global default"
     )
     @app_commands.choices(key=[Choice(name=SPECS[k].label, value=k) for k in OWNER_SET_KEYS])
     async def owner_set(
@@ -437,26 +447,27 @@ def register_commands(bot: "DSBot") -> None:
             return
         if target and target.strip():
             if not target.strip().isdecimal():
-                await _reply(interaction, "服务器 ID 应该是一串数字（右键服务器 → 复制服务器 ID）。")
+                await _reply(interaction, "A server ID should be a string of digits (right-click the server → Copy Server ID).")
                 return
             scope_name, scope_id = "guild", int(target.strip())
             guild = bot.get_guild(scope_id)
-            where = f"服务器「{guild.name if guild else scope_id}」"
+            where = f'Server "{guild.name if guild else scope_id}"'
         else:
-            scope_name, scope_id, where = "global", 0, "全局默认"
+            scope_name, scope_id, where = "global", 0, "Global setting"
         spec = SPECS[key.value]
-        if value.strip() in RESET_WORDS:
+        if value.strip().lower() in RESET_WORDS:
             bot.settings.unset(scope_name, scope_id, key.value)
-            await _reply(interaction, f"{where}：「{spec.label}」已恢复 config.toml 里的默认值。")
+            back_to = "is back to the value in config.toml" if scope_name == "global" else "now follows the global setting"
+            await _reply(interaction, f'{where}: "{spec.label}" {back_to}.')
             return
         try:
             parsed = bot.settings.set(scope_name, scope_id, key.value, value)
         except ValueError as exc:
-            await _reply(interaction, f"没改成：{exc}")
+            await _reply(interaction, f"Not changed: {exc}")
             return
-        await _reply(interaction, f"{where}：「{spec.label}」= {format_value(spec, parsed)}\n（{spec.help}）")
+        await _reply(interaction, f'{where}: "{spec.label}" = {format_value(spec, parsed)}\n({spec.help})')
 
-    @owner.command(name="总览", description="今天各服务器的花费和调用情况")
+    @owner.command(name="overview", description="Today's spending and calls for each server")
     async def owner_overview(interaction: discord.Interaction) -> None:
         if not await is_owner(interaction):
             return
@@ -464,18 +475,18 @@ def register_commands(bot: "DSBot") -> None:
         day = bot.ledger.day(now)
         spend = bot.ledger.all_guilds(now)
         global_view = bot.settings.view(None)
-        lines = [f"**{day} 花费总览**（全局上限 ${global_view.global_daily_budget_usd:g}）"]
+        lines = [f"**Spending overview for {day}** (global cap ${global_view.global_daily_budget_usd:g})"]
         for guild in sorted(bot.guilds, key=lambda g: -spend.get(g.id, 0.0)):
             stats = bot.store.day_stats(day, guild_id=guild.id)
             budget = bot.settings.get("daily_budget_usd", guild_id=guild.id)
             hit = stats["hit_rate"]
             lines.append(
-                f"{guild.name}（{guild.id}）：${spend.get(guild.id, 0.0):.4f} / ${budget:g}"
-                f" · 调用 {stats['calls']} 次" + (f" · 命中率 {hit:.0%}" if hit is not None else "")
+                f"{guild.name} ({guild.id}): ${spend.get(guild.id, 0.0):.4f} / ${budget:g}"
+                f" · {_n(stats['calls'], 'call')}" + (f" · hit rate {hit:.0%}" if hit is not None else "")
             )
-        lines.append(f"合计：${sum(spend.values()):.4f}")
+        lines.append(f"Total: ${sum(spend.values()):.4f}")
         if now < bot.engine.paused_until:
-            lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
+            lines.append("⚠️ DeepSeek calls are paused (insufficient balance or invalid key; see the logs)")
         await _reply(interaction, "\n".join(lines))
 
     bot.tree.add_command(owner, guild=discord.Object(id=bot.secrets.control_guild_id))

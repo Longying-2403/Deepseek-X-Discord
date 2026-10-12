@@ -1,7 +1,7 @@
-"""DeepSeek Chat Completions 客户端。
+"""DeepSeek Chat Completions client.
 
-直接走 HTTP（aiohttp 是 discord.py 自带的依赖），不额外装 openai SDK，
-这样思考开关、用量里的缓存字段都按 DeepSeek 文档原样处理。
+Talks HTTP directly (aiohttp already comes with discord.py) instead of installing the openai SDK,
+so the thinking switch and the cache fields in usage are handled exactly as DeepSeek documents them.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def build_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"model": model, "messages": messages}
     if thinking == "off":
-        # 思考模式默认开启，不需要时必须显式关掉
+        # thinking mode is on by default, so it has to be turned off explicitly when it isn't wanted
         payload["thinking"] = {"type": "disabled"}
     else:
         payload["thinking"] = {"type": "enabled"}
@@ -44,7 +44,7 @@ def build_payload(
     if max_tokens:
         payload["max_tokens"] = int(max_tokens)
     if user_id:
-        payload["user_id"] = user_id  # 按服务器隔离 KV 缓存
+        payload["user_id"] = user_id  # isolate the KV cache per server
     return payload
 
 
@@ -52,7 +52,7 @@ def parse_completion(data: dict[str, Any]) -> Completion:
     try:
         choice = data["choices"][0]
     except (KeyError, IndexError, TypeError):
-        raise LLMError(f"响应格式不对：{str(data)[:200]}") from None
+        raise LLMError(f"unexpected response format: {str(data)[:200]}") from None
     message = choice.get("message") or {}
     usage = data.get("usage") or {}
     prompt = int(usage.get("prompt_tokens") or 0)
@@ -100,12 +100,12 @@ class DeepSeekClient:
             self._session = None
 
     async def _post(self, payload: dict[str, Any]) -> tuple[int, Any]:
-        import aiohttp  # 延迟导入：核心逻辑测试时不需要
+        import aiohttp  # lazy import: not needed when testing the core logic
 
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
-                trust_env=True,  # 支持 HTTPS_PROXY 环境变量
+                trust_env=True,  # honor the HTTPS_PROXY environment variable
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
         async with self._session.post(self.url, json=payload) as resp:
@@ -134,16 +134,16 @@ class DeepSeekClient:
             try:
                 status, data = await self._post(payload)
             except asyncio.TimeoutError:
-                # 超时不重试：请求可能已经在对方那边跑完并计费了，再发一次只会更慢、更贵
-                raise LLMError(f"请求超时（{self.timeout:g} 秒）") from None
-            except Exception as exc:  # aiohttp.ClientError 等网络错误
-                last_error = LLMError(f"网络错误：{exc!r}")
+                # no retry on timeout: the request may already have finished and been billed on their side, so sending it again is only slower and pricier
+                raise LLMError(f"request timed out ({self.timeout:g} s)") from None
+            except Exception as exc:  # network errors such as aiohttp.ClientError
+                last_error = LLMError(f"network error: {exc!r}")
                 continue
             if status == 200 and isinstance(data, dict):
                 return parse_completion(data)
-            last_error = LLMError(f"HTTP {status}：{_error_message(data)}", status=status)
+            last_error = LLMError(f"HTTP {status}: {_error_message(data)}", status=status)
             if status not in RETRY_STATUS:
                 break
-            log.warning("DeepSeek 返回 %s，准备重试（第 %d 次）", status, attempt + 1)
+            log.warning("DeepSeek returned %s, retrying (attempt %d)", status, attempt + 1)
         assert last_error is not None
         raise last_error

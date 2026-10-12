@@ -1,4 +1,4 @@
-"""花费账本：按 bot.timezone 的自然日累计，每个服务器一笔。"""
+"""Spending ledger: totals per calendar day in bot.timezone, one entry per server."""
 
 from __future__ import annotations
 

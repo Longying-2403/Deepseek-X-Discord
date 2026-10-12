@@ -14,35 +14,35 @@ REPLY = lambda to, *texts: json.dumps(  # noqa: E731
 
 class MentionPath(unittest.IsolatedAsyncioTestCase):
     async def test_mention_gets_immediate_reply(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在呢"))
-        await engine.handle_message(msg(501, "@小D 在吗", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "here"))
+        await engine.handle_message(msg(501, "@Dee you there?", mentions_bot=True))
         await engine.drain()
 
         self.assertEqual(len(llm.calls), 1)
         call = llm.calls[0]
-        self.assertEqual(call["thinking"], "off")  # 被点名默认不思考，求快
+        self.assertEqual(call["thinking"], "off")  # when called, no thinking by default, so it answers fast
         self.assertTrue(call["json_mode"])
         self.assertEqual(call["user_id"], f"guild-{GUILD}")
-        self.assertEqual(transport.sent, [(CHANNEL, "在呢", 501, True)])
+        self.assertEqual(transport.sent, [(CHANNEL, "here", 501, True)])
         user = call["messages"][-1]["content"]
-        self.assertIn("#1 阿明：@小D 在吗 〔@你〕", user)
-        self.assertIn("（#1 在叫你，回应一下，用对方那条消息的语言回。）", user)
+        self.assertIn("#1 Alex: @Dee you there? 〔@you〕", user)
+        self.assertIn("(#1 called you. Respond, and use the language of their message.)", user)
         st = engine.states[CHANNEL]
         self.assertEqual(st.pending, [])
         self.assertEqual(len(st.conversation.turns), 2)
 
     async def test_history_is_append_only(self):
-        """每一轮请求都必须以上一轮请求 + 上一轮输出开头，这是缓存命中的前提。"""
-        outputs = [REPLY(1, "第一句"), REPLY(3, "第二句"), '{"actions": []}']
+        """Every request must start with the previous request + the previous output; that's what makes the cache hit."""
+        outputs = [REPLY(1, "first line"), REPLY(3, "second line"), '{"actions": []}']
         engine, llm, transport, clock = make_engine(lambda call: outputs[len(llm.calls) - 1])
         await engine.handle_message(msg(501, "hi", mentions_bot=True))
         await engine.drain()
         clock.advance(30)
-        await engine.handle_message(msg(502, "随便聊聊", author=12, name="小雨"))
-        await engine.handle_message(msg(503, "对吧", mentions_bot=True))
+        await engine.handle_message(msg(502, "just chatting", author=12, name="Mia"))
+        await engine.handle_message(msg(503, "right?", mentions_bot=True))
         await engine.drain()
         clock.advance(30)
-        await engine.handle_message(msg(504, "再来", mentions_bot=True))
+        await engine.handle_message(msg(504, "one more", mentions_bot=True))
         await engine.drain()
 
         self.assertEqual(len(llm.calls), 3)
@@ -53,51 +53,51 @@ class MentionPath(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_defaults_to_trigger_when_to_missing(self):
         engine, llm, transport, clock = make_engine(
-            lambda call: json.dumps({"actions": [{"type": "reply", "messages": ["好"]}]})
+            lambda call: json.dumps({"actions": [{"type": "reply", "messages": ["sure"]}]})
         )
-        await engine.handle_message(msg(501, "前情", author=12, name="小雨"))
-        await engine.handle_message(msg(502, "@小D 帮我看看", mentions_bot=True))
+        await engine.handle_message(msg(501, "some backstory first", author=12, name="Mia"))
+        await engine.handle_message(msg(502, "@Dee can you take a look", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(transport.sent, [(CHANNEL, "好", 502, True)])
+        self.assertEqual(transport.sent, [(CHANNEL, "sure", 502, True)])
 
     async def test_plain_text_output_still_answers_mention(self):
-        engine, llm, transport, clock = make_engine(lambda call: "在的在的")
-        await engine.handle_message(msg(501, "在吗", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: "yep, I'm here")
+        await engine.handle_message(msg(501, "you there?", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(transport.sent, [(CHANNEL, "在的在的", 501, True)])
+        self.assertEqual(transport.sent, [(CHANNEL, "yep, I'm here", 501, True)])
         stored = engine.states[CHANNEL].conversation.turns[-1].content
-        self.assertEqual(json.loads(stored)["actions"][0]["messages"], ["在的在的"])
+        self.assertEqual(json.loads(stored)["actions"][0]["messages"], ["yep, I'm here"])
 
     async def test_empty_json_output_is_retried_once(self):
-        outputs = ["", REPLY(1, "抱歉刚走神了")]
+        outputs = ["", REPLY(1, "sorry, zoned out for a sec")]
         engine, llm, transport, clock = make_engine(lambda call: outputs[len(llm.calls) - 1])
-        await engine.handle_message(msg(501, "在吗", mentions_bot=True))
+        await engine.handle_message(msg(501, "you there?", mentions_bot=True))
         await engine.drain()
         self.assertEqual(len(llm.calls), 2)
-        self.assertEqual(transport.sent[0][1], "抱歉刚走神了")
+        self.assertEqual(transport.sent[0][1], "sorry, zoned out for a sec")
 
     async def test_rate_limit_per_user(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "嗯"), defaults={"mention_rate_limit": 2})
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "mhm"), defaults={"mention_rate_limit": 2})
         for i in range(3):
-            await engine.handle_message(msg(501 + i, f"@小D 第{i}次", mentions_bot=True))
+            await engine.handle_message(msg(501 + i, f"@Dee ping {i}", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 三条合并成一轮
+        self.assertEqual(len(llm.calls), 1)  # the three are merged into one round
         user = llm.calls[0]["messages"][-1]["content"]
-        self.assertEqual(user.count("〔@你〕"), 3)  # 都标出来了
-        self.assertIn("（#1、#2 在叫你，回应一下，用对方那条消息的语言回。）", user)  # 但只有前两次算数
+        self.assertEqual(user.count("〔@you〕"), 3)  # all of them are marked
+        self.assertIn("(#1, #2 called you. Respond, and use the language of their message.)", user)  # but only the first two count
 
     async def test_other_bots_never_trigger(self):
         engine, llm, transport, clock = make_engine(defaults={"proactive": True})
-        await engine.handle_message(msg(501, "@小D 你好", mentions_bot=True, is_bot=True, name="别的bot"))
+        await engine.handle_message(msg(501, "@Dee hello", mentions_bot=True, is_bot=True, name="OtherBot"))
         clock.advance(600)
         await engine.tick()
         await engine.drain()
         self.assertEqual(llm.calls, [])
-        self.assertEqual(len(engine.states[CHANNEL].pending), 1)  # 但会作为上下文留着
+        self.assertEqual(len(engine.states[CHANNEL].pending), 1)  # but it's kept as context
 
     async def test_typing_time_counts_model_latency(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "短"))
-        await engine.handle_message(msg(501, "在吗", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "ok"))
+        await engine.handle_message(msg(501, "you there?", mentions_bot=True))
         await engine.drain()
         self.assertEqual(engine.test_sleeps, [engine.ec.typing_min_seconds])
 
@@ -105,7 +105,7 @@ class MentionPath(unittest.IsolatedAsyncioTestCase):
 class ProactivePath(unittest.IsolatedAsyncioTestCase):
     async def test_off_by_default(self):
         engine, llm, transport, clock = make_engine()
-        await engine.handle_message(msg(501, "有人吗"))
+        await engine.handle_message(msg(501, "anyone here?"))
         clock.advance(600)
         await engine.tick()
         await engine.drain()
@@ -113,28 +113,28 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
 
     async def test_waits_for_quiet(self):
         engine, llm, transport, clock = make_engine(defaults={"proactive": True})
-        await engine.handle_message(msg(501, "今晚吃啥"))
-        await engine.handle_message(msg(502, "火锅吧", author=12, name="小雨"))
+        await engine.handle_message(msg(501, "what's for dinner tonight"))
+        await engine.handle_message(msg(502, "hotpot?", author=12, name="Mia"))
         await engine.tick()
         clock.advance(10)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(llm.calls, [])  # 还没冷场
+        self.assertEqual(llm.calls, [])  # the chat hasn't gone quiet yet
 
         clock.advance(25)
         await engine.tick()
         await engine.drain()
         self.assertEqual(len(llm.calls), 1)
         self.assertEqual(llm.calls[0]["thinking"], "low")
-        self.assertIn("（没人叫你，想说再说，拿不准就不说。）", llm.calls[0]["messages"][-1]["content"])
-        self.assertEqual(transport.sent, [])  # 模型选择不说话
+        self.assertIn("(Nobody called you. Speak only if you want to; when in doubt, stay quiet.)", llm.calls[0]["messages"][-1]["content"])
+        self.assertEqual(transport.sent, [])  # the model chose to stay quiet
         st = engine.states[CHANNEL]
-        self.assertEqual(st.bucket.tokens, 3.0)  # 沉默不扣额度
-        self.assertEqual(len(st.conversation.turns), 2)  # 沉默也记成一轮
+        self.assertEqual(st.bucket.tokens, 3.0)  # staying quiet costs no quota
+        self.assertEqual(len(st.conversation.turns), 2)  # staying quiet is still recorded as a round
 
     async def test_typing_postpones_judgement(self):
         engine, llm, transport, clock = make_engine(defaults={"proactive": True})
-        await engine.handle_message(msg(501, "我想想怎么说"))
+        await engine.handle_message(msg(501, "let me think how to put this"))
         clock.advance(25)
         engine.handle_typing(CHANNEL)
         clock.advance(10)
@@ -149,7 +149,7 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
     async def test_max_wait_when_never_quiet(self):
         engine, llm, transport, clock = make_engine(defaults={"proactive": True})
         for i in range(30):
-            await engine.handle_message(msg(600 + i, f"刷屏{i}", author=11 + i % 2))
+            await engine.handle_message(msg(600 + i, f"spam {i}", author=11 + i % 2))
             await engine.tick()
             await engine.drain()
             if llm.calls:
@@ -160,7 +160,7 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
 
     async def test_quota_spent_and_refilled_by_turns(self):
         engine, llm, transport, clock = make_engine(
-            lambda call: REPLY(None, "插一句"),
+            lambda call: REPLY(None, "just chiming in"),
             defaults={"proactive": True, "quota_capacity": 1, "refill_turns": 3, "min_speak_gap": 0, "min_eval_interval": 10},
         )
         await engine.handle_message(msg(501, "A", author=11))
@@ -174,21 +174,21 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
         clock.advance(31)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 没额度：连判断都不做
+        self.assertEqual(len(llm.calls), 1)  # no quota: it doesn't even check
 
-        await engine.handle_message(msg(503, "C", author=13))  # 第 3 轮 → 恢复 1 次
+        await engine.handle_message(msg(503, "C", author=13))  # 3rd turn → 1 refilled
         clock.advance(31)
         await engine.tick()
         await engine.drain()
         self.assertEqual(len(llm.calls), 2)
-        self.assertIn("#2 阿明：B", llm.calls[1]["messages"][-1]["content"])  # 攒着的消息也带上了
+        self.assertIn("#2 Alex: B", llm.calls[1]["messages"][-1]["content"])  # the messages held back are included too
 
     async def test_same_author_burst_is_one_turn(self):
         engine, llm, transport, clock = make_engine(defaults={"refill_turns": 3})
         st = engine.state(CHANNEL, GUILD)
         st.bucket.tokens = 0
         for i in range(5):
-            await engine.handle_message(msg(501 + i, f"分行打字{i}"))
+            await engine.handle_message(msg(501 + i, f"typing it line by line {i}"))
             clock.advance(2)
         self.assertEqual(st.bucket.tokens, 0)
         self.assertEqual(st.bucket.turns_since_refill, 1)
@@ -198,7 +198,7 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
             lambda call: json.dumps({"actions": [{"type": "react", "to": 1, "emoji": "🎉"}]}),
             defaults={"proactive": True},
         )
-        await engine.handle_message(msg(501, "终于下班了"))
+        await engine.handle_message(msg(501, "finally off work"))
         clock.advance(31)
         await engine.tick()
         await engine.drain()
@@ -207,15 +207,15 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
 
     async def test_min_speak_gap_after_mention_reply(self):
         engine, llm, transport, clock = make_engine(
-            lambda call: REPLY(1, "嗯"), defaults={"proactive": True, "min_speak_gap": 120}
+            lambda call: REPLY(1, "mhm"), defaults={"proactive": True, "min_speak_gap": 120}
         )
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
-        await engine.handle_message(msg(502, "然后呢", author=12))
+        await engine.handle_message(msg(502, "and then?", author=12))
         clock.advance(40)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 刚说过话，主动发言要等够间隔
+        self.assertEqual(len(llm.calls), 1)  # it just spoke, so speaking up on its own waits out the gap
         clock.advance(90)
         await engine.tick()
         await engine.drain()
@@ -225,28 +225,28 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
 class Budget(unittest.IsolatedAsyncioTestCase):
     async def test_over_budget_only_answers_mentions_then_stops(self):
         engine, llm, transport, clock = make_engine(
-            lambda call: REPLY(None, "嗯"), defaults={"proactive": True, "daily_budget_usd": 0.001}
+            lambda call: REPLY(None, "mhm"), defaults={"proactive": True, "daily_budget_usd": 0.001}
         )
         engine.ledger.add(GUILD, 0.0015, clock())
-        await engine.handle_message(msg(501, "聊点啥"))
+        await engine.handle_message(msg(501, "what should we talk about"))
         clock.advance(60)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(llm.calls, [])  # 超预算：不主动
+        self.assertEqual(llm.calls, [])  # over budget: no speaking up on its own
 
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 点名还回
+        self.assertEqual(len(llm.calls), 1)  # still answers when called
 
         engine.ledger.add(GUILD, 0.01, clock())
         clock.advance(60)
-        await engine.handle_message(msg(503, "@小D 还在吗", mentions_bot=True))
+        await engine.handle_message(msg(503, "@Dee still there?", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 超过 2 倍：彻底停
+        self.assertEqual(len(llm.calls), 1)  # over 2x: stops completely
 
     async def test_cost_is_recorded(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "嗯"))
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "mhm"))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         spent = engine.ledger.guild_spent(GUILD, clock())
         self.assertGreater(spent, 0)
@@ -258,78 +258,78 @@ class Budget(unittest.IsolatedAsyncioTestCase):
 class Errors(unittest.IsolatedAsyncioTestCase):
     async def test_insufficient_balance_pauses(self):
         engine, llm, transport, clock = make_engine(lambda call: LLMError("Insufficient Balance", status=402))
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertEqual(transport.sent, [])
         self.assertEqual(transport.reactions, [(CHANNEL, 501, "⚠️")])
         self.assertGreater(engine.paused_until, clock())
-        await engine.handle_message(msg(502, "@小D 再试", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee try again", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 暂停期间不再调用
+        self.assertEqual(len(llm.calls), 1)  # no more calls while paused
 
     async def test_error_keeps_messages_for_next_round(self):
-        outputs = [LLMError("Server Error", status=500), REPLY(2, "刚才卡了")]
+        outputs = [LLMError("Server Error", status=500), REPLY(2, "sorry, I froze up there")]
         engine, llm, transport, clock = make_engine(lambda call: outputs[len(llm.calls) - 1])
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertEqual(len(engine.states[CHANNEL].pending), 1)
-        await engine.handle_message(msg(502, "@小D 喂", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee hey", mentions_bot=True))
         await engine.drain()
         user = llm.calls[1]["messages"][-1]["content"]
-        self.assertIn("：@小D 〔@你〕", user)  # 上次没处理的消息还在
-        self.assertIn("：@小D 喂 〔@你〕", user)
+        self.assertIn(": @Dee 〔@you〕", user)  # the message that wasn't handled last time is still there
+        self.assertIn(": @Dee hey 〔@you〕", user)
 
 
 class Memory(unittest.IsolatedAsyncioTestCase):
     async def test_compaction_keeps_recent_rounds_and_summarizes_old_ones(self):
         def responder(call):
             if not call["json_mode"]:
-                return "阿明喜欢火锅；小雨在找工作"
-            return REPLY(None, "嗯嗯")
+                return "Alex likes hotpot; Mia is job hunting"
+            return REPLY(None, "uh-huh")
 
         engine, llm, transport, clock = make_engine(responder, defaults={"context_budget_tokens": 4000})
         llm.prompt_tokens = 5000
         for i in range(14):
-            await engine.handle_message(msg(501 + i, f"@小D 第{i}轮", mentions_bot=True))
+            await engine.handle_message(msg(501 + i, f"@Dee round {i}", mentions_bot=True))
             await engine.drain()
             clock.advance(30)
 
         summary_calls = [c for c in llm.calls if not c["json_mode"]]
-        self.assertEqual(len(summary_calls), 1)  # 只压了一次，不是每轮都压
-        self.assertIn("第0轮", summary_calls[0]["messages"][1]["content"])
+        self.assertEqual(len(summary_calls), 1)  # compacted only once, not every round
+        self.assertIn("round 0", summary_calls[0]["messages"][1]["content"])
         conv = engine.states[CHANNEL].conversation
-        self.assertEqual(conv.summary, "阿明喜欢火锅；小雨在找工作")
+        self.assertEqual(conv.summary, "Alex likes hotpot; Mia is job hunting")
         last_rounds = [content_text(t.content) for t in conv.turns if t.role == "user"]
-        self.assertTrue(any("第13轮" in x for x in last_rounds))
-        self.assertGreaterEqual(len(conv.turns), 12)  # 最近 6 轮完整保留
-        self.assertFalse(any("第0轮" in x for x in last_rounds))
+        self.assertTrue(any("round 13" in x for x in last_rounds))
+        self.assertGreaterEqual(len(conv.turns), 12)  # the last 6 rounds are kept whole
+        self.assertFalse(any("round 0" in x for x in last_rounds))
 
-        await engine.handle_message(msg(520, "@小D 还记得吗", mentions_bot=True))
+        await engine.handle_message(msg(520, "@Dee remember?", mentions_bot=True))
         await engine.drain()
         chat_calls = [c for c in llm.calls if c["json_mode"]]
         system = chat_calls[-1]["messages"][0]["content"]
-        self.assertIn("更早的聊天摘要", system)
-        self.assertIn("阿明喜欢火锅", system)
+        self.assertIn("Summary of earlier chat", system)
+        self.assertIn("Alex likes hotpot", system)
 
     async def test_history_survives_restart(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "记住了"))
-        await engine.handle_message(msg(501, "@小D 我叫阿明", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "noted"))
+        await engine.handle_message(msg(501, "@Dee my name is Alex", mentions_bot=True))
         await engine.drain()
-        engine.states.clear()  # 模拟重启：内存状态清空，只剩数据库
-        await engine.handle_message(msg(502, "@小D 我叫啥", mentions_bot=True))
+        engine.states.clear()  # simulate a restart: in-memory state is wiped, only the database is left
+        await engine.handle_message(msg(502, "@Dee what's my name?", mentions_bot=True))
         await engine.drain()
         messages = llm.calls[-1]["messages"]
         self.assertEqual(messages[: len(llm.calls[0]["messages"])], llm.calls[0]["messages"])
-        self.assertIn("#2 阿明：@小D 我叫啥", messages[-1]["content"])  # 编号接着往下
+        self.assertIn("#2 Alex: @Dee what's my name?", messages[-1]["content"])  # numbering carries on
 
     async def test_reset_channel(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "好"))
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "sure"))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         engine.reset_channel(CHANNEL)
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(len(llm.calls[-1]["messages"]), 2)  # system + 新消息
+        self.assertEqual(len(llm.calls[-1]["messages"]), 2)  # system + the new message
 
 
 class Images(unittest.IsolatedAsyncioTestCase):
@@ -340,10 +340,10 @@ class Images(unittest.IsolatedAsyncioTestCase):
             sides[att.filename] = max_side
             return f"data:image/jpeg;base64,{att.filename}"
 
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(2, "哈哈"), image_loader=loader)
-        await engine.handle_message(msg(501, "看这个梗", images=[ImageAttachment("meme", "image/png", 10)]))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(2, "haha"), image_loader=loader)
+        await engine.handle_message(msg(501, "check out this meme", images=[ImageAttachment("meme", "image/png", 10)]))
         await engine.handle_message(
-            msg(502, "@小D 这图啥意思", mentions_bot=True, author=12, name="小雨",
+            msg(502, "@Dee what does this pic mean", mentions_bot=True, author=12, name="Mia",
                 images=[ImageAttachment("q", "image/png", 10)])
         )
         await engine.drain()
@@ -355,9 +355,9 @@ class Images(unittest.IsolatedAsyncioTestCase):
             [{"url": "data:image/jpeg;base64,meme", "detail": "low"}, {"url": "data:image/jpeg;base64,q", "detail": "auto"}],
         )
         text = "".join(p.get("text", "") for p in content)
-        self.assertIn("#1 阿明：[图片] 看这个梗", text)
-        self.assertIn("（以上是 #1 的图片）", text)
-        self.assertEqual(sides, {"q": 1024, "meme": 512})  # 不是叫它的图缩得更小
+        self.assertIn("#1 Alex: [image] check out this meme", text)
+        self.assertIn("(Above: images from #1)", text)
+        self.assertEqual(sides, {"q": 1024, "meme": 512})  # images not from the person calling it are scaled down more
 
     async def test_image_limit_prefers_recent(self):
         async def loader(att, max_side):
@@ -366,8 +366,8 @@ class Images(unittest.IsolatedAsyncioTestCase):
         engine, llm, transport, clock = make_engine(lambda call: "{\"actions\": []}", image_loader=loader)
         engine.ec.max_images_per_round = 2
         imgs = [ImageAttachment(f"p{i}", "image/png", 1) for i in range(3)]
-        await engine.handle_message(msg(501, "旧图", images=[imgs[0]]))
-        await engine.handle_message(msg(502, "新图", images=imgs[1:], mentions_bot=True))
+        await engine.handle_message(msg(501, "old pic", images=[imgs[0]]))
+        await engine.handle_message(msg(502, "new pics", images=imgs[1:], mentions_bot=True))
         await engine.drain()
         content = llm.calls[0]["messages"][-1]["content"]
         urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
@@ -376,19 +376,19 @@ class Images(unittest.IsolatedAsyncioTestCase):
 
 
 class Robustness(unittest.IsolatedAsyncioTestCase):
-    """评审发现的问题的回归测试。"""
+    """Regression tests for problems found in code review."""
 
     async def test_bad_request_drops_batch_instead_of_blocking_channel(self):
-        outputs = [LLMError("Content Exists Risk", status=400), REPLY(2, "在")]
+        outputs = [LLMError("Content Exists Risk", status=400), REPLY(2, "here")]
         engine, llm, transport, clock = make_engine(lambda call: outputs[len(llm.calls) - 1])
-        await engine.handle_message(msg(501, "@小D 某条会被拒的内容", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee something that will get rejected", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(engine.states[CHANNEL].pending, [])  # 丢掉了，不会每次重发
+        self.assertEqual(engine.states[CHANNEL].pending, [])  # dropped, so it isn't resent every time
         self.assertEqual(transport.reactions, [(CHANNEL, 501, "⚠️")])
-        await engine.handle_message(msg(502, "@小D 在吗", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee you there?", mentions_bot=True))
         await engine.drain()
         user = llm.calls[1]["messages"][-1]["content"]
-        self.assertNotIn("会被拒的内容", user)
+        self.assertNotIn("will get rejected", user)
         self.assertEqual(len(transport.sent), 1)
 
     async def test_bad_request_with_images_retries_without_them(self):
@@ -399,11 +399,11 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
             content = call["messages"][-1]["content"]
             if isinstance(content, list):
                 return LLMError("bad image", status=400)
-            return REPLY(1, "图打不开，不过我看到你说的了")
+            return REPLY(1, "the pic won't open, but I saw what you said")
 
         engine, llm, transport, clock = make_engine(responder, image_loader=loader)
         await engine.handle_message(
-            msg(501, "@小D 看图", mentions_bot=True, images=[ImageAttachment("x.png", "image/png", 10)])
+            msg(501, "@Dee look at this pic", mentions_bot=True, images=[ImageAttachment("x.png", "image/png", 10)])
         )
         await engine.drain()
         self.assertEqual(len(llm.calls), 2)
@@ -411,7 +411,7 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(transport.sent), 1)
 
     async def test_crash_after_paid_call_is_recorded_and_cools_down(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "嗯"), defaults={"proactive": True})
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "mhm"), defaults={"proactive": True})
         real = engine.store.append_round
         calls = {"n": 0}
 
@@ -422,101 +422,101 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
             return real(*args, **kwargs)
 
         engine.store.append_round = flaky
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         stats = engine.store.day_stats(engine.ledger.day(clock()), guild_id=GUILD)
-        self.assertEqual(stats["calls"], 1)  # 花了的钱记进了数据库
+        self.assertEqual(stats["calls"], 1)  # the money spent was recorded in the database
         self.assertGreater(stats["cost"], 0)
         st = engine.states[CHANNEL]
         self.assertFalse(any(m.trigger for m in st.pending))
         self.assertGreater(st.error_until, clock())
-        for _ in range(3):  # 冷却期内不会每次 tick 都再花钱
+        for _ in range(3):  # during the cooldown it doesn't spend money again on every tick
             clock.advance(5)
             await engine.tick()
             await engine.drain()
         self.assertEqual(len(llm.calls), 1)
 
     async def test_failed_call_does_not_swallow_new_mentions(self):
-        outputs = [LLMError("Server Error", status=500), REPLY(2, "来了")]
+        outputs = [LLMError("Server Error", status=500), REPLY(2, "coming")]
         engine, llm, transport, clock = make_engine(lambda call: outputs[len(llm.calls) - 1])
 
         async def hook(call):
-            if len(llm.calls) == 1:  # 第一次调用进行中，又有人叫它
-                await engine.handle_message(msg(502, "@小D 我也问一下", mentions_bot=True, author=12, name="小雨"))
+            if len(llm.calls) == 1:  # someone else calls it while the first call is still in progress
+                await engine.handle_message(msg(502, "@Dee I have a question too", mentions_bot=True, author=12, name="Mia"))
 
         llm.hook = hook
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertEqual(len(llm.calls), 2)
-        self.assertIn("在叫你", llm.calls[1]["messages"][-1]["content"])
+        self.assertIn("called you", llm.calls[1]["messages"][-1]["content"])
         self.assertEqual(len(transport.sent), 1)
 
     async def test_reset_during_round_is_not_undone(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "嗯"))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "mhm"))
 
         async def hook(call):
             if len(llm.calls) == 1:
                 engine.reset_channel(CHANNEL)
 
         llm.hook = hook
-        await engine.handle_message(msg(501, "@小D 我的秘密", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee here's my secret", mentions_bot=True))
         await engine.drain()
         self.assertEqual(engine.store.load_conversation(CHANNEL, GUILD).turns, [])
         llm.hook = None
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertEqual(len(llm.calls[-1]["messages"]), 2)
 
     async def test_unsendable_channel_spends_quota_and_backs_off(self):
         engine, llm, transport, clock = make_engine(
-            lambda call: REPLY(None, "说点啥"),
+            lambda call: REPLY(None, "just saying something"),
             defaults={"proactive": True, "quota_capacity": 5, "refill_turns": 1, "min_speak_gap": 0, "min_eval_interval": 10},
         )
         transport.can_send = False
         for i in range(5):
-            await engine.handle_message(msg(600 + i, f"消息{i}", author=20 + i))
+            await engine.handle_message(msg(600 + i, f"message {i}", author=20 + i))
             clock.advance(31)
             await engine.tick()
             await engine.drain()
         st = engine.states[CHANNEL]
-        self.assertEqual(len(llm.calls), 3)  # 连续 3 轮发不出去后暂停
+        self.assertEqual(len(llm.calls), 3)  # pauses after 3 rounds in a row that couldn't send
         self.assertGreater(st.error_until, clock())
         self.assertTrue(engine.status(GUILD, CHANNEL, None)["send_blocked"])
 
     async def test_mention_survives_batch_overflow(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "here"))
         engine.ec.max_batch_messages = 5
-        await engine.handle_message(msg(501, "@小D 帮个忙", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee do me a favor", mentions_bot=True))
         for i in range(10):
-            await engine.handle_message(msg(600 + i, f"刷屏{i}", author=12, name="小雨"))
+            await engine.handle_message(msg(600 + i, f"spam {i}", author=12, name="Mia"))
         await engine.drain()
         user = llm.calls[0]["messages"][-1]["content"]
-        self.assertIn("#1 阿明：@小D 帮个忙 〔@你〕", user)
-        self.assertIn("（#1 在叫你，回应一下，用对方那条消息的语言回。）", user)
-        self.assertIn("（前面还有 5 条消息没显示）", user)
+        self.assertIn("#1 Alex: @Dee do me a favor 〔@you〕", user)
+        self.assertIn("(#1 called you. Respond, and use the language of their message.)", user)
+        self.assertIn("(5 earlier messages not shown)", user)
         self.assertEqual(transport.sent[0][2], 501)
 
     async def test_stale_messages_are_pruned(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "嗯"))
-        await engine.handle_message(msg(501, "很久以前的话"))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "mhm"))
+        await engine.handle_message(msg(501, "something said long ago"))
         clock.advance(7 * 3600)
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True))
         await engine.drain()
         user = llm.calls[0]["messages"][-1]["content"]
-        self.assertNotIn("很久以前", user)
+        self.assertNotIn("long ago", user)
 
     async def test_batch_header_shows_time_range(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "嗯"))
-        await engine.handle_message(msg(501, "早"))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "mhm"))
+        await engine.handle_message(msg(501, "morning"))
         clock.advance(600)
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertTrue(llm.calls[0]["messages"][-1]["content"].startswith("【10-07 20:00 ~ 20:10】"))
 
     async def test_paused_mentions_get_warning(self):
         engine, llm, transport, clock = make_engine()
         engine.paused_until = clock() + 600
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertEqual(llm.calls, [])
         self.assertEqual(transport.reactions, [(CHANNEL, 501, "⚠️")])
@@ -526,23 +526,23 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
 
         def responder(call):
             if call["thinking"] != "off":
-                return Completion(content="", reasoning="想太多" * 100, usage=Usage(5000, 4000, 1000, 6000, 6000), finish_reason="length")
-            return REPLY(1, "简单说：可以")
+                return Completion(content="", reasoning="overthinking " * 100, usage=Usage(5000, 4000, 1000, 6000, 6000), finish_reason="length")
+            return REPLY(1, "short answer: yes")
 
         engine, llm, transport, clock = make_engine(responder, defaults={"mention_thinking": "high"})
-        await engine.handle_message(msg(501, "@小D 这个能行吗", mentions_bot=True))
+        await engine.handle_message(msg(501, "@Dee will this work?", mentions_bot=True))
         await engine.drain()
         self.assertEqual([c["thinking"] for c in llm.calls], ["high", "off"])
-        self.assertEqual(transport.sent[0][1], "简单说：可以")
+        self.assertEqual(transport.sent[0][1], "short answer: yes")
         outcomes = engine.store.day_stats(engine.ledger.day(clock()))["outcomes"]
         self.assertEqual(outcomes, {"empty": 1, "reply": 1})
 
     async def test_global_budget_ignores_guild_override(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "嗯"), defaults={"proactive": True})
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "mhm"), defaults={"proactive": True})
         engine.settings.set("global", 0, "global_daily_budget_usd", "0.001")
-        engine.settings.set("guild", GUILD, "global_daily_budget_usd", "100")  # 不应该绕过全局上限
+        engine.settings.set("guild", GUILD, "global_daily_budget_usd", "100")  # must not get around the global cap
         engine.ledger.add(999, 0.002, clock())
-        await engine.handle_message(msg(501, "聊点啥"))
+        await engine.handle_message(msg(501, "what should we talk about"))
         clock.advance(60)
         await engine.tick()
         await engine.drain()
@@ -551,79 +551,79 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
 
 
 class Areas(unittest.IsolatedAsyncioTestCase):
-    """区域开关：频道 > 帖子所在频道 > 类别 > 服务器。"""
+    """Area switches: channel > the thread's parent channel > category > server."""
 
     async def test_disabled_channel_is_ignored_completely(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
-        engine.settings.set("channel", CHANNEL, "enabled", "关")
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "here"))
+        engine.settings.set("channel", CHANNEL, "enabled", "off")
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
         self.assertEqual(llm.calls, [])
-        self.assertNotIn(CHANNEL, engine.states)  # 连缓冲都没有
+        self.assertNotIn(CHANNEL, engine.states)  # not even buffered
 
     async def test_whitelist_by_category(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "在"))
-        engine.settings.set("guild", GUILD, "enabled", "关")
-        engine.settings.set("category", 50, "enabled", "开")
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True, category_id=50))
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True, channel_id=200, category_id=60))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "here"))
+        engine.settings.set("guild", GUILD, "enabled", "off")
+        engine.settings.set("category", 50, "enabled", "on")
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True, category_id=50))
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True, channel_id=200, category_id=60))
         await engine.drain()
         self.assertEqual(len(llm.calls), 1)
         self.assertEqual([s[0] for s in transport.sent], [CHANNEL])
 
     async def test_channel_setting_beats_category(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "在"))
-        engine.settings.set("category", 50, "enabled", "关")
-        engine.settings.set("channel", CHANNEL, "enabled", "开")
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True, category_id=50))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "here"))
+        engine.settings.set("category", 50, "enabled", "off")
+        engine.settings.set("channel", CHANNEL, "enabled", "on")
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True, category_id=50))
         await engine.drain()
         self.assertEqual(len(llm.calls), 1)
 
     async def test_thread_follows_parent_then_category(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "在"))
-        engine.settings.set("category", 50, "enabled", "关")
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "here"))
+        engine.settings.set("category", 50, "enabled", "off")
         thread = dict(channel_id=300, parent_id=CHANNEL, category_id=50, mentions_bot=True)
-        await engine.handle_message(msg(501, "@小D", **thread))
+        await engine.handle_message(msg(501, "@Dee", **thread))
         await engine.drain()
         self.assertEqual(llm.calls, [])
-        engine.settings.set("channel", CHANNEL, "enabled", "开")  # 放开帖子所在的频道
-        await engine.handle_message(msg(502, "@小D", **thread))
+        engine.settings.set("channel", CHANNEL, "enabled", "on")  # turn on the thread's parent channel
+        await engine.handle_message(msg(502, "@Dee", **thread))
         await engine.drain()
         self.assertEqual(len(llm.calls), 1)
 
     async def test_disabling_drops_buffered_messages(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "嗯"), defaults={"proactive": True})
-        await engine.handle_message(msg(501, "攒着的消息"))
-        engine.settings.set("channel", CHANNEL, "enabled", "关")
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(None, "mhm"), defaults={"proactive": True})
+        await engine.handle_message(msg(501, "a message waiting in the buffer"))
+        engine.settings.set("channel", CHANNEL, "enabled", "off")
         clock.advance(60)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(llm.calls, [])  # 主动发言也停了
-        engine.settings.set("channel", CHANNEL, "enabled", "开")
-        await engine.handle_message(msg(502, "@小D", mentions_bot=True))
+        self.assertEqual(llm.calls, [])  # speaking up on its own stops too
+        engine.settings.set("channel", CHANNEL, "enabled", "on")
+        await engine.handle_message(msg(502, "@Dee", mentions_bot=True))
         await engine.drain()
-        self.assertIn("攒着的消息", llm.calls[0]["messages"][-1]["content"])  # 关掉期间没再处理，重新打开时还在
-        engine.settings.set("channel", CHANNEL, "enabled", "关")
-        await engine.handle_message(msg(503, "关掉后说的话"))
+        self.assertIn("a message waiting in the buffer", llm.calls[0]["messages"][-1]["content"])  # nothing was handled while it was off, so it's still there when turned back on
+        engine.settings.set("channel", CHANNEL, "enabled", "off")
+        await engine.handle_message(msg(503, "something said after it was turned off"))
         self.assertEqual(engine.states[CHANNEL].pending, [])
 
 
 class LinkPreviews(unittest.IsolatedAsyncioTestCase):
-    """GIF 选单 / 图片链接：预览图晚一两秒才通过“消息更新”补上。"""
+    """GIF picker / image links: the preview image only arrives a second or two later, through a "message update"."""
 
     async def test_late_preview_is_merged_into_pending_message(self):
         async def loader(att, max_side):
             return "data:image/jpeg;base64," + att.filename
 
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(2, "笑死"), image_loader=loader)
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(2, "lmao"), image_loader=loader)
         await engine.handle_message(msg(501, "https://tenor.com/view/cat-123", awaiting_embeds=True))
         updated = msg(501, "", images=[ImageAttachment("cat.png", None, 0, kind="gif")])
         self.assertTrue(engine.refresh_message(updated))
-        await engine.handle_message(msg(502, "@小D 看这个", mentions_bot=True, author=12, name="小雨"))
+        await engine.handle_message(msg(502, "@Dee look at this", mentions_bot=True, author=12, name="Mia"))
         await engine.drain()
         content = llm.calls[0]["messages"][-1]["content"]
         text = "".join(p.get("text", "") for p in content)
-        self.assertIn("#1 阿明：[GIF]", text)
+        self.assertIn("#1 Alex: [GIF]", text)
         self.assertNotIn("tenor.com", text)
         self.assertEqual([p["image_url"]["url"] for p in content if p["type"] == "image_url"], ["data:image/jpeg;base64,cat.png"])
 
@@ -631,35 +631,35 @@ class LinkPreviews(unittest.IsolatedAsyncioTestCase):
         async def loader(att, max_side):
             return "data:image/jpeg;base64," + att.filename
 
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "这猫好丑"), image_loader=loader)
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "that cat is so ugly"), image_loader=loader)
         waits = []
 
         async def sleep(seconds):
             waits.append(seconds)
-            if seconds == 2.0:  # 等待期间 Discord 推来了带预览的消息更新
+            if seconds == 2.0:  # while it waits, Discord pushes a message update with the preview
                 engine.refresh_message(
-                    msg(501, "@小D 你看", mentions_bot=True, images=[ImageAttachment("cat.png", None, 0, kind="gif")])
+                    msg(501, "@Dee look", mentions_bot=True, images=[ImageAttachment("cat.png", None, 0, kind="gif")])
                 )
 
         engine.sleep = sleep
-        await engine.handle_message(msg(501, "@小D 你看 https://tenor.com/view/cat-1", mentions_bot=True, awaiting_embeds=True))
+        await engine.handle_message(msg(501, "@Dee look https://tenor.com/view/cat-1", mentions_bot=True, awaiting_embeds=True))
         await engine.drain()
         self.assertEqual(waits[0], 2.0)
         content = llm.calls[0]["messages"][-1]["content"]
         self.assertIsInstance(content, list)
-        self.assertEqual(content[1]["image_url"]["detail"], "auto")  # 叫它的人发的图看清楚点
+        self.assertEqual(content[1]["image_url"]["detail"], "auto")  # images from the person calling it get a closer look
 
     async def test_no_wait_without_links(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "here"))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
-        self.assertEqual(len(engine.test_sleeps), 1)  # 只有“打字”那一次，没有等预览
+        self.assertEqual(len(engine.test_sleeps), 1)  # only the one for "typing"; no waiting for a preview
 
     async def test_refresh_after_round_is_ignored(self):
-        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "在"))
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
+        engine, llm, transport, clock = make_engine(lambda call: REPLY(1, "here"))
+        await engine.handle_message(msg(501, "@Dee", mentions_bot=True))
         await engine.drain()
-        self.assertFalse(engine.refresh_message(msg(501, "改过的")))
+        self.assertFalse(engine.refresh_message(msg(501, "edited")))
 
 
 if __name__ == "__main__":

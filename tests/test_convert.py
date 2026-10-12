@@ -1,9 +1,9 @@
-"""用简单的假对象模拟 discord.Message，测试消息转换（不需要装 discord.py）。"""
+"""Test message conversion, with simple fake objects standing in for discord.Message (no need to install discord.py)."""
 
 import unittest
 from types import SimpleNamespace as NS
 
-import helpers  # noqa: F401  (设置 sys.path)
+import helpers  # noqa: F401  (sets up sys.path)
 
 from dsbot.convert import convert_message, parse_aliases
 
@@ -18,8 +18,8 @@ def fake_message(**kw):
         id=501,
         channel=NS(id=100),
         guild=NS(id=1),
-        author=NS(id=11, display_name="阿明", bot=False),
-        clean_content="你好",
+        author=NS(id=11, display_name="Alex", bot=False),
+        clean_content="hello",
         mentions=[],
         role_mentions=[],
         reference=None,
@@ -39,7 +39,7 @@ def convert(message, aliases="", ours=()):
 class Convert(unittest.TestCase):
     def test_plain(self):
         m = convert(fake_message())
-        self.assertEqual((m.message_id, m.channel_id, m.guild_id, m.author_name, m.text), (501, 100, 1, "阿明", "你好"))
+        self.assertEqual((m.message_id, m.channel_id, m.guild_id, m.author_name, m.text), (501, 100, 1, "Alex", "hello"))
         self.assertFalse(m.mentions_bot or m.reply_to_bot or m.is_bot)
         self.assertIsNone(m.parent_id)
 
@@ -51,18 +51,20 @@ class Convert(unittest.TestCase):
         self.assertFalse(convert(fake_message(role_mentions=[other])).mentions_bot)
 
     def test_alias(self):
+        self.assertTrue(convert(fake_message(clean_content="dee what do you think"), aliases="DS, Dee").mentions_bot)
+        self.assertFalse(convert(fake_message(clean_content="nice weather today"), aliases="DS,Dee").mentions_bot)
+        # A non-ASCII alias matches anywhere, even with no space around it; a full-width comma separates aliases too
         self.assertTrue(convert(fake_message(clean_content="小d你说呢"), aliases="DS，小D").mentions_bot)
-        self.assertFalse(convert(fake_message(clean_content="今天天气"), aliases="DS,小D").mentions_bot)
 
     def test_reply_to_bot(self):
         ref = NS(message_id=400, channel_id=100, resolved=NS(author=NS(id=ME)))
         m = convert(fake_message(reference=ref))
         self.assertEqual((m.reply_to_id, m.reply_to_bot), (400, True))
-        # 被回复的消息没缓存到（或已删除）时，靠 bot 自己记下的发送记录
+        # When the replied-to message isn't cached (or was deleted), fall back on the bot's own record of what it sent
         ref = NS(message_id=401, channel_id=100, resolved=None)
         self.assertTrue(convert(fake_message(reference=ref), ours={401}).reply_to_bot)
         self.assertFalse(convert(fake_message(reference=ref)).reply_to_bot)
-        # 转发自别的频道的引用不算回复
+        # A reference forwarded from another channel doesn't count as a reply
         ref = NS(message_id=402, channel_id=777, resolved=None)
         self.assertIsNone(convert(fake_message(reference=ref)).reply_to_id)
 
@@ -76,33 +78,38 @@ class Convert(unittest.TestCase):
             NS(filename="photo", content_type="image/jpeg; charset=binary", size=20),
             NS(filename="report.pdf", content_type="application/pdf", size=30),
         ]
-        m = convert(fake_message(attachments=atts, stickers=[NS(name="猫猫")], clean_content="<:pepe:123456789012345678>"))
+        m = convert(fake_message(attachments=atts, stickers=[NS(name="kitty")], clean_content="<:pepe:123456789012345678>"))
         self.assertEqual([i.filename for i in m.images], ["cat.PNG", "photo"])
         self.assertEqual(m.images[1].content_type, "image/jpeg")
         self.assertEqual([(f.filename, f.content_type, f.size) for f in m.files], [("report.pdf", "application/pdf", 30)])
-        self.assertEqual(m.stickers, ["猫猫"])
+        self.assertEqual(m.stickers, ["kitty"])
         self.assertEqual(m.text, ":pepe:")
 
     def test_bot_author(self):
         m = convert(fake_message(author=NS(id=12, display_name="Mee6", bot=True), mentions=[NS(id=ME)]))
         self.assertTrue(m.is_bot)
-        self.assertFalse(m.addressed)  # 别的 bot 叫它不算数
+        self.assertFalse(m.addressed)  # being called by another bot doesn't count
 
 
 
 class ConvertRegressions(unittest.TestCase):
     def test_ascii_alias_needs_whole_word(self):
-        for text in ("these words", "the kids need sleep", "cool cards", "dsl 很难"):
+        for text in ("these words", "the kids need sleep", "cool cards", "dsl is hard"):
             self.assertFalse(convert(fake_message(clean_content=text), aliases="DS").mentions_bot, text)
-        for text in ("DS 你说呢", "问问ds", "hey ds!", "@DS"):
+        for text in (
+            "DS what do you think",
+            "问问ds",  # CJK text right next to the alias still counts
+            "hey ds!",
+            "@DS",
+        ):
             self.assertTrue(convert(fake_message(clean_content=text), aliases="DS").mentions_bot, text)
 
     def test_forward_is_not_a_reply(self):
         ref = NS(message_id=400, channel_id=100, resolved=NS(author=NS(id=ME)), type=NS(value=1))
-        m = convert(fake_message(reference=ref, clean_content="", message_snapshots=[NS(content="原文在这")]))
+        m = convert(fake_message(reference=ref, clean_content="", message_snapshots=[NS(content="the original is here")]))
         self.assertIsNone(m.reply_to_id)
         self.assertFalse(m.reply_to_bot)
-        self.assertEqual(m.text, "[转发] 原文在这")
+        self.assertEqual(m.text, "[forwarded] the original is here")
 
     def test_reply_type_still_reply(self):
         ref = NS(message_id=400, channel_id=100, resolved=NS(author=NS(id=ME)), type=NS(value=0))
@@ -141,42 +148,42 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
             embeds=[embed("gifv", url=link, thumb="https://media.tenor.com/x.png", proxy="https://images-ext-1.discordapp.net/x.png")],
         ))
         self.assertEqual([(i.kind, i.size) for i in m.images], [("gif", 0)])
-        self.assertEqual(m.text, "")  # 链接换成了 [GIF] 标记
+        self.assertEqual(m.text, "")  # the link was replaced by the [GIF] marker
         self.assertFalse(m.awaiting_embeds)
         self.assertEqual(await m.images[0].fetch(), b"img")
-        self.assertEqual(self.fetched, ["https://images-ext-1.discordapp.net/x.png"])  # 走 Discord 的图片代理
+        self.assertEqual(self.fetched, ["https://images-ext-1.discordapp.net/x.png"])  # goes through Discord's image proxy
 
     async def test_image_links(self):
         m = self.conv(fake_message(
-            clean_content="看 https://x.com/a.png 和 https://x.com/b.gif",
+            clean_content="look https://x.com/a.png and https://x.com/b.gif",
             embeds=[
                 embed("image", url="https://x.com/a.png", thumb="https://x.com/a.png"),
                 embed("image", url="https://x.com/b.gif", thumb="https://x.com/b.gif"),
             ],
         ))
         self.assertEqual([i.kind for i in m.images], ["image", "gif"])
-        self.assertEqual(m.text, "看  和")
+        self.assertEqual(m.text, "look  and")
 
     async def test_article_preview_becomes_text(self):
         m = self.conv(fake_message(
             clean_content="https://youtu.be/abc",
-            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", title="猫猫合集", provider="YouTube")],
+            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", title="cat compilation", provider="YouTube")],
         ))
         self.assertEqual(m.images, [])
-        self.assertEqual(m.text, "https://youtu.be/abc [链接预览: YouTube - 猫猫合集]")
+        self.assertEqual(m.text, "https://youtu.be/abc [link preview: YouTube - cat compilation]")
 
     async def test_stickers(self):
         stickers = [
-            NS(name="猫猫", format=NS(value=1), url="https://media.discordapp.net/stickers/1.png"),
-            NS(name="动画", format=NS(value=3), url="https://media.discordapp.net/stickers/2.json"),
+            NS(name="kitty", format=NS(value=1), url="https://media.discordapp.net/stickers/1.png"),
+            NS(name="animated", format=NS(value=3), url="https://media.discordapp.net/stickers/2.json"),
         ]
         m = self.conv(fake_message(stickers=stickers))
-        self.assertEqual(m.stickers, ["猫猫", "动画"])
-        self.assertEqual([(i.filename, i.kind) for i in m.images], [("猫猫", "sticker")])
+        self.assertEqual(m.stickers, ["kitty", "animated"])
+        self.assertEqual([(i.filename, i.kind) for i in m.images], [("kitty", "sticker")])
 
     async def test_awaiting_embeds_flag(self):
         self.assertTrue(self.conv(fake_message(clean_content="https://tenor.com/view/x")).awaiting_embeds)
-        self.assertFalse(self.conv(fake_message(clean_content="没有链接")).awaiting_embeds)
+        self.assertFalse(self.conv(fake_message(clean_content="no links here")).awaiting_embeds)
 
     async def test_without_fetcher_no_link_images(self):
         m = convert_message(
@@ -188,7 +195,7 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
     async def test_category(self):
         self.assertEqual(self.conv(fake_message(channel=NS(id=100, category_id=50))).category_id, 50)
 
-        class Thread:  # 所在频道没缓存时 discord.py 的 category_id 会抛异常
+        class Thread:  # discord.py's category_id raises when the parent channel isn't cached
             id = 300
             parent_id = 100
 
@@ -203,15 +210,15 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
 
 class MoreAttachments(unittest.TestCase):
     def test_other_attachments_become_files(self):
-        atts = [NS(filename="old.bmp", content_type="image/bmp", size=10), NS(filename="周报.docx", content_type=None, size=20)]
+        atts = [NS(filename="old.bmp", content_type="image/bmp", size=10), NS(filename="weekly-report.docx", content_type=None, size=20)]
         m = convert(fake_message(attachments=atts))
-        self.assertEqual(m.images, [])  # BMP 不在主进程里解码，按文件处理（会告诉对方发 PNG/JPG）
-        self.assertEqual([f.filename for f in m.files], ["old.bmp", "周报.docx"])
+        self.assertEqual(m.images, [])  # BMP isn't decoded in the main process; it's handled as a file (the bot asks for a PNG/JPG instead)
+        self.assertEqual([f.filename for f in m.files], ["old.bmp", "weekly-report.docx"])
         self.assertIsNotNone(m.files[1].fetch)
 
     def test_lone_surrogates_are_cleaned(self):
-        m = convert(fake_message(clean_content="坏\ud800字", author=NS(id=11, display_name="名\udfff", bot=False)))
-        self.assertEqual((m.text, m.author_name), ("坏?字", "名?"))
+        m = convert(fake_message(clean_content="bad\ud800text", author=NS(id=11, display_name="name\udfff", bot=False)))
+        self.assertEqual((m.text, m.author_name), ("bad?text", "name?"))
 
 
 if __name__ == "__main__":

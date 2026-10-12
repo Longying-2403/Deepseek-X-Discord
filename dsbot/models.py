@@ -1,4 +1,4 @@
-"""引擎内部用的数据结构，和 discord.py 解耦，方便测试。"""
+"""Data structures used inside the engine, decoupled from discord.py so they're easy to test."""
 
 from __future__ import annotations
 
@@ -10,15 +10,15 @@ from typing import Any, Awaitable, Callable
 class ImageAttachment:
     filename: str
     content_type: str | None
-    size: int  # 0 = 不知道（链接预览、贴图）
-    # 下载原图的协程函数（Discord 层传 attachment.read），测试里可以塞假的
+    size: int  # 0 = unknown (link previews, stickers)
+    # coroutine function that downloads the original (the Discord layer passes attachment.read); tests can plug in a fake
     fetch: Callable[[], Awaitable[bytes]] | None = field(default=None, repr=False, compare=False)
-    kind: str = "image"  # image（上传的图）/ gif（GIF 链接的预览帧）/ sticker（贴图）
+    kind: str = "image"  # image (uploaded image) / gif (preview frame of a GIF link) / sticker
 
 
 @dataclass
 class FileAttachment:
-    """群友上传的非图片文件。"""
+    """A non-image file someone uploaded."""
 
     filename: str
     content_type: str | None
@@ -28,20 +28,20 @@ class FileAttachment:
 
 @dataclass
 class FileText:
-    """读文件的结果。error 不为空表示没读出来（error 是给模型看的原因）。"""
+    """The result of reading a file. A non-empty error means it couldn't be read (error is the reason shown to the model)."""
 
-    kind: str = ""  # 给模型看的类型：文本 / PDF / Word 文档 / Excel 表格 / PPT
+    kind: str = ""  # type shown to the model: text file / PDF / Word document / Excel spreadsheet / PowerPoint
     text: str = ""
-    detail: str = ""  # 比如“共 12 页，只读到第 8 页”
+    detail: str = ""  # e.g. "12 pages, text only read up to page 8"
     error: str = ""
-    images: list[str] = field(default_factory=list)  # 扫描版 PDF 的页面图（data URI）
-    transient: bool = False  # 没读成是暂时的（下载失败、名额用完），之后可以再试
-    truncated: bool = False  # 文件太长，只读了前面一部分
+    images: list[str] = field(default_factory=list)  # page images of a scanned PDF (data URIs)
+    transient: bool = False  # the failure is temporary (download failed, out of slots) and can be retried later
+    truncated: bool = False  # the file was too long, so only the first part was read
 
     @classmethod
     def from_dict(cls, data: Any) -> "FileText":
         if not isinstance(data, dict):
-            return cls(error="解析失败")
+            return cls(error="parsing failed")
         from .textutil import clean_text
 
         images = [x for x in data.get("images") or [] if isinstance(x, str) and x.startswith("data:image/")]
@@ -58,9 +58,9 @@ class FileText:
 
 @dataclass
 class DocBlock:
-    """要放进聊天记录的一个文件内容块。"""
+    """One file content block to put into the chat log."""
 
-    label: str  # 文件所在的消息，比如 "#12"；不知道编号时是 "之前"
+    label: str  # the message the file is in, e.g. "#12"; "an earlier message" when its number isn't known
     filename: str
     result: FileText
 
@@ -74,32 +74,32 @@ class IncomingMessage:
     author_name: str
     text: str
     is_bot: bool = False
-    parent_id: int | None = None  # 帖子（thread）所属的频道
-    category_id: int | None = None  # 所在类别（Discord 里的“XX区”）
+    parent_id: int | None = None  # the channel a thread belongs to
+    category_id: int | None = None  # the category it's in (the collapsible groups in Discord's channel list)
     reply_to_id: int | None = None
-    reply_to_bot: bool = False  # 回复的是 bot 自己的消息
-    mentions_bot: bool = False  # @了 bot（含 @bot 的身份组、别名）
+    reply_to_bot: bool = False  # replying to one of the bot's own messages
+    mentions_bot: bool = False  # @mentions the bot (including the bot's role, or an alias)
     images: list[ImageAttachment] = field(default_factory=list)
     files: list[FileAttachment] = field(default_factory=list)
     stickers: list[str] = field(default_factory=list)
     received_at: float = 0.0
-    trigger: bool = False  # 引擎设置：这条点名通过了限速，需要立刻回应
-    awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
+    trigger: bool = False  # set by the engine: this mention passed the rate limit and needs a response right away
+    awaiting_embeds: bool = False  # has a link, but the preview hasn't arrived yet (Discord adds it a bit later)
 
     @property
     def addressed(self) -> bool:
-        """这条消息是不是在叫 bot。"""
+        """Whether this message is calling the bot."""
         return not self.is_bot and (self.mentions_bot or self.reply_to_bot)
 
 
 @dataclass
 class Action:
     kind: str  # "reply" | "react" | "read" | "search" | "recall"
-    to: int | None = None  # 消息编号（#后面的数字）
+    to: int | None = None  # message number (the number after #)
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
-    query: str | None = None  # search：要搜什么；recall：想找的关键词（可以没有）
-    channel: str | None = None  # recall：哪个频道
+    query: str | None = None  # search: what to search for; recall: keywords to look for (optional)
+    channel: str | None = None  # recall: which channel
 
     def to_json(self) -> dict[str, Any]:
         if self.kind == "read":
@@ -150,19 +150,19 @@ class ChannelInfo:
 
 @dataclass
 class ChannelPlace:
-    """一个频道在服务器里的位置（跨频道记忆要用它查设置、判断是不是私密频道）。"""
+    """Where a channel sits in its server (cross-channel memory uses it to look up settings and to check whether a channel is private)."""
 
     guild_id: int
     name: str
-    parent_id: int | None = None  # 帖子所在的频道
+    parent_id: int | None = None  # the channel a thread is in
     category_id: int | None = None
-    public: bool = False  # 所有人（@everyone）都看得到；拿不准时为 False
-    private_thread: bool = False  # 私密帖子（只有被邀请的人看得到）
+    public: bool = False  # everyone (@everyone) can see it; False when unsure
+    private_thread: bool = False  # private thread (only invited people can see it)
 
 
 @dataclass
 class SearchResult:
     summary: str
-    sources: list[tuple[str, str]] = field(default_factory=list)  # (标题, 网址)
+    sources: list[tuple[str, str]] = field(default_factory=list)  # (title, URL)
     usage: Usage = field(default_factory=lambda: Usage())
     provider: str = ""

@@ -1,4 +1,4 @@
-"""启动入口：python -m dsbot [--config config.toml] [--check]"""
+"""Entry point: python -m dsbot [--config config.toml] [--check]"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def _load_dotenv() -> None:
 
 
 def check_files() -> None:
-    """读文件需要的组件：真的开一个解析子进程读一个小 Word 文件。"""
+    """Components needed for reading files: actually start a parsing subprocess and read a small Word file."""
     import asyncio
     import io
     import zipfile
@@ -28,35 +28,35 @@ def check_files() -> None:
     try:
         import pypdf
 
-        print(f"✓ PDF 支持：pypdf {pypdf.__version__}")
+        print(f"✓ PDF support: pypdf {pypdf.__version__}")
     except ImportError:
-        print("✗ 没装 pypdf，读不了 PDF（pip install -r requirements.txt）")
+        print("✗ pypdf isn't installed, so PDFs can't be read (pip install -r requirements.txt)")
 
     from .files import read_file
 
     xml = (
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        "<w:body><w:p><w:r><w:t>自检</w:t></w:r></w:p></w:body></w:document>"
+        "<w:body><w:p><w:r><w:t>self-check</w:t></w:r></w:p></w:body></w:document>"
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("word/document.xml", xml)
     result = asyncio.run(read_file(buf.getvalue(), "check.docx", None, 100))
-    if result.text == "自检":
-        print("✓ 文件解析子进程正常")
+    if result.text == "self-check":
+        print("✓ The file-parsing subprocess works")
     else:
-        print(f"✗ 文件解析子进程出问题：{result.error or result}")
+        print(f"✗ Problem with the file-parsing subprocess: {result.error or result}")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         from .files import _child_user
 
         if _child_user():
-            print("✓ 解析子进程以 nobody 用户运行，读不到 token 和 API key")
+            print("✓ The parsing subprocess runs as the nobody user and can't read the token or API key")
         else:
-            print("! 解析子进程没法降成 nobody（bot 的代码或装的库别的用户读不到），会以 root 运行")
+            print("! The parsing subprocess can't drop to nobody (other users can't read the bot's code or installed libraries), so it will run as root")
 
 
 def check(config_path: str) -> int:
-    """离线自检：配置能不能读、斜杠命令定义是否合法（不连 Discord、不花钱）。"""
+    """Offline self-check: can the config be read, and are the slash command definitions valid (no Discord connection, costs nothing)."""
     from .discord_app import DSBot
     from .ledger import Ledger
     from .llm import DeepSeekClient
@@ -64,17 +64,17 @@ def check(config_path: str) -> int:
     from .store import Store
 
     cfg = load_config(config_path)
-    print(f"✓ 配置文件 {config_path} 读取成功，模型：{cfg.deepseek.model}")
+    print(f"✓ Read config file {config_path}, model: {cfg.deepseek.model}")
     try:
         secrets = load_secrets()
-        print(f"✓ .env 已填写（OWNER_ID={secrets.owner_id}，CONTROL_GUILD_ID={secrets.control_guild_id or '未设置'}）")
+        print(f"✓ .env is filled in (OWNER_ID={secrets.owner_id}, CONTROL_GUILD_ID={secrets.control_guild_id or 'not set'})")
     except SystemExit as exc:
         print(f"✗ {exc}")
         secrets = Secrets("x", "x", 0, control_guild_id=1)
     check_files()
-    print(f"✓ 联网搜索：DeepSeek 自带的搜索（{cfg.deepseek.anthropic_url}）"
-          + ("，失败时改用 Tavily" if secrets.tavily_api_key else "")
-          + "。想实际搜一次试试：python -m dsbot --test-search 关键词")
+    print(f"✓ Web search: DeepSeek's built-in search ({cfg.deepseek.anthropic_url})"
+          + (", falling back to Tavily if it fails" if secrets.tavily_api_key else "")
+          + '. To try a real search: python -m dsbot --test-search "keywords"')
 
     store = Store(":memory:")
     bot = DSBot(
@@ -95,14 +95,14 @@ def check(config_path: str) -> int:
             payload = command.to_dict(bot.tree)
             json.dumps(payload, ensure_ascii=False)
             subs = [opt["name"] for opt in payload.get("options", [])]
-            where = "全局" if guild_id is None else "私人服务器"
-            print(f"✓ /{payload['name']}（{where}）：{' '.join(subs)}")
-    print("自检完成。")
+            where = "global" if guild_id is None else "control server"
+            print(f"✓ /{payload['name']} ({where}): {' '.join(subs)}")
+    print("Self-check complete.")
     return 0
 
 
 def test_search(config_path: str, query: str) -> int:
-    """用 .env 里的 key 真的搜一次（花一点点钱），确认联网搜索能用。"""
+    """Run one real search with the key from .env (costs a tiny bit) to confirm web search works."""
     import asyncio
     import time
 
@@ -127,25 +127,25 @@ def test_search(config_path: str, query: str) -> int:
         finally:
             await searcher.close()
 
-    print(f"搜索「{query}」……")
+    print(f'Searching for "{query}"...')
     try:
         result = asyncio.run(run())
     except SearchError as exc:
-        print(f"✗ 搜索失败：{exc}")
+        print(f"✗ Search failed: {exc}")
         return 1
     u = result.usage
-    print(f"✓ 用 {result.provider} 搜到了：\n{result.summary}")
+    print(f"✓ Found it with {result.provider}:\n{result.summary}")
     for title, url in result.sources:
         print(f"  - {title} {url}")
-    print(f"用量：输入 {u.prompt_tokens} token（命中 {u.hit}），输出 {u.output} token，约 ${cfg.pricing.cost(u, time.time()):.5f}")
+    print(f"Usage: {u.prompt_tokens} input tokens ({u.hit} cache hits), {u.output} output tokens, about ${cfg.pricing.cost(u, time.time()):.5f}")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek 群友 Discord bot")
+    parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek Buddy Discord bot")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
-    parser.add_argument("--check", action="store_true", help="只做离线自检，不启动")
-    parser.add_argument("--test-search", metavar="关键词", help="真的搜一次，确认联网搜索能用（花一点点钱）")
+    parser.add_argument("--check", action="store_true", help="only run the offline self-check; don't start the bot")
+    parser.add_argument("--test-search", metavar="KEYWORDS", help="run one real search to confirm web search works (costs a tiny bit)")
     args = parser.parse_args()
     _load_dotenv()
 
@@ -168,7 +168,7 @@ def main() -> int:
     from .settings import Settings
     from .store import Store
 
-    os.umask(0o077)  # 数据库里有聊天记录：新建的文件只给自己读写
+    os.umask(0o077)  # the database holds chat history: newly created files are readable and writable by us only
     store = Store(cfg.bot.database)
     bot = DSBot(
         cfg,

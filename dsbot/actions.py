@@ -1,4 +1,4 @@
-"""解析模型输出的 JSON 动作。尽量宽容：模型偶尔会换个字段名或包一层代码块。"""
+"""Parse the JSON actions the model outputs. Be forgiving: the model sometimes uses a different field name or wraps it in a code block."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _coerce_id(value: Any) -> int | None:
         return int(value)
     if isinstance(value, str):
         digits = value.strip().lstrip("#")
-        if _ASCII_DIGITS.fullmatch(digits):  # str.isdigit() 会放过 "①" "²" 之类，int() 却转不了
+        if _ASCII_DIGITS.fullmatch(digits):  # str.isdigit() lets "①", "²" and the like through, but int() can't convert them
             return int(digits)
     return None
 
@@ -62,7 +62,7 @@ def _load(text: str) -> Any:
 
 
 def parse_actions(content: str) -> tuple[list[Action], bool]:
-    """返回 (动作列表, 是否成功解析)。空列表 + True 表示模型决定不说话。"""
+    """Returns (actions, whether parsing succeeded). An empty list + True means the model decided to stay quiet."""
     if not content or not content.strip():
         return [], False
     data = _load(content)
@@ -122,7 +122,7 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
         elif kind in ("recall", "remember", "history", "look_back"):
             channel = _text_field(item, "channel", "from", "where")
             if channel:
-                channel = channel.lstrip("#＃ ").strip()
+                channel = channel.lstrip("#＃ ").strip()  # also strips a full-width ＃
             about = _text_field(item, "about", "query", "keywords")
             if channel and not any(a.kind == "recall" and a.channel == channel and a.query == about for a in actions):
                 actions.append(Action("recall", channel=channel, query=about))
@@ -132,5 +132,5 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
 
 
 def dump_actions(actions: list[Action]) -> str:
-    """规范化的 JSON，用于模型输出解析失败时写进历史。"""
+    """Normalized JSON, written into the history when the model output couldn't be parsed."""
     return json.dumps({"actions": [a.to_json() for a in actions]}, ensure_ascii=False)

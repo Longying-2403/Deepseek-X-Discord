@@ -1,4 +1,4 @@
-"""配置：.env 里的密钥 + config.toml 里的默认值 + 运行时可调参数的定义。"""
+"""Configuration: secrets from .env + defaults from config.toml + definitions of the settings adjustable at runtime."""
 
 from __future__ import annotations
 
@@ -13,16 +13,16 @@ from .pricing import Pricing
 
 
 # ---------------------------------------------------------------------------
-# 可调参数的定义
-# level = "admin"：服务器管理员可以用 /ds 改（服务器默认或单个频道）
-# level = "owner"：只有你能改（config.toml 或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）
+# Definitions of the adjustable settings
+# level = "admin": server admins can change it with /ds (server default, a category or a single channel)
+# level = "owner": only you can change it (config.toml, or /dsowner in the CONTROL_GUILD_ID server)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Spec:
     key: str
-    label: str  # 命令里显示的中文名
+    label: str  # display name shown in the commands
     kind: type  # bool / int / float / str
     level: str  # "admin" | "owner"
     help: str
@@ -32,29 +32,29 @@ class Spec:
 
 
 _SPEC_LIST = [
-    # —— 管理员 ——
-    Spec("enabled", "允许回应", bool, "admin", "关掉后这里的消息它完全不看：不回 @、不主动说话，也不会发给 DeepSeek"),
-    Spec("proactive", "主动发言", bool, "admin", "没被点名时，是否自己判断要不要说话"),
-    Spec("refill_turns", "额度恢复轮数", int, "admin", "别人每说这么多轮，恢复 1 次主动发言额度", 1, 500),
-    Spec("quota_capacity", "额度上限", int, "admin", "主动发言额度最多攒几次", 1, 20),
-    Spec("min_speak_gap", "最短发言间隔秒", int, "admin", "两次发言之间至少隔多少秒", 0, 86400),
-    Spec("quiet_seconds", "冷场秒数", int, "admin", "多久没人说话、也没人在打字，算冷场", 5, 3600),
-    Spec("max_wait_seconds", "最长等待秒", int, "admin", "有新消息后最多等多久就判断一次（即使没冷场）", 30, 86400),
-    Spec("mention_rate_limit", "每人每分钟点名", int, "admin", "每个人每分钟最多能叫它几次", 1, 60),
-    Spec("aliases", "别名", str, "admin", "消息里出现这些名字也算叫它，用逗号分隔，例如：DS,小D"),
-    Spec("persona", "人设", str, "admin", "人设描述，留空用默认人设"),
-    Spec("share_memory", "记忆共享", bool, "admin", "和别的也开了共享的频道互通记忆（私密频道要单独开才会分享出去）"),
-    # —— 主人 ——
-    Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
-    Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
-    Spec("mention_thinking", "点名回复思考", str, "owner", "被叫到时的思考强度", choices=("off", "low", "high")),
-    Spec("daily_budget_usd", "每日预算美元", float, "owner", "单个服务器每天最多花多少美元，超了只回点名", 0, 1000),
-    Spec("global_daily_budget_usd", "全局每日预算美元", float, "owner", "所有服务器加起来每天最多花多少美元", 0, 10000),
-    Spec("context_budget_tokens", "上下文预算", int, "owner", "上下文超过这么多 token 就把旧记录压成摘要", 8000, 200000),
-    Spec("vision", "看图", bool, "owner", "是否把群里的图片发给模型"),
-    Spec("files", "读文件", bool, "owner", "是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）"),
-    Spec("web_search", "联网搜索", bool, "owner", "被叫到时，需要最新信息就上网搜（用 DeepSeek 自带的搜索）"),
-    Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
+    # —— admins ——
+    Spec("enabled", "Allowed to respond", bool, "admin", "When off, it ignores messages here completely: no replies to @mentions, no proactive chat, nothing sent to DeepSeek"),
+    Spec("proactive", "Proactive chat", bool, "admin", "Whether it decides on its own to speak when nobody calls it"),
+    Spec("refill_turns", "Quota refill turns", int, "admin", "Each time other people take this many turns, 1 proactive message is added back to the quota", 1, 500),
+    Spec("quota_capacity", "Quota cap", int, "admin", "The most proactive messages the quota can store up", 1, 20),
+    Spec("min_speak_gap", "Min seconds between messages", int, "admin", "Minimum seconds between two of its messages", 0, 86400),
+    Spec("quiet_seconds", "Lull seconds", int, "admin", "How long with nobody talking or typing counts as a lull", 5, 3600),
+    Spec("max_wait_seconds", "Max wait seconds", int, "admin", "Once there are new messages, the longest it waits before checking anyway (even without a lull)", 30, 86400),
+    Spec("mention_rate_limit", "Mentions per person per minute", int, "admin", "How many times per minute each person can call it", 1, 60),
+    Spec("aliases", "Aliases", str, "admin", "Names that also count as calling it when they appear in a message, comma-separated, e.g. DS,Dee"),
+    Spec("persona", "Persona", str, "admin", "Persona description; leave empty for the default persona"),
+    Spec("share_memory", "Memory sharing", bool, "admin", "Share memory with other channels that also have sharing on (private channels must turn it on themselves to share out)"),
+    # —— owner ——
+    Spec("min_eval_interval", "Min seconds between checks", int, "owner", "Minimum seconds between two proactive checks (mainly controls cost)", 10, 86400),
+    Spec("proactive_thinking", "Thinking for proactive checks", str, "owner", "Thinking level for proactive checks", choices=("off", "low", "high")),
+    Spec("mention_thinking", "Thinking for mention replies", str, "owner", "Thinking level when it's called", choices=("off", "low", "high")),
+    Spec("daily_budget_usd", "Daily budget (USD)", float, "owner", "Most USD a single server may spend per day; over it, it only answers mentions", 0, 1000),
+    Spec("global_daily_budget_usd", "Global daily budget (USD)", float, "owner", "Most USD all servers together may spend per day", 0, 10000),
+    Spec("context_budget_tokens", "Context budget (tokens)", int, "owner", "Once the context goes over this many tokens, old history is compacted into a summary", 8000, 200000),
+    Spec("vision", "Vision", bool, "owner", "Whether images in the chat are sent to the model"),
+    Spec("files", "Read files", bool, "owner", "Whether files people upload are read (text, code, PDF, Word, Excel, PowerPoint)"),
+    Spec("web_search", "Web search", bool, "owner", "When it's called and needs current information, search the web (with DeepSeek's built-in search)"),
+    Spec("daily_search_limit", "Daily search limit", int, "owner", "Most searches per server per day (0 = no searching)", 0, 1000),
 ]
 
 SPECS: dict[str, Spec] = {s.key: s for s in _SPEC_LIST}
@@ -85,20 +85,20 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "daily_search_limit": 30,
 }
 
-# 一键档位：只动“话量”相关的三个参数
+# One-click presets: they only touch the three settings that control how much it talks
 PRESETS: dict[str, dict[str, int]] = {
-    "安静": {"refill_turns": 30, "quota_capacity": 1, "min_speak_gap": 600},
-    "普通": {"refill_turns": 15, "quota_capacity": 3, "min_speak_gap": 120},
-    "话痨": {"refill_turns": 6, "quota_capacity": 4, "min_speak_gap": 30},
+    "Quiet": {"refill_turns": 30, "quota_capacity": 1, "min_speak_gap": 600},
+    "Normal": {"refill_turns": 15, "quota_capacity": 3, "min_speak_gap": 120},
+    "Chatty": {"refill_turns": 6, "quota_capacity": 4, "min_speak_gap": 30},
 }
 
-_TRUE = {"on", "true", "1", "yes", "y", "开", "是", "启用", "打开"}
-_FALSE = {"off", "false", "0", "no", "n", "关", "否", "停用", "关闭"}
-RESET_WORDS = {"默认", "default", "reset", "清除"}
+_TRUE = {"on", "true", "1", "yes", "y", "enable", "enabled"}
+_FALSE = {"off", "false", "0", "no", "n", "disable", "disabled"}
+RESET_WORDS = {"default", "reset", "clear"}  # compared case-insensitively
 
 
 def parse_value(spec: Spec, raw: Any) -> Any:
-    """把命令里输入的字符串（或 toml 里的值）转成参数值，不合法就抛 ValueError（中文说明）。"""
+    """Turn a string typed into a command (or a value from the toml) into the setting's value; raises ValueError with an explanation if it's invalid."""
     if spec.kind is bool:
         if isinstance(raw, bool):
             return raw
@@ -107,7 +107,7 @@ def parse_value(spec: Spec, raw: Any) -> Any:
             return True
         if s in _FALSE:
             return False
-        raise ValueError(f"「{spec.label}」只能填 开/关")
+        raise ValueError(f'"{spec.label}" must be on or off')
     if spec.kind is int:
         try:
             number = float(str(raw).strip())
@@ -115,37 +115,37 @@ def parse_value(spec: Spec, raw: Any) -> Any:
                 raise ValueError
             value: Any = int(number)
         except (ValueError, OverflowError):
-            raise ValueError(f"「{spec.label}」要填整数") from None
+            raise ValueError(f'"{spec.label}" must be a whole number') from None
     elif spec.kind is float:
         try:
             value = float(str(raw).strip())
         except (ValueError, OverflowError):
-            raise ValueError(f"「{spec.label}」要填数字") from None
+            raise ValueError(f'"{spec.label}" must be a number') from None
         if not math.isfinite(value):
-            raise ValueError(f"「{spec.label}」要填正常的数字")
+            raise ValueError(f'"{spec.label}" must be a regular number')
     else:
         value = str(raw).strip()
         if spec.choices is not None and value.lower() not in spec.choices:
-            raise ValueError(f"「{spec.label}」只能是：{' / '.join(spec.choices)}")
+            raise ValueError(f'"{spec.label}" must be one of: {" / ".join(spec.choices)}')
         if spec.choices is not None:
             value = value.lower()
         return value
     if spec.min is not None and value < spec.min:
-        raise ValueError(f"「{spec.label}」不能小于 {spec.min:g}")
+        raise ValueError(f'"{spec.label}" can\'t be less than {spec.min:g}')
     if spec.max is not None and value > spec.max:
-        raise ValueError(f"「{spec.label}」不能大于 {spec.max:g}")
+        raise ValueError(f'"{spec.label}" can\'t be more than {spec.max:g}')
     return value
 
 
 def format_value(spec: Spec, value: Any) -> str:
     if spec.kind is bool:
-        return "开" if value else "关"
+        return "on" if value else "off"
     if spec.kind is float:
         return f"{value:g}"
     if spec.key == "persona":
-        return "（默认人设）" if not value else f"{len(str(value))} 字的自定义人设"
+        return "(default persona)" if not value else f"custom persona, {len(str(value))} characters"
     if value == "":
-        return "（无）"
+        return "(none)"
     return str(value)
 
 
@@ -160,10 +160,10 @@ class DeepSeekConfig:
     model: str = "deepseek-flash"
     timeout_seconds: float = 90.0
     max_retries: int = 2
-    # 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search 工具）；留空 = base_url + "/anthropic"
+    # web search goes through DeepSeek's Anthropic-compatible API (with the built-in web_search tool); empty = base_url + "/anthropic"
     search_base_url: str = ""
     search_timeout_seconds: float = 60.0
-    search_max_uses: int = 3  # 一次搜索里最多让它搜几轮
+    search_max_uses: int = 3  # max rounds of searching it may do within one search
 
     @property
     def anthropic_url(self) -> str:
@@ -182,32 +182,32 @@ class BotConfig:
 
 @dataclass
 class EngineConfig:
-    max_batch_messages: int = 40  # 一轮最多带多少条新消息（更早的只记数量）
-    max_pending_messages: int = 120  # 缓冲区上限，防止长期没人叫它时无限增长
-    pending_max_age_seconds: float = 21600  # 缓冲区里超过 6 小时的旧消息直接丢掉
-    max_chars_per_message: int = 1200  # 单条消息进上下文前截断到多少字
+    max_batch_messages: int = 40  # max new messages per round (older ones are only counted)
+    max_pending_messages: int = 120  # buffer cap, so it can't grow forever when nobody calls it for a long time
+    pending_max_age_seconds: float = 21600  # messages older than 6 hours are dropped from the buffer
+    max_chars_per_message: int = 1200  # each message is cut to this many characters before going into the context
     max_images_per_round: int = 4
-    image_max_side: int = 1024  # 叫到它的那条消息里的图片：缩到最长边多少像素
-    low_detail_max_side: int = 512  # 其他图片（detail=low，模型那边也只看 512×512）
-    file_max_bytes: int = 20_000_000  # 文件超过这个大小不读
-    file_max_chars: int = 20000  # 单个文件最多读多少字
-    file_round_max_chars: int = 40000  # 一轮里所有文件加起来最多多少字
+    image_max_side: int = 1024  # images in the message that calls it: longest side in pixels
+    low_detail_max_side: int = 512  # other images (detail=low; the model only looks at 512×512 anyway)
+    file_max_bytes: int = 20_000_000  # files larger than this aren't read
+    file_max_chars: int = 20000  # max characters read from a single file
+    file_round_max_chars: int = 40000  # max characters from all files combined in one round
     max_files_per_round: int = 3
-    file_timeout_seconds: float = 30.0  # 解析一个文件最多等多久
-    turn_merge_seconds: float = 20.0  # 同一个人这么多秒内连发算一轮
-    react_cost: float = 0.3  # 只加表情时消耗多少额度
+    file_timeout_seconds: float = 30.0  # max time to wait for parsing one file
+    turn_merge_seconds: float = 20.0  # messages from the same person within this many seconds count as one turn
+    react_cost: float = 0.3  # quota used by a reaction alone
     typing_chars_per_second: float = 3.0
     typing_min_seconds: float = 2.0
     typing_max_seconds: float = 10.0
-    max_output_tokens: int = 2000  # 不思考时
-    max_thinking_tokens: int = 6000  # 思考时（含推理）
-    hard_stop_multiplier: float = 2.0  # 花费超过预算这么多倍后，连点名也不回
-    summary_max_chars: int = 600
-    max_searches_per_round: int = 2  # 被叫到的一轮里最多搜几次
-    search_max_chars: int = 2000  # 一次搜索的结果最多多少字
-    share_recent_hours: float = 6.0  # 同一个人这么久之内在别的频道跟它聊过，就把那几句带过来
-    recall_max_chars: int = 3000  # 翻别的频道的记录，一次最多多少字
-    share_list_limit: int = 30  # 告诉它可以翻哪些频道，最多列多少个
+    max_output_tokens: int = 2000  # without thinking
+    max_thinking_tokens: int = 6000  # with thinking (including the reasoning)
+    hard_stop_multiplier: float = 2.0  # once spending reaches this multiple of the budget, it doesn't even answer mentions
+    summary_max_chars: int = 1500  # max length of the memory summary (600 in the Chinese version; English needs more characters for the same content)
+    max_searches_per_round: int = 2  # max searches in a round where it's called
+    search_max_chars: int = 2000  # max characters of one search result
+    share_recent_hours: float = 6.0  # if the same person talked with it in another channel within this many hours, carry those lines over
+    recall_max_chars: int = 3000  # max characters when looking through another channel's history
+    share_list_limit: int = 30  # max channels listed when telling it which channels it can look through
 
 
 @dataclass
@@ -224,7 +224,7 @@ def _fill(cls: type, data: dict[str, Any], section: str) -> Any:
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
         if key not in known:
-            raise ValueError(f"config.toml [{section}] 里有未知的配置项：{key}")
+            raise ValueError(f"config.toml [{section}] has an unknown option: {key}")
         kwargs[key] = value
     return cls(**kwargs)
 
@@ -251,7 +251,7 @@ def load_config(path: str | Path | None) -> AppConfig:
     defaults = dict(BUILTIN_DEFAULTS)
     for key, raw in (data.get("defaults") or {}).items():
         if key not in SPECS:
-            raise ValueError(f"config.toml [defaults] 里有未知的参数：{key}")
+            raise ValueError(f"config.toml [defaults] has an unknown setting: {key}")
         defaults[key] = parse_value(SPECS[key], raw)
     cfg.defaults = defaults
     return cfg
@@ -269,20 +269,20 @@ class Secrets:
     owner_id: int
     control_guild_id: int | None = None
     discord_proxy: str | None = None
-    tavily_api_key: str | None = None  # 可选：DeepSeek 自带搜索用不了时改用 Tavily
+    tavily_api_key: str | None = None  # optional: use Tavily when DeepSeek's built-in search doesn't work
 
 
 def load_secrets(env: dict[str, str] | None = None) -> Secrets:
     env = dict(os.environ) if env is None else env
     missing = [k for k in ("DISCORD_TOKEN", "DEEPSEEK_API_KEY", "OWNER_ID") if not env.get(k, "").strip()]
     if missing:
-        raise SystemExit("缺少环境变量：" + "、".join(missing) + "（请按 .env.example 填好 .env）")
+        raise SystemExit("Missing environment variables: " + ", ".join(missing) + " (fill in .env following .env.example)")
     try:
         owner_id = int(env["OWNER_ID"].strip())
         control = env.get("CONTROL_GUILD_ID", "").strip()
         control_id = int(control) if control else None
     except ValueError:
-        raise SystemExit("OWNER_ID / CONTROL_GUILD_ID 必须是纯数字 ID") from None
+        raise SystemExit("OWNER_ID / CONTROL_GUILD_ID must be numeric IDs") from None
     return Secrets(
         discord_token=env["DISCORD_TOKEN"].strip(),
         deepseek_api_key=env["DEEPSEEK_API_KEY"].strip(),

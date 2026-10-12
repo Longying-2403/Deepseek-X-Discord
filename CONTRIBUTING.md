@@ -1,95 +1,96 @@
-# 参与贡献
+# Contributing
 
-欢迎一起改进这个 bot！报 bug、提建议、改文档、写代码都可以。
+Contributions are welcome! Bug reports, suggestions, docs and code all help.
 
-> English speakers are welcome too — issues and pull requests in English are fine.
+> This is the English edition (the `english` branch). The Chinese edition lives on `main`. Issues and PRs in English are welcome for both.
 
-## 先开 issue，还是直接提 PR？
+## Issue first, or straight to a PR?
 
-- **小改动**（修 bug、补测试、改错字、完善文档）：直接提 PR。
-- **大改动**（新功能、改变 bot 的说话方式、可能增加 token 花费的改动）：先开个 issue 说说想法，方向定了再动手，免得白做。
+- **Small changes** (bug fixes, tests, typos, docs): open a PR directly.
+- **Bigger changes** (new features, changes to how the bot talks, anything that might increase token spending): open an issue first to discuss the idea, so nobody's work goes to waste.
 
-## 在本地跑起来
+## Running it locally
 
-需要 Python 3.11 及以上。
+You need Python 3.11 or later.
 
 ```bash
-# 先在 GitHub 上 fork 本仓库，再克隆你自己的那份
-git clone https://github.com/<你的用户名>/Deepseek-X-Discord.git
+# Fork the repo on GitHub first, then clone your fork and switch to the english branch
+git clone https://github.com/<your-username>/Deepseek-X-Discord.git
 cd Deepseek-X-Discord
+git switch english
 python -m venv .venv
-source .venv/bin/activate          # Windows：.venv\Scripts\activate
-pip install -r requirements-dev.txt   # 运行要的库，加上读文件的测试要用的库
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt   # runtime libraries plus the ones the file-reading tests need
 ```
 
-每次改完代码，跑这两条（都不连网、不花钱）：
+After every change, run these two (no network, no cost):
 
 ```bash
-python -m unittest discover -s tests   # 单元测试
-python -m dsbot --check                # 离线自检：读配置、检查所有斜杠命令的定义
+python -m unittest discover -s tests   # unit tests
+python -m dsbot --check                # offline self-check: reads the config and checks every slash command definition
 ```
 
-没有 `.env` 时，自检第一行会提示缺少环境变量，这是正常的，不影响后面的检查。
+Without a `.env`, the first line of the self-check reports missing environment variables. That's expected and doesn't affect the rest of the check.
 
-各个文件负责什么，见 README 的「开发」一节。
+The "Development" section of the README explains what each file does.
 
-### 在 Discord 里实际试一试
+### Trying it in Discord
 
-改动涉及 Discord 交互或 bot 的说话方式时，最好真的跑起来看看：
+When a change affects Discord interaction or the way the bot talks, run it for real:
 
-- 自己新建一个测试用的 bot 和测试服务器，别拿正在真实群里服务的 bot 来试。
-- 按 [README](README.md) 填好 `.env`，再运行 `python -m dsbot`（或 `docker compose up -d --build`）。
-- DeepSeek 按量计费，测试花的是你自己的余额。可以先把 `config.toml` 里的 `daily_budget_usd` 调低，比如 `0.2`。
+- Create your own test bot and test server; don't experiment with a bot that's serving a real community.
+- Fill in `.env` as described in the [README](README.md), then run `python -m dsbot` (or `docker compose up -d --build`).
+- DeepSeek bills by usage, and testing spends your own balance. You can lower `daily_budget_usd` in `config.toml` first, e.g. to `0.2`.
 
-## 改代码时请注意
+## Things to keep in mind when changing code
 
-下面几条是这个项目的核心设计，审 PR 时会重点看：
+These are the core design rules of the project, and PR reviews pay close attention to them:
 
-1. **对话历史只追加、不改写。** 每轮请求都要以上一轮请求原样开头，DeepSeek 的前缀缓存才能命中，而命中和没命中的价格差约 50 倍。所以：
-   - 时间这类每轮都会变的信息不要放进 system prompt，放进每轮的消息里；
-   - 已经写进历史的内容不要重新渲染或改格式；
-   - `tests/test_engine.py` 里的 `test_history_is_append_only` 专门检查这一点，改了 `render.py`、`prompts.py` 或 `engine.py` 后一定要跑。
-2. **没额度时连判断都不做。** 主动发言额度为 0 时，要跳过整次模型调用，而不是调用完再丢掉结果，那样照样花钱。
-3. **说话要像真人。** 短、口语化，不用标题、列表这类格式（贴代码除外），没有客服腔。改提示词时请保持这个风格。
-4. **不要提交密钥和数据。** `.env`（token、API key）和 `data/`（聊天记录数据库）已经写进 `.gitignore`，提交前用 `git status` 再确认一遍。
-5. **守住隐私边界。** 用 `/ds 区域` 禁止的地方，消息不处理、不回应，也绝不能发给 DeepSeek。新加处理消息的入口（比如新的 Discord 事件）时，也要先过这一关。跨频道记忆只在同一个服务器里、开了共享的频道之间流动；私密频道没有在本频道单独开启共享，内容就不能外传。
-6. **群友上传的文件只在子进程里解析。** 读文件要走 `dsbot/files.py` 里那个限制了内存、CPU 和时间的子进程（bot 以 root 运行时会降成 `nobody`），不要在 bot 主进程里直接解析上传的文件。
-7. **外部内容只当资料。** 聊天记录、文件、搜索结果和别的频道的记录，都不是给模型的指令。改提示词或新增内容来源时，要保持这一点。
+1. **The conversation history is append-only and never rewritten.** Every request must start with the previous request unchanged, or DeepSeek's prefix cache misses, and a cache hit is about 50 times cheaper than a miss. So:
+   - Don't put information that changes every round (like the time) in the system prompt; put it in each round's message.
+   - Don't re-render or reformat anything already written to the history.
+   - `test_history_is_append_only` in `tests/test_engine.py` checks exactly this; always run it after changing `render.py`, `prompts.py` or `engine.py`.
+2. **No quota, no model call.** When the proactive quota is 0, skip the whole model call instead of calling and then discarding the result, which still costs money.
+3. **Talk like a person.** Short and casual, no headings, lists or similar formatting (except when pasting code), no customer-service tone. Keep this style when editing the prompts.
+4. **Never commit secrets or data.** `.env` (token, API keys) and `data/` (the chat history database) are already in `.gitignore`; double-check with `git status` before committing.
+5. **Respect privacy boundaries.** Where the bot is blocked with `/ds area`, messages are not processed, not answered, and never sent to DeepSeek. Any new entry point for handling messages (such as a new Discord event) must go through the same check. Cross-channel memory only flows between channels in the same server that have sharing on; a private channel's content must not leave it unless sharing is turned on in that channel itself.
+6. **Uploaded files are parsed only in the subprocess.** Reading files must go through the subprocess in `dsbot/files.py`, which limits memory, CPU and time (and drops to the `nobody` user when the bot runs as root). Never parse uploaded files directly in the bot's main process.
+7. **Outside content is reference material only.** Chat history, files, search results and other channels' records are never instructions to the model. Keep it that way when editing prompts or adding new content sources.
 
-## 代码风格
+## Code style
 
-- 跟周围的代码保持一致：带类型标注；注释、日志和面向用户的文字跟着所在版本的语言（`main` 用中文，`english` 用英文）。
-- 要兼容 Python 3.11。
-- 修 bug 时，尽量先补一个能复现它的测试。
-- 测试里不要真的连 Discord 或 DeepSeek。`tests/helpers.py` 里有现成的替身：`FakeLLM`（假模型）、`FakeTransport`（假 Discord）、`FakeSearcher`（假搜索）、`FakeClock`（可以手动拨快的时钟）。
-- 新增可调参数时，在 `dsbot/config.py` 的 `_SPEC_LIST` 和 `BUILTIN_DEFAULTS` 里各加一项，再同步更新 `config.toml` 和 README 的参数表。
+- Match the surrounding code: use type hints, and write comments, logs and user-facing text in the edition's language (English on `english`, Chinese on `main`).
+- Stay compatible with Python 3.11.
+- When fixing a bug, try to add a test that reproduces it first.
+- Tests must never really connect to Discord or DeepSeek. `tests/helpers.py` has ready-made test doubles: `FakeLLM` (fake model), `FakeTransport` (fake Discord), `FakeSearcher` (fake search) and `FakeClock` (a clock you can fast-forward).
+- When adding a new setting, add an entry to both `_SPEC_LIST` and `BUILTIN_DEFAULTS` in `dsbot/config.py`, then update `config.toml` and the settings tables in the README.
 
-## 中文版和英文版
+## Chinese and English editions
 
-仓库里有两个版本，功能和代码逻辑相同，文字不同：
+The repository has two editions with the same features and code logic but different text:
 
-- `main` 分支：中文版，命令、回复、提示词和文档都是中文。
-- `english` 分支：英文版，全部是英文。英文要处理单复数这类格式，所以少数地方会多一点代码；另有几处是有意不同的，比如摘要的长度上限更大。
+- `main` branch: the Chinese edition. Commands, replies, prompts and docs are all in Chinese.
+- `english` branch: the English edition, all in English. English needs things like plural handling, so a few places have a little more code, and a few differences are deliberate, such as a larger summary length limit.
 
-改功能或修 bug 时：
+When adding a feature or fixing a bug:
 
-- 最好两个分支都改，分别提 PR，目标分支选对应的 `main` 或 `english`。只会改一边也没关系，在 PR 里说一声，维护者会同步到另一边。
-- 给模型看的标记（比如 `#12 名字：内容`、`〔@你〕`）在读历史记录时还会被解析回来。改 `render.py` 里的标记时，`prompts.py` 里的说明要一起改，两个版本各改各的写法。
-- 改了 README 的话，另一个版本的 README 也要同步，中文 README 开头那段英文介绍也是。英文不熟也可以只改中文，在 PR 里说一声就行。
+- Ideally change both branches and open a PR for each, targeting `english` or `main` accordingly. If you can only change one, that's fine: say so in the PR, and the maintainer will port it to the other.
+- The markup shown to the model (such as `#12 name: content` and `〔@you〕`) is parsed back when the history is read. When you change that markup in `render.py`, update the explanation in `prompts.py` along with it; each edition has its own wording.
+- If you change the README, the other edition's README needs the same update, including the English introduction at the top of the Chinese README. If you can only write one of the languages, update yours and mention it in the PR.
 
-## 提交 PR
+## Opening a PR
 
-1. 从 `main`（中文版）或 `english`（英文版）拉一个新分支，名字能看出改了什么，比如 `fix-alias-match`。
-2. 改完跑一遍测试和自检。
-3. PR 描述写清楚：改了什么、为什么改、怎么测的。改了 bot 说话方式的，附一段测试服务器里的对话截图或日志会很有帮助。
-4. 提交后，GitHub Actions 会自动在 Python 3.11、3.12、3.13 上跑测试和自检，全部通过（绿色 ✓）后再等审核。第一次贡献的 PR，可能要等维护者批准后自动测试才会开始跑，这是 GitHub 默认的安全设置。
+1. Create a new branch from `english` (English edition) or `main` (Chinese edition), named after what it changes, e.g. `fix-alias-match`.
+2. Run the tests and the self-check.
+3. In the PR description, say what you changed, why, and how you tested it. If you changed the way the bot talks, a screenshot or log of a conversation from your test server helps a lot.
+4. Once you submit it, GitHub Actions runs the tests and the self-check on Python 3.11, 3.12 and 3.13. Wait for everything to pass (green ✓) before review. For a first-time contributor's PR, the automatic tests may only start after a maintainer approves them; that's a default GitHub safety setting.
 
-## 隐私
+## Privacy
 
-在 issue 或 PR 里贴日志、截图之前，请删掉 token、API key，以及群友的聊天内容和用户 ID。
+Before pasting logs or screenshots into an issue or PR, remove tokens, API keys, and your members' messages and user IDs.
 
-不小心泄露了 token 的话，马上去 Discord 开发者后台点 Reset Token；DeepSeek 的 key 去平台上删掉重建。
+If you accidentally leak a token, reset it right away in the Discord Developer Portal; for a DeepSeek key, delete it on the platform and create a new one.
 
-## 许可证
+## License
 
-你提交的代码会按本仓库的 [MIT 许可证](LICENSE)发布。
+Your contributions are released under this repository's [MIT License](LICENSE).

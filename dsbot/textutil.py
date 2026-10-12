@@ -1,4 +1,4 @@
-"""文本小工具：Discord 消息切分、打字延迟、清理。"""
+"""Small text helpers: splitting Discord messages, typing delay, cleanup."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ _FENCE = re.compile(r"^\s*```(\S*)")
 
 
 def clean_text(text: str) -> str:
-    """去掉不成对的代理字符（\\ud800 之类）。它们存数据库、发请求时都会出错。"""
+    """Remove unpaired surrogate characters (like U+D800). They make both database writes and requests fail."""
     try:
         text.encode("utf-8")
         return text
@@ -32,22 +32,22 @@ def one_line(text: str, limit: int = 32) -> str:
 def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + "…（太长，后面省略）"
+    return text[:limit] + "… (too long, the rest was cut)"
 
 
 def split_for_discord(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
-    """按行切成不超过 limit 的块；切在代码块中间时自动补上闭合/重新打开的 ```。"""
+    """Split by lines into chunks of at most limit characters; when a cut falls inside a code block, close it and reopen it with ``` automatically."""
     text = text.strip()
     if not text:
         return []
     if len(text) <= limit:
         return [text]
 
-    budget = limit - 4  # 给闭合的 "\n```" 留位置
+    budget = limit - 4  # leave room for the closing "\n```"
     chunks: list[str] = []
     lines: list[str] = []
     size = 0  # len("\n".join(lines))
-    fence: str | None = None  # 当前所在代码块的开头（如 "```py"），不在代码块里为 None
+    fence: str | None = None  # the opening line of the current code block (like "```py"), or None outside a code block
 
     def flush() -> None:
         nonlocal lines, size
@@ -58,7 +58,7 @@ def split_for_discord(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
         size = len(fence) if fence is not None else 0
 
     for raw in text.split("\n"):
-        # 每一段都保证放进一个新块（块开头可能有重新打开的 ```xx）也不会超长
+        # make sure every piece fits into a fresh chunk (which may start with a reopened ```xx) without going over
         width = max(1, budget - (len(fence) + 1 if fence is not None else 0))
         pieces = [raw[i : i + width] for i in range(0, len(raw), width)] or [""]
         for piece in pieces:
@@ -77,7 +77,7 @@ def split_for_discord(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
 
 
 def typing_delay(text: str, cps: float, low: float, high: float, rng: random.Random | None = None) -> float:
-    """按字数估算“打字”时间，加点随机，限制在 [low, high]。"""
+    """Estimate "typing" time from the length, add a little randomness, and clamp it to [low, high]."""
     rng = rng or random
     seconds = len(text) / max(cps, 0.1) * rng.uniform(0.8, 1.2)
     return max(low, min(high, seconds))

@@ -1,3 +1,3 @@
-"""DeepSeek 群友：一个会在 Discord 群聊里自然互动的 bot。"""
+"""DeepSeek Buddy: a bot that hangs out naturally in Discord group chats."""
 
 __version__ = "1.3.1"

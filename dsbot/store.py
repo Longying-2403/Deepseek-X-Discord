@@ -1,6 +1,6 @@
-"""SQLite 存储：参数覆盖、每个频道的对话记录（只追加）、消息编号映射、用量账本。
+"""SQLite storage: setting overrides, each channel's conversation history (append-only), message number mapping, usage ledger.
 
-单进程单线程使用；每次操作都很短，直接在事件循环里同步执行。
+Used from a single process and thread; every operation is short, so it runs synchronously right in the event loop.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any, Iterable
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS overrides (
     scope TEXT NOT NULL,          -- global / guild / channel
-    scope_id INTEGER NOT NULL,    -- global 用 0
+    scope_id INTEGER NOT NULL,    -- 0 for global
     key TEXT NOT NULL,
     value TEXT NOT NULL,          -- JSON
     PRIMARY KEY (scope, scope_id, key)
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id INTEGER NOT NULL,
     role TEXT NOT NULL,
-    content TEXT NOT NULL,        -- JSON：字符串或内容块数组，原样回放保证缓存前缀一致
+    content TEXT NOT NULL,        -- JSON: a string or a list of content blocks, replayed as is so the cache prefix stays identical
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turns_channel ON turns (channel_id, id);
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS msgmap (
 CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
-    day TEXT NOT NULL,            -- 按 bot.timezone 的日期
+    day TEXT NOT NULL,            -- date in bot.timezone
     guild_id INTEGER NOT NULL,
     channel_id INTEGER NOT NULL,
     kind TEXT NOT NULL,           -- mention / proactive / summary / search
@@ -59,14 +59,14 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE INDEX IF NOT EXISTS idx_usage_day ON usage (day, guild_id, channel_id);
 """
 
-MSGMAP_KEEP = 3000  # 每个频道保留最近多少个消息编号的映射
+MSGMAP_KEEP = 3000  # how many recent message-number mappings to keep per channel
 
 
 @dataclass
 class Turn:
     id: int
     role: str
-    content: Any  # str 或 list[dict]
+    content: Any  # str or list[dict]
 
 
 @dataclass
@@ -93,14 +93,14 @@ class Store:
             self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
-        # 上次运行到一半就停了（断电、强制关闭）的调用：不会再有结果了
+        # calls left halfway by the last run (power loss, forced shutdown) will never get a result
         self.db.execute("UPDATE usage SET outcome = 'error' WHERE outcome = 'pending'")
         self.db.commit()
         if self.path != ":memory:":
             self._make_private()
 
     def _make_private(self) -> None:
-        """聊天记录和读过的文件内容都在数据库里：只让 bot 自己读写（NAS 上别的账号看不到）。尽力而为。"""
+        """Chat history and the contents of files it read live in the database: only the bot itself may read/write it (other accounts on a NAS can't see it). Best effort."""
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.chmod(self.path + suffix, 0o600)
@@ -110,7 +110,7 @@ class Store:
     def close(self) -> None:
         self.db.close()
 
-    # ---- 参数覆盖 ----
+    # ---- setting overrides ----
     def load_overrides(self) -> list[tuple[str, int, str, Any]]:
         rows = self.db.execute("SELECT scope, scope_id, key, value FROM overrides").fetchall()
         return [(r["scope"], r["scope_id"], r["key"], json.loads(r["value"])) for r in rows]
@@ -127,7 +127,7 @@ class Store:
         with self.db:
             self.db.execute("DELETE FROM overrides WHERE scope = ? AND scope_id = ? AND key = ?", (scope, scope_id, key))
 
-    # ---- 对话 ----
+    # ---- conversations ----
     def load_conversation(self, channel_id: int, guild_id: int) -> Conversation:
         row = self.db.execute(
             "SELECT guild_id, summary, next_short_id FROM conversations WHERE channel_id = ?", (channel_id,)
@@ -143,7 +143,7 @@ class Store:
         return conv
 
     def load_msgmap(self, channel_id: int) -> dict[int, int]:
-        """short_id -> message_id（最近的一批）"""
+        """short_id -> message_id (the most recent batch)"""
         rows = self.db.execute(
             "SELECT short_id, message_id FROM msgmap WHERE channel_id = ? ORDER BY short_id DESC LIMIT ?",
             (channel_id, MSGMAP_KEEP),
@@ -158,7 +158,7 @@ class Store:
         assigned: Iterable[tuple[int, int]],
         now: float | None = None,
     ) -> None:
-        """追加一轮（user + assistant）。conv.turns 和 conv.next_short_id 同步更新。"""
+        """Append one round (user + assistant). conv.turns and conv.next_short_id are updated to match."""
         now = time.time() if now is None else now
         with self.db:
             cur = self.db.execute(
@@ -185,12 +185,12 @@ class Store:
                 "DELETE FROM msgmap WHERE channel_id = ? AND short_id < ?",
                 (conv.channel_id, conv.next_short_id - MSGMAP_KEEP),
             )
-        # JSON 往返一次，保证内存里的内容和以后从库里读出来的完全一致
+        # round-trip through JSON so what's in memory is exactly what will be read back from the database later
         conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content))))
         conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content))))
 
     def compact(self, conv: Conversation, summary: str, remove_count: int) -> None:
-        """用摘要替换最早的 remove_count 条 turn。"""
+        """Replace the oldest remove_count turns with a summary."""
         if remove_count <= 0:
             return
         last_removed = conv.turns[remove_count - 1].id
@@ -206,7 +206,7 @@ class Store:
         conv.turns = conv.turns[remove_count:]
 
     def conversation_channels(self, guild_id: int) -> list[int]:
-        """这个服务器里有对话记录（或摘要）的频道。"""
+        """Channels on this server that have conversation history (or a summary)."""
         rows = self.db.execute(
             "SELECT channel_id FROM conversations c WHERE guild_id = ? AND (summary IS NOT NULL "
             "OR EXISTS (SELECT 1 FROM turns t WHERE t.channel_id = c.channel_id)) ORDER BY channel_id",
@@ -222,7 +222,7 @@ class Store:
                 (time.time(), channel_id),
             )
 
-    # ---- 用量 ----
+    # ---- usage ----
     def record_usage(
         self,
         *,
@@ -282,7 +282,7 @@ class Store:
             f"SELECT COUNT(*) AS n, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",
             args,
         ).fetchone()
-        # 缓存命中率只看聊天请求：搜索、压缩摘要是单独的请求，前缀本来就不一样
+        # the cache hit rate only counts chat requests: searches and summaries are separate requests whose prefixes differ anyway
         chat = self.db.execute(
             f"SELECT COALESCE(SUM(hit),0) AS hit, COALESCE(SUM(miss),0) AS miss FROM usage "
             f"WHERE {clause} AND kind IN ('mention', 'proactive')",

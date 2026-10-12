@@ -1,4 +1,4 @@
-"""主动发言额度（按消息量恢复的令牌桶）、轮次识别、按人限速。"""
+"""Proactive quota (a token bucket refilled by message volume), turn detection, per-person rate limiting."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections import deque
 
 
 class QuotaBucket:
-    """别人每说 refill_turns 轮，恢复 1 次额度；最多攒 capacity 次。"""
+    """Each time other people take refill_turns turns, 1 unit of quota is restored; at most capacity units are kept."""
 
     def __init__(self, capacity: float):
         self.tokens = float(capacity)
@@ -18,7 +18,7 @@ class QuotaBucket:
             self.turns_since_refill = 0
             self.tokens = min(float(capacity), self.tokens + 1.0)
         else:
-            self.tokens = min(float(capacity), self.tokens)  # 管理员调小上限后立即生效
+            self.tokens = min(float(capacity), self.tokens)  # takes effect immediately when an admin lowers the cap
 
     def ready(self, capacity: int) -> bool:
         self.tokens = min(float(capacity), self.tokens)
@@ -29,7 +29,7 @@ class QuotaBucket:
 
 
 class TurnTracker:
-    """同一个人在 merge_seconds 内连发的几条算一轮，免得分行打字刷额度。"""
+    """Several messages in a row from the same person within merge_seconds count as one turn, so typing in short lines can't farm quota."""
 
     def __init__(self) -> None:
         self.last_author: int | None = None
@@ -43,7 +43,7 @@ class TurnTracker:
 
 
 class SlidingWindow:
-    """按 key 计数的滑动窗口限速。"""
+    """Sliding-window rate limiter, counted per key."""
 
     def __init__(self) -> None:
         self._events: dict[object, deque[float]] = {}
@@ -58,6 +58,6 @@ class SlidingWindow:
         return True
 
     def prune(self, window: float, now: float) -> None:
-        """清掉早就过期的 key，免得常驻进程里越攒越多。"""
+        """Remove keys that expired long ago, so they don't pile up in a long-running process."""
         for key in [k for k, q in self._events.items() if not q or now - q[-1] >= window]:
             del self._events[key]

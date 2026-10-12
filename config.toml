@@ -1,84 +1,84 @@
-# DeepSeek 群友 —— 配置文件
-# 这里是所有参数的默认值，改完重启生效。
-# 服务器管理员在 Discord 里用 /ds 改的设置会覆盖这里的默认值（存在数据库里）。
+# DeepSeek Buddy — configuration file
+# Default values for every setting. Restart after editing for changes to take effect.
+# Settings that server admins change in Discord with /ds override these defaults (they're stored in the database).
 
 [deepseek]
 base_url = "https://api.deepseek.com"
 model = "deepseek-flash"          # V4.1 Flash
 timeout_seconds = 90
-max_retries = 2                   # 429 / 5xx 时自动重试几次
-# 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search），留空 = base_url 后面加 /anthropic
+max_retries = 2                   # automatic retries on 429 / 5xx
+# Web search goes through DeepSeek's Anthropic-compatible API (built-in web_search); empty = base_url + /anthropic
 search_base_url = ""
 search_timeout_seconds = 60
-search_max_uses = 3               # 一次搜索里最多让它搜几轮
+search_max_uses = 3               # max rounds of searching within one search
 
 [bot]
-timezone = "Asia/Taipei"          # 每日预算按这个时区的自然日算；聊天记录里的时间也用它
+timezone = "Asia/Taipei"          # the daily budget counts calendar days in this time zone; chat-log timestamps use it too
 database = "data/dsbot.sqlite3"
-sync_commands_on_start = true     # 启动时注册斜杠命令
+sync_commands_on_start = true     # register the slash commands on startup
 log_level = "INFO"
-tick_seconds = 5                  # 多久检查一次各频道要不要主动判断
+tick_seconds = 5                  # how often to check whether any channel should run a proactive check
 
 [pricing]
-# 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
-# DeepSeek 调价时改这里：https://api-docs.deepseek.com/quick_start/pricing
+# USD per million tokens, at peak prices; off-peak is multiplied by offpeak_factor automatically.
+# Update these when DeepSeek changes its prices: https://api-docs.deepseek.com/quick_start/pricing
 cache_hit = 0.006
 cache_miss = 0.30
 output = 1.20
 offpeak_factor = 0.5
-peak_hours_utc = [[1, 4], [6, 10]]  # 周一到周五，UTC
+peak_hours_utc = [[1, 4], [6, 10]]  # Monday to Friday, UTC
 
 [defaults]
-# —— 管理员可以在 Discord 里用 /ds 改的 ——
-enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /ds 区域 允许 的地方回（白名单）
-proactive = false                 # 主动发言默认关，在需要的频道里用 /ds 主动 打开
-refill_turns = 15                 # 别人每说 15 轮，恢复 1 次主动发言额度
-quota_capacity = 3                # 额度最多攒 3 次（热聊时最多连插 3 句）
-min_speak_gap = 120               # 两次发言至少隔 120 秒
-quiet_seconds = 30                # 30 秒没人说话、也没人在打字，算冷场
-max_wait_seconds = 180            # 一直没冷场的话，最多等 180 秒也判断一次
-mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
-aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
-persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
-share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
+# —— Server admins can change these in Discord with /ds ——
+enabled = true                    # areas where it may respond. false = silent on every server by default, responding only where /ds area allows it (allowlist)
+proactive = false                 # proactive chat is off by default; turn it on in the channels that want it with /ds proactive
+refill_turns = 15                 # each time other people take 15 turns, 1 proactive message is added back to the quota
+quota_capacity = 3                # the quota holds at most 3 (in a lively chat it can jump in at most 3 times in a row)
+min_speak_gap = 120               # at least 120 seconds between two of its messages
+quiet_seconds = 30                # 30 seconds with nobody talking or typing counts as a lull
+max_wait_seconds = 180            # if the chat never goes quiet, it checks anyway after at most 180 seconds
+mention_rate_limit = 3            # each person can call it at most 3 times per minute
+aliases = ""                      # aliases, comma-separated; they also count as calling it when they appear in a message, e.g. "DS,Dee"
+persona = ""                      # empty = default persona; best changed in Discord with /ds persona
+share_memory = false              # cross-channel memory, off by default; turn it on with /ds share-memory (private channels must turn it on themselves to share out)
 
-# —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
-min_eval_interval = 60            # 两次主动判断至少隔 60 秒
-proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
-mention_thinking = "off"          # 被叫到时思考强度：off 最快
-daily_budget_usd = 1.0            # 单个服务器每天最多花多少美元，超了只回点名；超过 2 倍连点名也不回
-global_daily_budget_usd = 3.0     # 所有服务器加起来的上限
-context_budget_tokens = 30000     # 上下文超过这么多 token，就把最早的一半压成摘要（最大 200000）
-vision = true                     # 是否把群里的图片发给模型
-files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
-web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 自带的搜索）
-daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
+# —— Only you can change these (here, or with /dsowner in the CONTROL_GUILD_ID server) ——
+min_eval_interval = 60            # at least 60 seconds between two proactive checks
+proactive_thinking = "low"        # thinking level for proactive checks: off / low / high
+mention_thinking = "off"          # thinking level when it's called: off is fastest
+daily_budget_usd = 1.0            # max USD per server per day; over it, it only answers mentions; over 2x, not even those
+global_daily_budget_usd = 3.0     # cap for all servers combined
+context_budget_tokens = 30000     # once the context goes over this many tokens, the oldest half is compacted into a summary (max 200000)
+vision = true                     # send images from the chat to the model
+files = true                      # read files people upload (text, code, PDF, Word, Excel, PowerPoint)
+web_search = true                 # when it's called and needs current information, search the web (DeepSeek's built-in search)
+daily_search_limit = 30           # max searches per server per day (0 = no searching)
 
 [engine]
-# 一般不用动
-max_batch_messages = 40           # 一轮最多带多少条新消息
-max_pending_messages = 120        # 没轮到时最多缓存多少条
-pending_max_age_seconds = 21600   # 缓存里超过 6 小时的旧消息直接丢掉
-max_chars_per_message = 1200      # 单条消息进上下文前截断
+# Usually no need to touch these
+max_batch_messages = 40           # max new messages per round
+max_pending_messages = 120        # max messages buffered while waiting for a round
+pending_max_age_seconds = 21600   # buffered messages older than 6 hours are dropped
+max_chars_per_message = 1200      # each message is cut to this many characters before it goes into the context
 max_images_per_round = 4
-image_max_side = 1024             # 叫到它的那条消息里的图片
-low_detail_max_side = 512         # 其他图片（模型那边也只按 512×512 看）
-file_max_bytes = 20000000         # 文件超过 20 MB 不读
-file_max_chars = 20000            # 单个文件最多读 2 万字（太长只读前面）
-file_round_max_chars = 40000      # 一轮里所有文件加起来最多 4 万字
+image_max_side = 1024             # images in the message that calls it
+low_detail_max_side = 512         # other images (the model only looks at them at 512×512 anyway)
+file_max_bytes = 20000000         # files over 20 MB aren't read
+file_max_chars = 20000            # at most 20,000 characters per file (only the beginning of longer files)
+file_round_max_chars = 40000      # at most 40,000 characters from all files combined in one round
 max_files_per_round = 3
-file_timeout_seconds = 30         # 解析一个文件最多等 30 秒
-turn_merge_seconds = 20           # 同一个人 20 秒内连发算一轮
-react_cost = 0.3                  # 只加表情消耗多少额度
-typing_chars_per_second = 3.0     # “打字”速度
+file_timeout_seconds = 30         # wait at most 30 seconds for one file to be parsed
+turn_merge_seconds = 20           # messages from the same person within 20 seconds count as one turn
+react_cost = 0.3                  # quota used by a reaction alone
+typing_chars_per_second = 3.0     # "typing" speed
 typing_min_seconds = 2.0
 typing_max_seconds = 10.0
 max_output_tokens = 2000
 max_thinking_tokens = 6000
 hard_stop_multiplier = 2.0
-summary_max_chars = 600
-max_searches_per_round = 2        # 被叫到的一轮里最多搜几次
-search_max_chars = 2000           # 一次搜索的结果最多多少字
-share_recent_hours = 6            # 同一个人这么久之内在别的频道跟它聊过，就把那几句带过来
-recall_max_chars = 3000           # 翻别的频道的记录，一次最多多少字
-share_list_limit = 30             # 告诉它可以翻哪些频道，最多列多少个
+summary_max_chars = 1500          # max length of the memory summary (600 in the Chinese version; English needs more characters for the same content)
+max_searches_per_round = 2        # max searches in a round where it's called
+search_max_chars = 2000           # max characters of one search result
+share_recent_hours = 6            # if the same person talked with it in another channel within this many hours, bring those lines along
+recall_max_chars = 3000           # max characters when looking through another channel's history
+share_list_limit = 30             # max channels listed when telling it which channels it can look through

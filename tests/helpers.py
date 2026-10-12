@@ -1,4 +1,4 @@
-"""测试用的假模型、假 Discord、假时钟。"""
+"""Fake model, fake Discord and fake clock for the tests."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from dsbot.models import ChannelInfo, ChannelPlace, Completion, IncomingMessage,
 from dsbot.settings import Settings  # noqa: E402
 from dsbot.store import Store  # noqa: E402
 
-# 2026-10-07 是周三。UTC 12:00 不在高峰时段。
+# 2026-10-07 is a Wednesday. 12:00 UTC is outside peak hours.
 T0 = 1_791_374_400.0
 GUILD = 1
 CHANNEL = 100
@@ -39,7 +39,7 @@ class FakeLLM:
         self.calls: list[dict[str, Any]] = []
         self.responder = responder or (lambda call: '{"actions": []}')
         self.prompt_tokens = 1000
-        self.hook = None  # 可选：async def hook(call)，模拟“调用进行中”发生的事
+        self.hook = None  # optional: async def hook(call), to simulate things that happen "while the call is in progress"
 
     async def complete(self, messages, *, thinking="off", json_mode=False, max_tokens=None, user_id=None):
         call = {
@@ -59,7 +59,7 @@ class FakeLLM:
             return out
         return Completion(
             content=out,
-            reasoning="想了一下",
+            reasoning="thought about it",
             usage=Usage(prompt_tokens=self.prompt_tokens, hit=self.prompt_tokens - 100, miss=100, output=30),
             finish_reason="stop",
         )
@@ -80,17 +80,17 @@ class FakeTransport:
         self.typing_calls = 0
         self.can_send = True
         self._next_id = 90_000
-        # 频道 id -> 位置；没登记的频道当成 GUILD 里的公开频道
+        # channel id -> place; channels not registered here count as public channels in GUILD
         self.places: dict[int, ChannelPlace] = {}
-        self.names = {CHANNEL: "闲聊"}
+        self.names = {CHANNEL: "chat"}
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
-        return ChannelInfo(guild_name="测试服", channel_name=self.names.get(channel_id, f"频道{channel_id}"), bot_name="小D")
+        return ChannelInfo(guild_name="Test Server", channel_name=self.names.get(channel_id, f"channel{channel_id}"), bot_name="Dee")
 
     def locate(self, channel_id: int) -> ChannelPlace | None:
         if channel_id in self.places:
             return self.places[channel_id]
-        return ChannelPlace(guild_id=GUILD, name=self.names.get(channel_id, f"频道{channel_id}"), public=True)
+        return ChannelPlace(guild_id=GUILD, name=self.names.get(channel_id, f"channel{channel_id}"), public=True)
 
     async def send(self, channel_id, text, *, reply_to, ping):
         if not self.can_send:
@@ -109,7 +109,7 @@ class FakeTransport:
 
 
 class FakeSearcher:
-    """假的联网搜索：记录调用，按关键词返回结果；结果是 Exception 时抛出。"""
+    """Fake web search: records calls and returns results by query; raises when the result is an Exception."""
 
     def __init__(self, results: dict[str, Any] | None = None):
         self.calls: list[tuple[str, str]] = []
@@ -122,8 +122,8 @@ class FakeSearcher:
             raise out
         if out is None:
             out = SearchResult(
-                summary=f"关于「{query}」搜到的内容",
-                sources=[("示例网站", "https://example.com/a")],
+                summary=f'search results about "{query}"',
+                sources=[("Example Site", "https://example.com/a")],
                 usage=Usage(prompt_tokens=3000, hit=0, miss=3000, output=200),
                 provider="DeepSeek",
             )
@@ -165,7 +165,7 @@ def make_engine(responder=None, *, image_loader=None, defaults: dict[str, Any] |
     return engine, llm, transport, clock
 
 
-def msg(message_id: int, text: str, *, author: int = 11, name: str = "阿明", **kw) -> IncomingMessage:
+def msg(message_id: int, text: str, *, author: int = 11, name: str = "Alex", **kw) -> IncomingMessage:
     kw.setdefault("channel_id", CHANNEL)
     kw.setdefault("guild_id", GUILD)
     return IncomingMessage(message_id=message_id, author_id=author, author_name=name, text=text, **kw)

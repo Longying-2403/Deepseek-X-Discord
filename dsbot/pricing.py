@@ -1,4 +1,4 @@
-"""按 usage 估算花费。价格单位：美元 / 百万 token，按高峰价填，非高峰自动打折。"""
+"""Estimate cost from usage. Prices are in USD per million tokens at peak rates; off-peak discounts are applied automatically."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from .models import Usage
 
 @dataclass(frozen=True)
 class Pricing:
-    # deepseek-flash 的高峰价（2026-09 官方价格页）
+    # deepseek-flash peak prices (official pricing page, 2026-09)
     cache_hit: float = 0.006
     cache_miss: float = 0.30
     output: float = 1.20
     offpeak_factor: float = 0.5
-    # 高峰时段：周一到周五 UTC 01:00-04:00、06:00-10:00（不识别中国法定节假日，按高峰算，偏保守）
+    # peak hours: Monday to Friday, UTC 01:00-04:00 and 06:00-10:00 (Chinese public holidays aren't recognized and count as peak, to stay on the safe side)
     peak_hours_utc: tuple[tuple[int, int], ...] = ((1, 4), (6, 10))
 
     def is_peak(self, ts: float) -> bool:

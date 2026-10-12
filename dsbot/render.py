@@ -1,4 +1,4 @@
-"""把一批新消息渲染成一条 user 消息。渲染结果写进数据库后不再改动（只追加，保证缓存命中）。"""
+"""Render a batch of new messages into one user message. Once written to the database it never changes (append-only, so the cache keeps hitting)."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from .textutil import one_line, truncate
 
 def _attachments(m: IncomingMessage) -> str:
     bits = []
-    for kind, label in (("image", "图片"), ("gif", "GIF")):
-        n = sum(1 for i in m.images if i.kind == kind)  # 贴图的图下面按名字标
+    for kind, label in (("image", "image"), ("gif", "GIF")):
+        n = sum(1 for i in m.images if i.kind == kind)  # sticker images are labeled by name below
         if n:
             bits.append(f"[{label}]" if n == 1 else f"[{label}×{n}]")
     for f in m.files:
-        bits.append(f"[文件: {_neutralize(one_line(getattr(f, 'filename', f), 40))}]")
+        bits.append(f"[file: {_neutralize(one_line(getattr(f, 'filename', f), 40))}]")
     for name in m.stickers:
-        bits.append(f"[贴图: {_neutralize(one_line(name, 40))}]")
+        bits.append(f"[sticker: {_neutralize(one_line(name, 40))}]")
     return " ".join(bits)
 
 
@@ -30,7 +30,7 @@ _MARKERS = str.maketrans({"〔": "[", "〕": "]", "【": "[", "】": "]", "↪":
 
 
 def neutralize(text: str) -> str:
-    """群友的原话和文件里不能出现我们用来标注的符号，否则可以伪造“〔@你〕”、文件块之类的标记。"""
+    """Our marker symbols must never appear in what people say or in files, or they could forge markers like "〔@you〕" or file blocks."""
     return text.translate(_MARKERS).replace("<<<", "‹‹‹").replace(">>>", "›››")
 
 
@@ -38,24 +38,24 @@ _neutralize = neutralize
 
 
 def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_chars: int) -> str:
-    head = f"#{sid} {_neutralize(one_line(m.author_name or '某人'))}"
+    head = f"#{sid} {_neutralize(one_line(m.author_name or 'someone'))}"
     if m.is_bot:
         head += " 〔bot〕"
     if m.reply_to_bot:
-        head += " ↪你"
+        head += " ↪you"
     elif m.reply_to_id is not None:
         target = sid_by_msg.get(m.reply_to_id)
-        head += f" ↪#{target}" if target is not None else " ↪(更早的消息)"
+        head += f" ↪#{target}" if target is not None else " ↪(earlier message)"
 
     body = _neutralize(truncate(m.text.strip(), max_chars))
-    # 多行消息的续行缩进，群友没法伪造一条以 #编号 开头的新消息
+    # Indent the extra lines of a multi-line message, so nobody can forge a new message starting with #number
     body = "\n".join(line if i == 0 else "  " + line for i, line in enumerate(body.split("\n")))
     attach = _attachments(m)
     if attach:
         body = f"{attach} {body}".strip()
-    line = f"{head}：{body}"
+    line = f"{head}: {body}" if body else f"{head}:"
     if m.mentions_bot and not m.is_bot:
-        line += " 〔@你〕"
+        line += " 〔@you〕"
     return line
 
 
@@ -71,20 +71,20 @@ def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str) -> 
 
 
 def render_doc(block: DocBlock) -> tuple[list[str], list[str]]:
-    """一个文件内容块 → (文字行, 图片 data URI)。内容放在 <<< 和 >>> 之间。"""
+    """One file content block → (text lines, image data URIs). The content goes between <<< and >>>."""
     result = block.result
-    head = f"【{block.label} 的文件「{_neutralize(one_line(block.filename, 60))}」"
+    head = f'【File "{_neutralize(one_line(block.filename, 60))}" from {block.label}'
     if result.error:
-        return [f"{head}· 读不了：{_neutralize(one_line(result.error, 200))}】"], []
-    info = _neutralize(one_line(result.kind + (f"，{result.detail}" if result.detail else ""), 300))
-    lines = [f"{head}· {info}】" if info else f"{head}】"]
+        return [f"{head} · couldn't read: {_neutralize(one_line(result.error, 200))}】"], []
+    info = _neutralize(one_line(result.kind + (f", {result.detail}" if result.detail else ""), 300))
+    lines = [f"{head} · {info}】" if info else f"{head}】"]
     if result.text:
         lines += ["<<<", _neutralize(result.text), ">>>"]
     return lines, list(result.images)
 
 
 class _Builder:
-    """攒文字行，遇到图片就切成内容块。"""
+    """Collects text lines and cuts them into content blocks whenever images come in."""
 
     def __init__(self, first_line: str | None = None):
         self.lines: list[str] = [first_line] if first_line else []
@@ -103,7 +103,7 @@ class _Builder:
             text_lines, uris = render_doc(block)
             self.lines += text_lines
             name = _neutralize(one_line(block.filename, 60))
-            self.images([(u, "auto") for u in uris], after=f"（以上是 {block.label} 的文件「{name}」的页面）")
+            self.images([(u, "auto") for u in uris], after=f'(Above: pages of the file "{name}" from {block.label})')
 
     def finish(self) -> str | list[dict[str, Any]]:
         if not self.parts:
@@ -114,7 +114,7 @@ class _Builder:
 
 def _hint(kind: str, targets: list[int]) -> str:
     if kind == "mention" and targets:
-        return HINT_MENTION.format(targets="、".join(f"#{t}" for t in targets))
+        return HINT_MENTION.format(targets=", ".join(f"#{t}" for t in targets))
     return HINT_PROACTIVE
 
 
@@ -132,27 +132,27 @@ def render_round(
     max_chars: int = 1200,
     context: list[str] | None = None,
 ) -> str | list[dict[str, Any]]:
-    """messages: [(编号, 消息)]；images: message_id -> [(data_uri, detail)]；docs: message_id -> 放在这条消息后面的文件块。
-    context：放在消息前面的背景（比如这个人刚才在别的频道跟它聊过什么）。
+    """messages: [(number, message)]; images: message_id -> [(data_uri, detail)]; docs: message_id -> file blocks placed after that message.
+    context: background placed before the messages (e.g. what this person just talked about with it in another channel).
 
-    没有图片时返回字符串；有图片时返回内容块数组，图片紧跟在它所属的那条消息后面。
+    Returns a string when there are no images; otherwise a list of content blocks, with each image right after the message it belongs to.
     """
     out = _Builder(_stamp(messages, now, tz))
     out.lines += context or []
     if omitted > 0:
-        out.lines.append(f"（前面还有 {omitted} 条消息没显示）")
+        out.lines.append(f"({omitted} earlier message{'s' if omitted != 1 else ''} not shown)")
     images = images or {}
     docs = docs or {}
     for sid, m in messages:
         out.lines.append(render_line(m, sid, sid_by_msg, max_chars))
-        out.images(images.get(m.message_id) or [], after=f"（以上是 #{sid} 的图片）")
+        out.images(images.get(m.message_id) or [], after=f"(Above: images from #{sid})")
         out.docs(docs.get(m.message_id) or [])
     out.lines.append(_hint(kind, targets))
     return out.finish()
 
 
 def render_read_result(blocks: list[DocBlock], notes: list[str], *, targets: list[int]) -> str | list[dict[str, Any]]:
-    """read 动作之后，把读到的文件内容交给模型。"""
+    """After a read action, hand the file contents to the model."""
     return render_tool_result(blocks, notes, [], [], targets=targets)
 
 
@@ -165,8 +165,8 @@ def render_tool_result(
     targets: list[int],
     files: bool = True,
 ) -> str | list[dict[str, Any]]:
-    """看文件、搜索、翻别的频道之后，把结果交给模型。files=False 表示这次没要看文件。"""
-    out = _Builder("（你要看的文件：）" if files else None)
+    """After reading files, searching or looking through other channels, hand the results to the model. files=False means no files were requested this time."""
+    out = _Builder("(The files you asked to read:)" if files else None)
     out.docs(blocks)
     out.lines += file_notes
     out.lines += sections
@@ -176,41 +176,41 @@ def render_tool_result(
 
 
 def render_search(query: str, summary: str, sources: list[tuple[str, str]], max_chars: int) -> str:
-    """一次搜索的结果。搜到的内容和文件一样是外面来的，标记符号都要中和掉。"""
-    lines = [f"（你搜了「{neutralize(one_line(query, 80))}」：）", "<<<", neutralize(truncate(summary.strip(), max_chars)), ">>>"]
+    """The result of one search. Like files, search results come from outside, so every marker symbol gets neutralized."""
+    lines = [f'(You searched for "{neutralize(one_line(query, 80))}":)', "<<<", neutralize(truncate(summary.strip(), max_chars)), ">>>"]
     if sources:
-        lines.append("来源：" + "；".join(f"{neutralize(one_line(title, 60))} {neutralize(one_line(url, 300))}" for title, url in sources))
+        lines.append("Sources: " + "; ".join(f"{neutralize(one_line(title, 60))} {neutralize(one_line(url, 300))}" for title, url in sources))
     return "\n".join(lines)
 
 
 def render_recall(channel: str, summary: str | None, lines: list[str], about: str | None) -> str:
-    """翻到的别的频道的记录。channel 是显示名（#频道 或 帖子「标题」），这里再保险处理一次。"""
-    head = f"（你翻了 {neutralize(one_line(channel, 90))} 的记录"
-    head += f"，找的是「{neutralize(one_line(about, 40))}」：）" if about else "：）"
+    """History looked up in another channel. channel is the display name (#channel or thread "title"); it's neutralized again here to be safe."""
+    head = f"(You looked through the history of {neutralize(one_line(channel, 90))}"
+    head += f', searching for "{neutralize(one_line(about, 40))}":)' if about else ":)"
     body: list[str] = []
     if summary:
-        body.append("更早的摘要：" + neutralize(summary.strip()))
-    body += [neutralize(line) for line in lines] or ["（没找到相关的内容）"]
+        body.append("Earlier summary: " + neutralize(summary.strip()))
+    body += [neutralize(line) for line in lines] or ["(Nothing relevant found)"]
     return "\n".join([head, "<<<", *body, ">>>"])
 
 
-LIST_HEAD = "（能翻记录的别的频道："
-LIST_EMPTY = "（现在没有能翻记录的别的频道）"
-_FILE_HEAD = re.compile(r"^【\S+ 的文件「")
+LIST_HEAD = "(Other channels whose history you can look through:"
+LIST_EMPTY = "(No other channels whose history you can look through right now)"
+_FILE_HEAD = re.compile(r'^【File "')
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
-    """能翻记录的别的频道（名单变了才写进记录）。"""
+    """The other channels whose history it can look through (only written into the log when the list changes)."""
     if not names:
         return [LIST_EMPTY]
     lines = [LIST_HEAD] + ["  " + n for n in names]
     if hidden:
-        lines.append(f"  （还有 {hidden} 个没列出来）")
-    return lines + ["）"]
+        lines.append(f"  ({hidden} more not listed)")
+    return lines + [")"]
 
 
 def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
-    """记录里最后一次写的频道名单（重新载入记录时用，名单没变就不用再写一遍）。"""
+    """The last channel list written in the log (used when the log is reloaded, so an unchanged list isn't written again)."""
     for turn in reversed(turns):
         if getattr(turn, "role", None) != "user":
             continue
@@ -223,21 +223,21 @@ def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
                 for line in lines[i + 1 :]:
                     if not line.startswith("  "):
                         break
-                    if not line.startswith("  （还有"):
+                    if not (line.startswith("  (") and line.endswith(" more not listed)")):
                         names.append(line[2:])
                 return tuple(names)
     return None
 
 
 def own_text(content: Any) -> str:
-    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录和搜索结果。
+    """For memory compaction: this channel's own content. Drops recent talk carried over from other channels, channel lists, looked-up history and search results.
 
-    顶格以“（”开头的行一定是 bot 自己加的（群友的消息都以 #编号 开头，续行缩进，文件内容在 <<< >>> 里）。
+    A line starting with "(" at column 0 is always added by the bot itself (people's messages start with #number, their extra lines are indented, and file contents sit inside <<< >>>).
     """
     out: list[str] = []
-    skipping_block = False  # 近况、名单：标题行后面跟着缩进的行
-    skipping_fence = False  # 翻到的记录、搜索结果：标题行后面跟着 <<< … >>>
-    file_fence = False  # 这个频道自己的文件内容：原样保留，里面的字不当成标记
+    skipping_block = False  # recent talk, channel list: a heading line followed by indented lines
+    skipping_fence = False  # looked-up history, search results: a heading line followed by <<< … >>>
+    file_fence = False  # this channel's own file contents: kept as is, and nothing inside counts as a marker
     after_search = after_file = False
     for line in content_text(content).split("\n"):
         if file_fence:
@@ -252,9 +252,9 @@ def own_text(content: Any) -> str:
             if line.startswith("  "):
                 continue
             skipping_block = False
-            if line == "）":  # 名单的收尾
+            if line == ")":  # end of the channel list
                 continue
-        if after_search and line.startswith("来源："):
+        if after_search and line.startswith("Sources: "):
             after_search = False
             continue
         if after_file and line == "<<<":
@@ -262,11 +262,11 @@ def own_text(content: Any) -> str:
             file_fence, after_file = True, False
             continue
         after_search = after_file = False
-        if line.startswith("（") and (line.endswith("跟你聊过：") or line == LIST_HEAD):
+        if line.startswith("(") and (line.endswith(" ago:") or line == LIST_HEAD):  # "(Alex chatted with you in #x 5 minutes ago:"
             skipping_block = True
-        elif line.startswith(("（你翻了", "（你搜了")):
+        elif line.startswith(("(You looked through the history of ", "(You searched for ")):
             skipping_fence = True
-            after_search = line.startswith("（你搜了")
+            after_search = line.startswith("(You searched for ")
         elif line != LIST_EMPTY:
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
@@ -275,13 +275,13 @@ def own_text(content: Any) -> str:
 
 _MSG_LINE = re.compile(r"^#\d+ ")
 _STAMP_LINE = re.compile(r"^【\d{2}-\d{2} \d{2}:\d{2}[^】]*】")
-_REPLY_REF = re.compile(r" ↪(#\d+|\(更早的消息\))")
+_REPLY_REF = re.compile(r" ↪(#\d+|\(earlier message\))")
 
 
 def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
-    """把存下来的对话还原成“名字：内容”的纯文本行（翻别的频道的记录时用）。
+    """Turn a stored conversation back into plain "name: content" lines (used when looking through another channel's history).
 
-    去掉消息编号（那是那个频道自己的）、文件内容、提示语；时间行保留，方便看出是什么时候聊的。
+    Drops message numbers (those belong to that channel), file contents and hints; time lines are kept so it's clear when things were said.
     """
     from .actions import parse_actions
 
@@ -291,10 +291,10 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
             raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
             said = [m for a in parse_actions(raw)[0] if a.kind == "reply" for m in a.messages]
             if said:
-                out.append(f"{bot_name}：" + " / ".join(one_line(m, 300) for m in said))
+                out.append(f"{bot_name}: " + " / ".join(one_line(m, 300) for m in said))
             continue
         fenced = False
-        continuing = False  # 上一行是消息，缩进的行是它的后续
+        continuing = False  # the previous line was a message; indented lines continue it
         for line in content_text(content).split("\n"):
             if line == "<<<":
                 fenced, continuing = True, False
@@ -306,13 +306,13 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
                 out.append(_STAMP_LINE.match(line).group(0))
                 continuing = False
             elif _MSG_LINE.match(line):
-                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@你〕", "")
+                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@you〕", "")
                 out.append(text)
                 continuing = True
             elif continuing and line.startswith("  "):
-                out[-1] = (out[-1] + " " + line.strip()).replace(" 〔@你〕", "")
+                out[-1] = (out[-1] + " " + line.strip()).replace(" 〔@you〕", "")
             else:
-                continuing = False  # 提示、文件头、别的频道的近况之类
+                continuing = False  # hints, file headers, recent talk from other channels and so on
     return out
 
 
@@ -320,7 +320,7 @@ _CJK = re.compile(r"[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
 
 
 def estimate_tokens(text: str) -> int:
-    """按 DeepSeek 文档的经验值估算：1 个中文字符 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。"""
+    """Estimate with DeepSeek's documented rule of thumb: 1 Chinese character ≈ 0.6 tokens, 1 English character ≈ 0.3 tokens."""
     cjk = len(_CJK.findall(text))
     return int(cjk * 0.6 + (len(text) - cjk) * 0.3) + 4
 
@@ -338,7 +338,7 @@ def content_tokens(content: Any) -> int:
 
 
 def content_text(content: Any) -> str:
-    """把存下来的 user 内容还原成纯文本（压缩摘要时用），图片换成占位。"""
+    """Turn stored user content back into plain text (used for summaries), with images replaced by a placeholder."""
     if isinstance(content, str):
         return content
     out = []
@@ -346,12 +346,12 @@ def content_text(content: Any) -> str:
         if part.get("type") == "text":
             out.append(part.get("text", ""))
         else:
-            out.append("[图片]")
+            out.append("[image]")
     return "\n".join(out)
 
 
 def assistant_text(content: str, name: str) -> str:
-    """把存下来的 assistant JSON 还原成可读的一句话（压缩摘要时用）。"""
+    """Turn stored assistant JSON back into readable lines (used for summaries)."""
     try:
         data = json.loads(content)
         actions = data.get("actions", []) if isinstance(data, dict) else []
@@ -362,14 +362,14 @@ def assistant_text(content: str, name: str) -> str:
         if not isinstance(a, dict):
             continue
         to = a.get("to")
-        prefix = f"（回复 #{to}）" if to is not None else ""
+        prefix = f" (replying to #{to})" if to is not None else ""
         if a.get("type") == "reply":
             msgs = a.get("messages") or []
             if isinstance(msgs, str):
                 msgs = [msgs]
-            out.append(f"{name}{prefix}：" + " / ".join(str(x) for x in msgs))
+            out.append(f"{name}{prefix}: " + " / ".join(str(x) for x in msgs))
         elif a.get("type") == "react":
-            out.append(f"{name} 给 #{to} 加了表情 {a.get('emoji', '')}")
+            out.append(f"{name} reacted to #{to} with {a.get('emoji', '')}")
         elif a.get("type") == "read":
-            out.append(f"{name} 打开了 #{to} 的文件")
+            out.append(f"{name} opened the file(s) in #{to}")
     return "\n".join(out)
