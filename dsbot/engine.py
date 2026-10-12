@@ -15,6 +15,7 @@ import json
 import logging
 import random
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncContextManager, Awaitable, Callable, Protocol
 
@@ -27,16 +28,32 @@ from .llm import LLMError
 from .models import (
     Action,
     ChannelInfo,
+    ChannelPlace,
     Completion,
     DocBlock,
     FileAttachment,
     FileText,
     ImageAttachment,
     IncomingMessage,
+    SearchResult,
+    Usage,
 )
 from .prompts import SUMMARY_SYSTEM, build_system_prompt
 from .quota import QuotaBucket, SlidingWindow, TurnTracker
-from .render import assistant_text, content_text, content_tokens, neutralize, render_read_result, render_round
+from .search import today_text
+from .render import (
+    assistant_text,
+    content_tokens,
+    history_lines,
+    last_listed,
+    neutralize,
+    own_text,
+    render_channel_list,
+    render_recall,
+    render_round,
+    render_search,
+    render_tool_result,
+)
 from .settings import Settings, View
 from .store import Conversation, Store
 from .textutil import one_line, split_for_discord, typing_delay
@@ -62,6 +79,9 @@ MAX_PASTE_PREVIEWS = 3
 KEEP_RECENT_TURNS = 12  # 压缩记忆时，最近 6 轮（12 条）不动
 DOWNLOAD_TIMEOUT = 60.0  # 下载一个附件最多等多久
 FORCE_COMPACT_TOKENS = 100_000  # 上下文超过预算两倍、也超过这么多时，不等旧记录攒够就压缩
+TOOL_KINDS = ("read", "search", "recall")  # 被叫到时才能用、用完再问一次模型的动作
+MAX_RECALLS = 2
+INTERACTIONS_PER_PERSON = 3  # 每个人记住最近几次跟它的对话（跨频道带近况用）
 
 
 class Transport(Protocol):
@@ -72,6 +92,12 @@ class Transport(Protocol):
     async def react(self, channel_id: int, message_id: int, emoji: str) -> bool: ...
 
     def typing(self, channel_id: int) -> AsyncContextManager[Any]: ...
+
+    def locate(self, channel_id: int) -> ChannelPlace | None: ...
+
+
+class Searcher(Protocol):
+    async def search(self, query: str, *, today: str, max_chars: int, user_id: str | None = None) -> SearchResult: ...
 
 
 class LLM(Protocol):
@@ -142,6 +168,50 @@ def _without_images(docs: dict[int, list[DocBlock]]) -> dict[int, list[DocBlock]
     return {k: [_block_without_images(b) for b in v] for k, v in docs.items()}
 
 
+def _norm_channel(name: str) -> str:
+    return "".join(name.lower().lstrip("#＃").split())
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 120:
+        return "刚才"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟前"
+    return f"{seconds / 3600:.0f} 小时前"
+
+
+def _pick_lines(lines: list[str], about: str | None, budget: int) -> list[str]:
+    """翻记录时挑哪些行：有关键词就挑提到它的（连同前后一行），否则挑最近的；总长不超过 budget。"""
+    missed = False
+    if about:
+        words = [w for w in about.lower().split() if w]
+        hits = [i for i, line in enumerate(lines) if any(w in line.lower() for w in words)]
+        if hits:
+            keep: set[int] = set()
+            size = 0
+            for i in reversed(hits):  # 新的优先
+                for j in (i - 1, i, i + 1):
+                    if 0 <= j < len(lines) and j not in keep:
+                        keep.add(j)
+                        size += len(lines[j]) + 1
+                if size > budget:
+                    break
+            lines = [lines[k] for k in sorted(keep)]
+        else:
+            missed = True
+    out: list[str] = []
+    size = 0
+    for line in reversed(lines):
+        if size + len(line) + 1 > budget:
+            break
+        out.append(line)
+        size += len(line) + 1
+    out.reverse()
+    if missed and out:
+        out.insert(0, f"（没找到提到「{one_line(about or '', 40)}」的内容，下面是最近的记录）")
+    return out
+
+
 def plan_compaction(contents: list[Any], *, force: bool = False) -> int:
     """压缩记忆时要删掉最早的几条（偶数，成对删）。
 
@@ -165,6 +235,16 @@ def plan_compaction(contents: list[Any], *, force: bool = False) -> int:
         if acc >= total / 2:
             break
     return removed
+
+
+@dataclass
+class Interaction:
+    """某个人在某个频道跟它的一次对话（几行纯文本）。"""
+
+    channel_id: int
+    at: float
+    seq: int  # 记下的先后（慢的轮次后记，就排在后面，不会因为开始得早被当成“已经带过”）
+    lines: list[str]
 
 
 @dataclass
@@ -192,6 +272,8 @@ class ChannelState:
     sid_by_msg: dict[int, int] = field(default_factory=dict)
     msg_by_sid: dict[int, int] = field(default_factory=dict)
     recent_files: dict[int, FileEntry] = field(default_factory=dict)  # message_id -> 带文件的消息
+    digest_seen: dict[int, int] = field(default_factory=dict)  # 人 -> 已经带进这个频道的、他在别处最近一次对话的序号
+    listed: tuple[str, ...] | None = None  # 已经写进这个频道记录里的“能翻记录的频道”名单
     last_decision: str = ""
 
 
@@ -210,6 +292,7 @@ class Engine:
         rng: random.Random | None = None,
         image_loader: Callable[[ImageAttachment, int], Awaitable[str | None]] | None = None,
         file_reader: Callable[[FileAttachment, int], Awaitable[FileText]] | None = None,
+        searcher: Searcher | None = None,
     ):
         self.cfg = cfg
         self.ec = cfg.engine
@@ -231,6 +314,9 @@ class Engine:
         self.paused_until = 0.0  # 余额不足 / key 错误时全局暂停
         self._last_housekeep = 0.0
         self._tasks: set[asyncio.Task[Any]] = set()
+        self.searcher = searcher
+        self.interactions: dict[tuple[int, int], deque[Interaction]] = {}  # (服务器, 人) -> 最近跟它的几次对话
+        self._interaction_seq = 0
 
     # ------------------------------------------------------------------ 输入
 
@@ -352,6 +438,16 @@ class Engine:
 
     def _housekeep(self, now: float) -> None:
         self.limiter.prune(60.0, now)
+        ttl = self.ec.share_recent_hours * 3600
+        for key, log_ in list(self.interactions.items()):
+            while log_ and now - log_[0].at > ttl:
+                log_.popleft()
+            if not log_:
+                del self.interactions[key]
+        for st in self.states.values():
+            # 这个人在别处已经没有可带的对话了，记录“带到哪了”也没用了；以后新的对话序号更大，照样会带
+            for person in [p for p in st.digest_seen if (st.guild_id, p) not in self.interactions]:
+                del st.digest_seen[person]
         for st in self.states.values():
             idle = now - max(st.last_activity_at, st.last_eval_at)
             if st.conversation is not None and not st.lock.locked() and not st.scheduled and idle > IDLE_EVICT:
@@ -429,6 +525,7 @@ class Engine:
     def _conversation(self, st: ChannelState) -> Conversation:
         if st.conversation is None:
             st.conversation = self.store.load_conversation(st.channel_id, st.guild_id)
+            st.listed = last_listed(st.conversation.turns)
             for sid, mid in self.store.load_msgmap(st.channel_id).items():
                 st.msg_by_sid.setdefault(sid, mid)
                 st.sid_by_msg.setdefault(mid, sid)
@@ -499,13 +596,8 @@ class Engine:
             st.mention_due = st.mention_due or any(m.trigger for m in batch)
             return
         info = self.transport.channel_info(st.channel_id)
-        system = build_system_prompt(
-            guild=info.guild_name,
-            channel=info.channel_name,
-            name=info.bot_name,
-            persona=view.persona,
-            summary=conv.summary,
-        )
+        system = self._system_prompt(st, view, conv, info)
+        context, digest_marks, listed = self._shared_context(st, view, triggers, now) if kind == "mention" else ([], {}, None)
 
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
             content = render_round(
@@ -519,6 +611,7 @@ class Engine:
                 images=images if with_images else {},
                 docs=docs if with_images else _without_images(docs),
                 max_chars=self.ec.max_chars_per_message,
+                context=context,
             )
             return content, self._messages(system, conv, content)
 
@@ -530,10 +623,12 @@ class Engine:
                 st, kind, build, has_images, thinking, generation
             )
         except LLMError as exc:
+            if exc.status in BAD_REQUEST:
+                st.digest_seen.update(digest_marks)  # 这批内容被拒了：带过来的那几句也别再带，免得一直被拒
             await self._on_error(st, kind, exc, now, batch, targets, conv, info)
             return
 
-        actions, stored = self._interpret(st, completion, kind, targets, allow_read=kind == "mention")
+        actions, stored = self._interpret(st, completion, kind, targets, allow_tools=kind == "mention")
         if st.generation != generation:
             log.info("频道 %s：这一轮进行中记忆被清空，丢弃结果", st.channel_id)
             self.store.set_outcome(row, "discarded")
@@ -544,13 +639,16 @@ class Engine:
         self.store.append_round(conv, user_content, stored, [(sid, m.message_id) for sid, m in numbered], now=now)
         self._consume(st, batch, now)
         self._mark_read(conv, planned)
+        st.digest_seen.update(digest_marks)
+        if listed is not None:
+            st.listed = listed
 
-        reads = [a for a in actions if a.kind == "read"]
-        if reads:
-            # 模型要先看文件：读完再问它一次（第二步不能再 read）
-            self.store.set_outcome(row, "read")
-            st.last_decision = "被点名，先去看文件"
-            step = await self._read_step(st, conv, reads, targets, view, info, system, generation, budget)
+        tools = [a for a in actions if a.kind in TOOL_KINDS]
+        if tools:
+            # 模型要先看文件 / 上网搜 / 翻别的频道：办完再问它一次（第二步不能再用这些）
+            self.store.set_outcome(row, "+".join(sorted({a.kind for a in tools})))
+            st.last_decision = "被点名，先去查资料"
+            step = await self._tool_step(st, conv, tools, targets, view, info, system, generation, budget)
             if step is None:
                 return
             completion, cost, row, actions = step
@@ -558,6 +656,8 @@ class Engine:
         decided_reply = any(a.kind == "reply" and a.messages for a in actions)
         decided_react = any(a.kind == "react" for a in actions)
         outcome = "reply" if decided_reply else ("react" if decided_react else "pass")
+        if st.generation == generation:
+            self._remember_interactions(st, numbered, actions, kind, targets, triggers)
         try:
             spoke, _ = await self._execute(st, actions, kind, targets, elapsed=self.clock() - started)
         finally:
@@ -626,7 +726,7 @@ class Engine:
         return content, completion, cost, row
 
     def _interpret(
-        self, st: ChannelState, completion: Completion, kind: str, targets: list[int], *, allow_read: bool
+        self, st: ChannelState, completion: Completion, kind: str, targets: list[int], *, allow_tools: bool
     ) -> tuple[list[Action], str]:
         """解析模型输出，返回 (动作, 写进历史的内容)。"""
         actions, ok = parse_actions(completion.content)
@@ -636,21 +736,25 @@ class Engine:
             if kind == "mention" and text and not text.startswith(("{", "[")):
                 actions = [Action("reply", targets[-1] if targets else None, [text[:1800]])]
             return actions, dump_actions(actions)
-        reads = [a for a in actions if a.kind == "read"]
-        if not reads:
+        tools = [a for a in actions if a.kind in TOOL_KINDS]
+        if not tools:
             return actions, completion.content
-        if allow_read:
-            # 要看文件时这一次只算 read；历史里也只记 read，和实际做的事一致
-            reads = reads[:MAX_READ_TARGETS]
-            return reads, dump_actions(reads)
-        actions = [a for a in actions if a.kind != "read"]  # 没被叫到、或者已经看过一次了
+        if allow_tools:
+            # 要查资料时这一次只算这些动作；历史里也只记它们，和实际做的事一致
+            picked = (
+                [a for a in tools if a.kind == "read"][:MAX_READ_TARGETS]
+                + [a for a in tools if a.kind == "search"][: max(1, self.ec.max_searches_per_round)]
+                + [a for a in tools if a.kind == "recall"][:MAX_RECALLS]
+            )
+            return picked, dump_actions(picked)
+        actions = [a for a in actions if a.kind not in TOOL_KINDS]  # 没被叫到、或者已经查过一次了
         return actions, dump_actions(actions)
 
-    async def _read_step(
+    async def _tool_step(
         self,
         st: ChannelState,
         conv: Conversation,
-        reads: list[Action],
+        tools: list[Action],
         targets: list[int],
         view: View,
         info: ChannelInfo,
@@ -659,6 +763,42 @@ class Engine:
         budget: _Budget,
     ) -> tuple[Completion, float, int, list[Action]] | None:
         now = self.clock()
+        reads = [a for a in tools if a.kind == "read"]
+        plan, file_notes = self._plan_reads(st, view, reads)
+        sections: list[str] = []
+        async with self.transport.typing(st.channel_id):
+            results = await self._read_planned(st, plan, budget)
+            for action in tools:
+                if action.kind == "search":
+                    sections.append(await self._search_section(st, view, action, now))
+                elif action.kind == "recall":
+                    sections.append(self._recall_section(st, view, action, info))
+        if st.generation != generation:
+            return None  # 查资料的时候记忆被清空了
+        blocks = [block for _, block, _, _ in results]
+
+        def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
+            used = blocks if with_images else [_block_without_images(b) for b in blocks]
+            content = render_tool_result(used, file_notes, sections, [], targets=targets, files=bool(reads))
+            return content, self._messages(system, conv, content)
+
+        has_images = any(b.result.images for b in blocks)
+        try:
+            content, completion, cost, row = await self._ask_with_fallback(
+                st, "mention", build, has_images, view.mention_thinking, generation
+            )
+        except LLMError as exc:
+            await self._on_error(st, "mention", exc, now, [], targets, conv, info)
+            return None
+        actions, stored = self._interpret(st, completion, "mention", targets, allow_tools=False)
+        if st.generation != generation:
+            self.store.set_outcome(row, "discarded")
+            return None
+        self.store.append_round(conv, content, stored, [], now=now)
+        self._mark_read(conv, [(item, result) for _, _, item, result in results])
+        return completion, cost, row, actions
+
+    def _plan_reads(self, st: ChannelState, view: View, reads: list[Action]) -> tuple[list[_Planned], list[str]]:
         plan: list[_Planned] = []
         notes: list[str] = []
         for action in reads:
@@ -676,32 +816,221 @@ class Engine:
                     notes.append(f"（#{action.to} 的文件「{name}」前面已经给你看过了，往上翻就有）")
                 else:
                     plan.append(_Planned(mid, mid, att, self._file_chars(), entry=entry))
-        async with self.transport.typing(st.channel_id):
-            results = await self._read_planned(st, plan, budget)
-        if st.generation != generation:
-            return None  # 读文件的时候记忆被清空了
-        blocks = [block for _, block, _, _ in results]
+        return plan, notes
 
-        def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
-            used = blocks if with_images else [_block_without_images(b) for b in blocks]
-            content = render_read_result(used, notes, targets=targets)
-            return content, self._messages(system, conv, content)
+    # ------------------------------------------------------------------ 上网搜
 
-        has_images = any(b.result.images for b in blocks)
+    def _can_search(self, view: View) -> bool:
+        return (
+            bool(view.web_search)
+            and self.searcher is not None
+            and view.daily_search_limit > 0
+            and self.ec.max_searches_per_round > 0
+        )
+
+    def _today(self, now: float) -> str:
+        return today_text(now, self.tz)
+
+    async def _search_section(self, st: ChannelState, view: View, action: Action, now: float) -> str:
+        query = action.query or ""
+        shown = neutralize(one_line(query, 60))
+        if not self._can_search(view):
+            return f"（想搜「{shown}」，但这里不能上网搜。凭你已有的知识回答，拿不准就直说。）"
+        limit = int(view.daily_search_limit)
+        day = self.ledger.day(now)
+        if self.store.count_usage(day, guild_id=st.guild_id, kind="search") >= limit:
+            return f"（想搜「{shown}」，但今天这个服务器的搜索次数用完了（{limit} 次）。凭你已有的知识回答，拿不准就直说。）"
+        if self._over_budget(st, view, now)[0]:
+            return f"（想搜「{shown}」，但今天的预算用完了。凭你已有的知识回答，拿不准就直说。）"
+        assert self.searcher is not None
+        # 先记一笔占住名额，再去搜：别的频道同时在搜时，也不会一起超过上限
+        row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="search", outcome="pending")
         try:
-            content, completion, cost, row = await self._ask_with_fallback(
-                st, "mention", build, has_images, view.mention_thinking, generation
+            result = await self.searcher.search(
+                query, today=self._today(now), max_chars=self.ec.search_max_chars, user_id=f"guild-{st.guild_id}"
             )
-        except LLMError as exc:
-            await self._on_error(st, "mention", exc, now, [], targets, conv, info)
+        except asyncio.CancelledError:
+            self._finish_search(st, row, Usage(), "error")  # 关机时被取消：别留下一笔一直“进行中”的记录
+            raise
+        except Exception as exc:  # SearchError，以及意料之外的错误：都只算这次没搜成
+            log.warning("频道 %s：搜索「%s」失败：%s", st.channel_id, one_line(query, 60), exc)
+            self._finish_search(st, row, getattr(exc, "usage", None) or Usage(), "error")
+            return f"（搜「{shown}」失败了。凭你已有的知识回答，拿不准就直说。）"
+        self._finish_search(st, row, result.usage, "search")
+        log.info("频道 %s：搜了「%s」（%s，%d 个来源）", st.channel_id, one_line(query, 60), result.provider, len(result.sources))
+        return render_search(query, result.summary, result.sources, self.ec.search_max_chars)
+
+    def _finish_search(self, st: ChannelState, row: int, usage: Usage, outcome: str) -> None:
+        now = self.clock()
+        cost = self.pricing.cost(usage, now)
+        self.ledger.add(st.guild_id, cost, now)
+        self.store.update_usage(row, outcome=outcome, hit=usage.hit, miss=usage.miss, output=usage.output, cost=cost)
+
+    # ------------------------------------------------------------------ 跨频道记忆
+
+    def shares_out(self, channel_id: int, place: ChannelPlace) -> bool:
+        """这个频道的内容能不能给同服务器别的频道看：开了共享；私密频道还要在这个频道上单独开。"""
+        view = self.settings.view(place.guild_id, channel_id, place.parent_id, place.category_id)
+        if not view.enabled or not view.share_memory:
+            return False
+        if place.public:
+            return True
+        explicit = self.settings.overrides("channel", channel_id).get("share_memory")
+        if explicit is None and place.parent_id is not None and not place.private_thread:
+            explicit = self.settings.overrides("channel", place.parent_id).get("share_memory")
+        return explicit is True
+
+    def shared_sources(self, guild_id: int, channel_id: int) -> list[tuple[int, ChannelPlace]]:
+        """这个频道可以翻记录的别的频道：普通频道在前，帖子在后，各自按名字排。"""
+        out = []
+        for cid in self.store.conversation_channels(guild_id):
+            if cid == channel_id:
+                continue
+            place = self.transport.locate(cid)
+            if place is not None and place.guild_id == guild_id and self.shares_out(cid, place):
+                out.append((cid, place))
+        out.sort(key=lambda item: (item[1].parent_id is not None, item[1].name, item[0]))
+        return out
+
+    def _display(self, place: ChannelPlace) -> str:
+        """给模型看的频道名。帖子写成“帖子「标题」（在 #所在频道）”，群友起个和频道一样的帖子名也冒充不了频道。"""
+        name = neutralize(one_line(place.name, 40))
+        if place.parent_id is None:
+            return f"#{name}"
+        parent = self.transport.locate(place.parent_id)
+        where = f"（在 #{neutralize(one_line(parent.name, 30))}）" if parent is not None else ""
+        return f"帖子「{name}」{where}"
+
+    def _find_source(
+        self, sources: list[tuple[int, ChannelPlace]], wanted: str
+    ) -> tuple[int, ChannelPlace] | list[tuple[int, ChannelPlace]] | None:
+        """按名字找要翻的频道。找到返回它；同名的帖子分不出是哪个时返回候选列表；找不到返回 None。"""
+        raw = " ".join(wanted.split()).strip()
+        key = _norm_channel(wanted).rstrip("…")
+        if not key:
             return None
-        actions, stored = self._interpret(st, completion, "mention", targets, allow_read=False)
-        if st.generation != generation:
-            self.store.set_outcome(row, "discarded")
-            return None
-        self.store.append_round(conv, content, stored, [], now=now)
-        self._mark_read(conv, [(item, result) for _, _, item, result in results])
-        return completion, cost, row, actions
+
+        def names(place: ChannelPlace) -> set[str]:
+            return {_norm_channel(place.name), _norm_channel(self._display(place)), _norm_channel(neutralize(place.name))}
+
+        tests = (
+            lambda p: raw in (p.name, self._display(p), neutralize(p.name)) or raw.lstrip("#＃") == p.name,  # 原样一致
+            lambda p: key in names(p),
+            lambda p: any(n.startswith(key) for n in names(p)),  # 名单里的长名字被截断过（结尾是“…”）
+            lambda p: any(key in n or (len(n) >= 2 and n in key) for n in names(p)),  # “游戏频道”找“游戏”之类
+        )
+        for test in tests:
+            found = [s for s in sources if test(s[1])]
+            channels = [s for s in found if s[1].parent_id is None]
+            if channels:
+                return channels[0]  # 频道是管理员建的，同名时优先频道
+            if len(found) == 1:
+                return found[0]
+            if found:
+                return found  # 好几个帖子都对得上：不猜，免得被群友起的同名帖子冒充
+        return None
+
+    def _system_prompt(self, st: ChannelState, view: View, conv: Conversation, info: ChannelInfo) -> str:
+        # 名单不放这里：它会变（新频道、帖子归档），放在 system prompt 里每变一次整段缓存都失效
+        return build_system_prompt(
+            guild=neutralize(one_line(info.guild_name, 60)),
+            channel=neutralize(one_line(info.channel_name, 60)),
+            name=neutralize(one_line(info.bot_name, 40)),
+            persona=view.persona,
+            summary=conv.summary,
+            search=self._can_search(view),
+            share=bool(view.share_memory),
+        )
+
+    def _recall_section(self, st: ChannelState, view: View, action: Action, info: ChannelInfo) -> str:
+        shown = neutralize(one_line(action.channel or "", 40))
+        if not view.share_memory:
+            return f"（想翻「{shown}」的记录，但这里没开记忆共享，看不了别的频道。）"
+        sources = self.shared_sources(st.guild_id, st.channel_id)
+        match = self._find_source(sources, action.channel or "")
+        if match is None:
+            names = "、".join(self._display(p) for _, p in sources[:10]) or "没有"
+            return f"（找不到能翻记录的频道「{shown}」。能翻的：{names}）"
+        if isinstance(match, list):
+            names = "、".join(self._display(p) for _, p in match[:10])
+            return f"（叫「{shown}」的有好几个：{names}。分不出是哪个，没翻。）"
+        channel_id, place = match
+        other = self.states.get(channel_id)
+        conv = other.conversation if other is not None and other.conversation is not None else None
+        if conv is None:
+            conv = self.store.load_conversation(channel_id, st.guild_id)
+        lines = history_lines([(t.role, t.content) for t in conv.turns], info.bot_name)
+        lines = _pick_lines(lines, action.query, self.ec.recall_max_chars)
+        return render_recall(self._display(place), conv.summary, lines, action.query)
+
+    def _shared_context(
+        self, st: ChannelState, view: View, triggers: list[IncomingMessage], now: float
+    ) -> tuple[list[str], dict[int, int], tuple[str, ...] | None]:
+        """被叫到时放在这一轮前面的跨频道内容：能翻记录的频道名单（变了才写），以及叫它的人最近在别的频道跟它聊过的话。
+
+        返回 (文字行, 带进来的对话序号, 这次写进去的名单)。
+        """
+        if not view.share_memory:
+            return [], {}, None
+        lines: list[str] = []
+        listed: tuple[str, ...] | None = None
+        sources = self.shared_sources(st.guild_id, st.channel_id)
+        names = tuple(self._display(p) for _, p in sources[: self.ec.share_list_limit])
+        if names != st.listed:
+            listed = names
+            lines += render_channel_list(list(names), len(sources) - len(names))
+        ttl = self.ec.share_recent_hours * 3600
+        marks: dict[int, int] = {}
+        allowed = {cid: p for cid, p in sources}
+        for m in triggers:
+            if m.is_bot or m.author_id in marks:
+                continue
+            since = st.digest_seen.get(m.author_id, 0)
+            fresh = [
+                item
+                for item in self.interactions.get((st.guild_id, m.author_id), ())
+                if item.channel_id in allowed and item.seq > since and now - item.at <= ttl
+            ]
+            if not fresh:
+                continue
+            marks[m.author_id] = max(item.seq for item in fresh)  # 只带最近两次；更早的就不带了
+            for item in fresh[-2:]:
+                where = self._display(allowed[item.channel_id])
+                block = [f"（{neutralize(one_line(m.author_name, 32))} {_ago(now - item.at)}在 {where} 跟你聊过："]
+                block += ["  " + neutralize(line) for line in item.lines]
+                block[-1] += "）"
+                lines += block
+        return lines, marks, listed
+
+    def _remember_interactions(
+        self,
+        st: ChannelState,
+        numbered: list[tuple[int, IncomingMessage]],
+        actions: list[Action],
+        kind: str,
+        targets: list[int],
+        triggers: list[IncomingMessage],
+    ) -> None:
+        """记下这一轮谁跟它说了什么、它怎么回的（跨频道带近况用）。"""
+        by_sid = {sid: m for sid, m in numbered}
+        talks: dict[int, tuple[IncomingMessage, list[str]]] = {}
+        for action in actions:
+            if action.kind != "reply" or not action.messages:
+                continue
+            to = action.to if action.to is not None else (targets[-1] if kind == "mention" and targets else None)
+            m = by_sid.get(to) if to is not None else None
+            if m is not None and not m.is_bot:
+                talks.setdefault(id(m), (m, []))[1].extend(action.messages)
+        for m in triggers:
+            talks.setdefault(id(m), (m, []))
+        for m, replies in talks.values():
+            said = one_line(m.text, 150) if m.text.strip() else "（发了图片或文件）"
+            lines = [f"{one_line(m.author_name, 32)}：{said}"] + [f"你：{one_line(r, 150)}" for r in replies[:3]]
+            key = (st.guild_id, m.author_id)
+            self._interaction_seq += 1
+            self.interactions.setdefault(key, deque(maxlen=INTERACTIONS_PER_PERSON)).append(
+                Interaction(st.channel_id, self.clock(), self._interaction_seq, lines)
+            )
 
     # ------------------------------------------------------------------ 文件
 
@@ -1032,7 +1361,8 @@ class Engine:
         lines = []
         for t in conv.turns[:remove]:
             if t.role == "user":
-                lines.append(content_text(t.content))
+                # 别的频道带来的近况、翻到的记录、搜索结果不进摘要：那些频道清空或不再共享后，这里也不该一直记着
+                lines.append(own_text(t.content))
             else:
                 raw = t.content if isinstance(t.content, str) else json.dumps(t.content, ensure_ascii=False)
                 said = assistant_text(raw, info.bot_name)
@@ -1072,6 +1402,7 @@ class Engine:
             return
         last_removed = conv.turns[remove - 1].id
         self.store.compact(conv, summary[: self.ec.summary_max_chars * 2], remove)
+        st.listed = last_listed(conv.turns)  # 名单可能在被压掉的那部分里，那样下次被叫到时重新写
         for entry in st.recent_files.values():
             # 文件内容随旧记录一起压成了摘要，被问到时要能重新读
             entry.read_turns = {k: v for k, v in entry.read_turns.items() if v > last_removed}
@@ -1101,6 +1432,15 @@ class Engine:
             for entry in st.recent_files.values():
                 entry.read_turns.clear()  # 读过的内容随记忆一起清掉了
                 entry.failed.clear()
+            st.digest_seen.clear()
+            st.listed = None
+        for key, log_ in list(self.interactions.items()):
+            # 清空了这个频道的记忆，别的频道也不该再“想起”这里聊过的事
+            kept = [item for item in log_ if item.channel_id != channel_id]
+            if kept:
+                self.interactions[key] = deque(kept, maxlen=INTERACTIONS_PER_PERSON)
+            else:
+                del self.interactions[key]
 
     def status(
         self, guild_id: int, channel_id: int, parent_id: int | None, category_id: int | None = None
@@ -1121,4 +1461,6 @@ class Engine:
             "paused": now < self.paused_until,
             "send_blocked": bool(st and st.send_failures >= SEND_FAIL_LIMIT and now < st.error_until),
             "day": self.ledger.day(now),
+            "searches": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="search"),
+            "can_search": self._can_search(view),
         }

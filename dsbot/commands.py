@@ -33,9 +33,14 @@ AREA_ACTIONS = [
     Choice(name="禁止", value="off"),
     Choice(name="跟随上级", value="inherit"),
 ]
+SHARE_ACTIONS = [
+    Choice(name="开", value="on"),
+    Choice(name="关", value="off"),
+    Choice(name="跟随上级", value="inherit"),
+]
 NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
-# 区域、主动开关、人设有专门的命令；其余管理员参数走 /ds 设置
-ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona")]
+# 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
+ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
 
 
@@ -141,6 +146,25 @@ class PersonaModal(discord.ui.Modal):
         await _reply(interaction, f"保存失败：{error}")
 
 
+def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
+    """这个频道的记忆共享情况：能不能看别的频道、自己的内容会不会分享出去、现在和哪些频道互通。"""
+    guild_id, channel_id, parent_id, category_id = _ids(interaction)
+    view = bot.settings.view(guild_id, channel_id, parent_id, category_id)
+    if not view.share_memory:
+        return f"记忆共享：关（来自{view.source('share_memory')}）"
+    place = bot.transport.locate(channel_id)
+    shares_out = place is not None and bot.engine.shares_out(channel_id, place)
+    if shares_out:
+        out_text = "这里的内容也会分享给别的共享频道"
+    elif place is not None and not place.public:
+        out_text = "🔒 这是私密频道，这里的内容不会分享出去（要分享就在这里单独执行 `/ds 记忆共享 操作:开`）"
+    else:
+        out_text = "这里的内容不会分享出去"
+    sources = bot.engine.shared_sources(guild_id, channel_id)
+    names = "、".join(f"<#{cid}>" for cid, _ in sources[:15]) or "暂时没有（别的频道开了共享、并且跟它聊过之后才会出现）"
+    return f"记忆共享：开（来自{view.source('share_memory')}）· {out_text}\n能翻记录的频道：{names}"
+
+
 def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     guild_id, channel_id, parent_id, category_id = _ids(interaction)
     view = bot.settings.view(guild_id, channel_id, parent_id, category_id)
@@ -164,6 +188,11 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         f"别名：{view.aliases or '（无）'} · 人设：{format_value(SPECS['persona'], view.persona)}",
         f"待处理消息 {st['pending']} 条 · 上次发言：{_ago(st['last_speak_ago'])}",
     ]
+    lines.append(share_text(bot, interaction))
+    if st["can_search"]:
+        lines.append(f"联网搜索：开 · 今天本服务器已搜 {st['searches']} / {view.daily_search_limit} 次")
+    else:
+        lines.append("联网搜索：关")
     if st["last_decision"]:
         lines.append(f"上次：{st['last_decision']}")
     lines.append(
@@ -244,6 +273,27 @@ def register_commands(bot: "DSBot") -> None:
         ]
         if scope_name == "guild" and action.value == "off":
             lines.append("现在是白名单模式：在要用的频道里执行 `/ds 区域 操作:允许`（或选“本类别”放开整个区）。")
+        await _reply(interaction, "\n".join(lines))
+
+    @admin.command(name="记忆共享", description="让它在开了共享的频道之间互通记忆（私密频道要单独开才会分享出去）")
+    @app_commands.rename(action="操作", scope="范围")
+    @app_commands.describe(action="开 / 关 / 跟随上级（删掉这一层的设置）", scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @app_commands.choices(action=SHARE_ACTIONS, scope=SCOPE_CHOICES)
+    async def share_cmd(interaction: discord.Interaction, action: Choice[str], scope: Optional[Choice[str]] = None) -> None:
+        target = _target(interaction, scope)
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
+        if action.value == "inherit":
+            bot.settings.unset(scope_name, scope_id, "share_memory")
+            done = "改为跟随上级"
+        else:
+            bot.settings.set(scope_name, scope_id, "share_memory", action.value)
+            done = "打开" if action.value == "on" else "关闭"
+        lines = [f"{where}：记忆共享已{done}。", share_text(bot, interaction)]
+        if action.value == "on" and scope_name != "channel":
+            lines.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
         await _reply(interaction, "\n".join(lines))
 
     @admin.command(name="区域列表", description="看看它在这个服务器的哪些地方会回应")

@@ -94,14 +94,23 @@ class IncomingMessage:
 
 @dataclass
 class Action:
-    kind: str  # "reply" | "react" | "read"
+    kind: str  # "reply" | "react" | "read" | "search" | "recall"
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
+    query: str | None = None  # search：要搜什么；recall：想找的关键词（可以没有）
+    channel: str | None = None  # recall：哪个频道
 
     def to_json(self) -> dict[str, Any]:
         if self.kind == "read":
             return {"type": "read", "to": self.to}
+        if self.kind == "search":
+            return {"type": "search", "query": self.query}
+        if self.kind == "recall":
+            d: dict[str, Any] = {"type": "recall", "channel": self.channel}
+            if self.query:
+                d["about"] = self.query
+            return d
         if self.kind == "react":
             d: dict[str, Any] = {"type": "react"}
             if self.to is not None:
@@ -137,3 +146,23 @@ class ChannelInfo:
     guild_name: str
     channel_name: str
     bot_name: str
+
+
+@dataclass
+class ChannelPlace:
+    """一个频道在服务器里的位置（跨频道记忆要用它查设置、判断是不是私密频道）。"""
+
+    guild_id: int
+    name: str
+    parent_id: int | None = None  # 帖子所在的频道
+    category_id: int | None = None
+    public: bool = False  # 所有人（@everyone）都看得到；拿不准时为 False
+    private_thread: bool = False  # 私密帖子（只有被邀请的人看得到）
+
+
+@dataclass
+class SearchResult:
+    summary: str
+    sources: list[tuple[str, str]] = field(default_factory=list)  # (标题, 网址)
+    usage: Usage = field(default_factory=lambda: Usage())
+    provider: str = ""

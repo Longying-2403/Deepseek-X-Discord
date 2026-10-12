@@ -13,6 +13,8 @@
 - **省钱**：对话历史只追加不改写，尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
+- **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 自带的搜索查一下再回答。每个服务器每天有次数上限。
+- **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
 A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like a regular member:
@@ -24,6 +26,8 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Cheap to run**: conversation history is append-only to get the most out of DeepSeek's prefix cache; no model call at all when the quota is empty; automatic fallback when the daily budget runs out.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links and Discord stickers are all sent to the model (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scanned PDFs it looks at the first few pages as images), Word, Excel and PowerPoint. Files attached when someone calls it are read right away; for requests like "take a look at that file above", it opens the file itself.
+- **Searches the web**: when someone calls it with a question that needs up-to-date information it doesn't have (news, prices, scores, weather…), it looks it up with DeepSeek's built-in search before answering. Each server has a daily search limit.
+- **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share their memory. Private channels don't share by default.
 - **Stays where you want it**: you can limit where it responds by channel, category or the whole server.
 
 Setup, commands and settings in English: [README.en.md](README.en.md)
@@ -59,6 +63,7 @@ cp .env.example .env
 | `OWNER_ID` | 你自己的 Discord 用户 ID（开发者模式下右键头像 → 复制用户 ID） |
 | `CONTROL_GUILD_ID` | 可选。你的私人服务器 ID，主人命令 `/dsowner` 只注册在这里 |
 | `DISCORD_PROXY` | 可选。连 Discord 需要代理时填，如 `http://127.0.0.1:7890` |
+| `TAVILY_API_KEY` | 可选。DeepSeek 自带的搜索用不了时，改用 [Tavily](https://tavily.com)（每月免费 1000 次） |
 
 ---
 
@@ -79,6 +84,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m dsbot --check         # 离线自检：配置、斜杠命令定义（不连 Discord、不花钱）
+python -m dsbot --test-search "台北 今天 天气"   # 可选：真的搜一次，确认联网搜索能用（花一点点钱）
 python -m dsbot
 ```
 
@@ -92,7 +98,8 @@ python -m dsbot
 2. 在想让它主动聊天的频道里：`/ds 主动 开关:开`
 3. 选个话量：`/ds 档位`（安静 / 普通 / 话痨）
 4. 给它定人设：`/ds 人设`（弹出编辑框）
-5. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率）；`/ds 区域列表` 看它在哪些地方会回应
+5. 想让它记得别的频道聊过的事：`/ds 记忆共享 操作:开 范围:全服务器`（见下面“七、跨频道记忆”）
+6. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率、记忆共享和搜索次数）；`/ds 区域列表` 看它在哪些地方会回应
 
 不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
 
@@ -112,7 +119,8 @@ python -m dsbot
 | `/ds 档位` | 一键套用：安静 / 普通 / 话痨 |
 | `/ds 设置` | 调整单项参数，值填“默认”可恢复 |
 | `/ds 人设` | 修改人设（弹出编辑框） |
-| `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费 |
+| `/ds 记忆共享` | 开 / 关 / 跟随上级。开了共享的频道之间互通记忆；私密频道要在那个频道里单独开才会分享出去 |
+| `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费、记忆共享、今天的搜索次数 |
 | `/ds 清空记忆` | 清空本频道的对话记录和摘要 |
 
 除了“区域列表”“状态”和“清空记忆”，这些命令都有一个“范围”选项：**本频道**（默认，人设除外）、**本类别**（Discord 里的“XX区”）、**全服务器**。
@@ -125,7 +133,7 @@ python -m dsbot
 
 | 命令 | 作用 |
 |---|---|
-| `/dsowner 设置` | 改任何参数（含预算、思考强度），可以指定某个服务器 ID，不填就是全局 |
+| `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索开关和每日搜索上限），可以指定某个服务器 ID，不填就是全局 |
 | `/dsowner 总览` | 今天每个服务器花了多少、调用多少次、缓存命中率 |
 
 没设置 `CONTROL_GUILD_ID` 时不注册主人命令，直接改 `config.toml` 即可。
@@ -160,6 +168,8 @@ python -m dsbot
 | 上下文预算 | 30000 | 上下文超过这么多 token，就把最早的一半压成摘要 |
 | 看图 | 开 | 是否把图片发给模型 |
 | 读文件 | 开 | 是否读取群友上传的文件 |
+| 联网搜索 | 开 | 被叫到时，需要最新信息就上网搜 |
+| 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
 
 “一轮”的意思：同一个人 20 秒内连发的几条算一轮，免得分行打字刷额度。
 
@@ -193,7 +203,35 @@ python -m dsbot
 
 ---
 
-## 七、它是怎么工作的
+## 七、跨频道记忆
+
+默认每个频道各记各的。在 B 频道它不知道你刚才在 A 频道跟它聊了什么。管理员打开记忆共享后：
+
+- **自动接上**：有人在 B 叫它时，如果这个人 6 小时内在 A 跟它聊过，会把那几句带过来，“刚才说的那个”就能接上。同一段只带一次。
+- **按需翻记录**：被叫到时，它知道哪些频道可以翻；需要时（比如“上次在 #游戏 说的那个”）会先去翻那个频道的摘要和最近的记录，再回答。这样多一次调用，慢几秒。
+
+怎么开：`/ds 记忆共享 操作:开`，范围可以选本频道、本类别或全服务器，和 `/ds 区域` 一样。
+
+隐私规则：
+- 只有开了共享的频道之间才互通，只在同一个服务器里，不跨服务器。
+- **私密频道**（@everyone 看不到的频道、私密帖子、成人内容频道）就算在“全服务器”范围里开了，内容也不会分享出去。确实要分享，就在那个频道里单独执行 `/ds 记忆共享 操作:开`（范围选本频道）。私密频道照样能看到公开频道里共享的内容。
+- 不允许回应的区域（`/ds 区域` 禁止的地方）不参与共享。
+- 对某个频道执行 `/ds 清空记忆`、关掉它的共享之后，别的频道就拿不到那里的内容了。已经带到别的频道的那几句，还会留在那边最近的记录里，等变成旧记录被压缩时去掉（压缩时只总结那个频道自己的内容）；想马上去掉，就把那边也清空一下。
+- 帖子在名单里写成“帖子「标题」”，和频道区分开，群友起个跟频道一样的帖子名也冒充不了频道。
+- `/ds 状态` 会显示这个频道能翻哪些频道、自己的内容会不会分享出去。
+
+## 八、联网搜索
+
+它的知识大约只到 2025 年中。被叫到时，如果问题需要最新或实时的信息（新闻、价格、汇率、比分、天气、新出的产品……），它会先上网搜一下再回答。要不要搜由它自己判断，闲聊和常识不会去搜。
+
+- **用的是 DeepSeek 自带的搜索**（它的 Anthropic 兼容接口里的 web_search，Claude Code 也是用这个），不需要别的 key，费用按 token 算，一次大约 0.1–0.5 美分，算进每日预算。
+- 只有被叫到时才搜，主动聊天时不搜。一轮最多搜 2 次，每次搜索里它最多查 3 轮网页。
+- 每个服务器每天最多搜 30 次，用 `/dsowner 设置 参数:每日搜索上限` 改（可以指定服务器）；`/dsowner 设置 参数:联网搜索 值:关` 关掉。超了预算也不搜。
+- 回答里带的链接不会展开预览，免得刷屏。
+- 搜到的网页内容和文件一样当成资料处理，里面写的“忽略之前的设定”之类不会照做。
+- 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。如果 DeepSeek 自带的搜索用不了（比如接口改了），在 `.env` 里填 `TAVILY_API_KEY`，会自动改用 Tavily。
+
+## 九、它是怎么工作的
 
 ```
 消息进来 ──► 存进该频道的缓冲区
@@ -205,8 +243,8 @@ python -m dsbot
 
 一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息（该读的文件内容跟在后面）
       → 连同全部历史发给 DeepSeek（JSON 输出）
-      → 模型返回 {"actions": [...]}：回复 / 加表情 / 看文件 / 什么都不做
-        （要看文件时：读完把内容追加进去，再问它一次）
+      → 模型返回 {"actions": [...]}：回复 / 加表情 / 看文件 / 上网搜 / 翻别的频道 / 什么都不做
+        （要看文件、搜索、翻记录时：办完把结果追加进去，再问它一次）
       → 这一轮的 user + assistant 原样追加进历史（沉默也记）
       → 显示“正在输入”，按字数等几秒再发
 ```
@@ -217,7 +255,7 @@ python -m dsbot
 
 ---
 
-## 八、常见问题
+## 十、常见问题
 
 **@ 它没反应**
 - 这个频道不在允许的区域：`/ds 状态` 第一行会提示，`/ds 区域列表` 看整体设置。
@@ -245,9 +283,9 @@ python -m dsbot
 
 ---
 
-## 九、开发
+## 十一、开发
 
-欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤和几条设计约束。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。
+欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤和几条设计约束。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ```bash
 python -m unittest discover -s tests      # 核心逻辑测试，不需要装 discord.py
@@ -257,10 +295,11 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 
 | 文件 | 作用 |
 |---|---|
-| `dsbot/engine.py` | 调度引擎：缓冲、时机判断、额度、预算、执行动作、压缩摘要 |
+| `dsbot/engine.py` | 调度引擎：缓冲、时机判断、额度、预算、执行动作、压缩摘要、跨频道记忆 |
 | `dsbot/render.py` / `prompts.py` | 聊天记录渲染格式、system prompt |
 | `dsbot/llm.py` | DeepSeek HTTP 客户端（思考开关、JSON 模式、用量解析） |
 | `dsbot/files.py` | 读文件：分类、解码、PDF / Office 解析、解析子进程 |
+| `dsbot/search.py` | 联网搜索：DeepSeek 自带的 web_search（Anthropic 兼容接口），Tavily 备用 |
 | `dsbot/discord_app.py` / `convert.py` | Discord 事件与消息转换、发送、表情、“正在输入” |
 | `dsbot/commands.py` | 斜杠命令和人设编辑框 |
 | `dsbot/config.py` / `settings.py` | 配置、参数定义与分层覆盖 |

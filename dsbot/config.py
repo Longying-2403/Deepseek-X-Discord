@@ -43,6 +43,7 @@ _SPEC_LIST = [
     Spec("mention_rate_limit", "每人每分钟点名", int, "admin", "每个人每分钟最多能叫它几次", 1, 60),
     Spec("aliases", "别名", str, "admin", "消息里出现这些名字也算叫它，用逗号分隔，例如：DS,小D"),
     Spec("persona", "人设", str, "admin", "人设描述，留空用默认人设"),
+    Spec("share_memory", "记忆共享", bool, "admin", "和别的也开了共享的频道互通记忆（私密频道要单独开才会分享出去）"),
     # —— 主人 ——
     Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
@@ -52,6 +53,8 @@ _SPEC_LIST = [
     Spec("context_budget_tokens", "上下文预算", int, "owner", "上下文超过这么多 token 就把旧记录压成摘要", 8000, 200000),
     Spec("vision", "看图", bool, "owner", "是否把群里的图片发给模型"),
     Spec("files", "读文件", bool, "owner", "是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）"),
+    Spec("web_search", "联网搜索", bool, "owner", "被叫到时，需要最新信息就上网搜（用 DeepSeek 自带的搜索）"),
+    Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
 ]
 
 SPECS: dict[str, Spec] = {s.key: s for s in _SPEC_LIST}
@@ -69,6 +72,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "mention_rate_limit": 3,
     "aliases": "",
     "persona": "",
+    "share_memory": False,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -77,6 +81,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "context_budget_tokens": 30000,
     "vision": True,
     "files": True,
+    "web_search": True,
+    "daily_search_limit": 30,
 }
 
 # 一键档位：只动“话量”相关的三个参数
@@ -154,6 +160,15 @@ class DeepSeekConfig:
     model: str = "deepseek-flash"
     timeout_seconds: float = 90.0
     max_retries: int = 2
+    # 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search 工具）；留空 = base_url + "/anthropic"
+    search_base_url: str = ""
+    search_timeout_seconds: float = 60.0
+    search_max_uses: int = 3  # 一次搜索里最多让它搜几轮
+
+    @property
+    def anthropic_url(self) -> str:
+        base = (self.search_base_url or self.base_url.rstrip("/") + "/anthropic").rstrip("/")
+        return base + "/v1/messages"
 
 
 @dataclass
@@ -188,6 +203,11 @@ class EngineConfig:
     max_thinking_tokens: int = 6000  # 思考时（含推理）
     hard_stop_multiplier: float = 2.0  # 花费超过预算这么多倍后，连点名也不回
     summary_max_chars: int = 600
+    max_searches_per_round: int = 2  # 被叫到的一轮里最多搜几次
+    search_max_chars: int = 2000  # 一次搜索的结果最多多少字
+    share_recent_hours: float = 6.0  # 同一个人这么久之内在别的频道跟它聊过，就把那几句带过来
+    recall_max_chars: int = 3000  # 翻别的频道的记录，一次最多多少字
+    share_list_limit: int = 30  # 告诉它可以翻哪些频道，最多列多少个
 
 
 @dataclass
@@ -249,6 +269,7 @@ class Secrets:
     owner_id: int
     control_guild_id: int | None = None
     discord_proxy: str | None = None
+    tavily_api_key: str | None = None  # 可选：DeepSeek 自带搜索用不了时改用 Tavily
 
 
 def load_secrets(env: dict[str, str] | None = None) -> Secrets:
@@ -268,4 +289,5 @@ def load_secrets(env: dict[str, str] | None = None) -> Secrets:
         owner_id=owner_id,
         control_guild_id=control_id,
         discord_proxy=env.get("DISCORD_PROXY", "").strip() or None,
+        tavily_api_key=env.get("TAVILY_API_KEY", "").strip() or None,
     )

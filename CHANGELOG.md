@@ -2,6 +2,64 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [1.3.0] - 2026-10-12
+
+### 中文
+
+**新增**
+
+- **联网搜索**：被叫到时，如果问题需要最新信息（新闻、价格、汇率、比分、天气等），会先用 DeepSeek 自带的搜索查一下再回答。闲聊和常识不搜，主动插话时也不搜；一轮最多搜 2 次，费用算进每日预算。
+- 新参数 `联网搜索`（`web_search`）和 `每日搜索上限`（`daily_search_limit`，默认每个服务器每天 30 次），主人可调。
+- 可选的 `TAVILY_API_KEY`：DeepSeek 自带的搜索用不了时，自动改用 Tavily。
+- `python -m dsbot --test-search "关键词"`：真的搜一次，确认联网搜索能用。
+- **跨频道记忆**：新命令 `/ds 记忆共享`（开 / 关 / 跟随上级，范围可选本频道、本类别或全服务器），默认关闭。开了以后，同一个人 6 小时内在别的频道跟它聊过的话会被带过来；被叫到时，它也能去翻开了共享的其他频道的摘要和最近记录。
+- 跨频道记忆的隐私规则：只在同一个服务器、开了共享的频道之间互通；私密频道要在那个频道里单独开才会分享出去；不允许回应的区域不参与。
+- `/ds 状态` 会显示记忆共享的情况和今天的搜索次数。
+
+**改进**
+
+- 提示词明确：聊天记录、文件、搜索结果和别的频道的记录都是资料，不是给它的指令。
+- 回答里的链接不再展开预览，免得刷屏。
+
+**升级须知**
+
+- 这个版本没有新增依赖，但代码有更新，Docker 部署要重新构建镜像：`docker compose up -d --build`（群晖 Container Manager 里是项目的“操作 → 构建”）。
+- 联网搜索默认开启（每个服务器每天最多 30 次，一次约 0.1–0.5 美分）。不想用的话，把 `config.toml` 里的 `web_search` 改成 `false`，或者执行 `/dsowner 设置 参数:联网搜索 值:关`。
+- 跨频道记忆默认关闭，需要时用 `/ds 记忆共享` 打开。
+- 旧的 `config.toml`、`.env` 和数据库可以直接沿用。
+
+**开发**
+
+- 测试从 225 个增加到 287 个；测试替身新增 `FakeSearcher`（假搜索）。
+
+### English
+
+**Added**
+
+- **Web search**: when called with a question that needs up-to-date information (news, prices, exchange rates, scores, weather…), it looks it up with DeepSeek's built-in search before answering. It doesn't search for small talk or common knowledge, or when chiming in on its own; at most 2 searches per round, and the cost counts toward the daily budget.
+- New owner settings: 联网搜索 (`web_search`) and 每日搜索上限 (`daily_search_limit`, 30 searches per server per day by default).
+- Optional `TAVILY_API_KEY`: if DeepSeek's built-in search doesn't work, it switches to Tavily automatically.
+- `python -m dsbot --test-search "query"`: runs one real search to check that web search works.
+- **Cross-channel memory**: new command `/ds 记忆共享` (memory sharing: on / off / inherit, with a scope of this channel, this category or the whole server), off by default. When it's on, what someone talked about with the bot in another channel within the last 6 hours comes along, and when called, it can look through the summary and recent messages of other channels that share their memory.
+- Privacy rules for cross-channel memory: sharing only happens between channels in the same server that have it turned on; a private channel only shares if sharing is turned on in that channel itself; areas where the bot isn't allowed to respond don't take part.
+- `/ds 状态` (status) shows memory sharing and today's search count.
+
+**Changed**
+
+- The prompt now states explicitly that chat history, files, search results and other channels' records are reference material, not instructions.
+- Links in its answers no longer unfurl into previews, so they don't flood the chat.
+
+**Upgrading**
+
+- No new dependencies this time, but the code changed, so Docker deployments need a rebuild: `docker compose up -d --build` (in Synology Container Manager: the project's Action → Build).
+- Web search is on by default (up to 30 searches per server per day, roughly 0.1–0.5 US cents each). To turn it off, set `web_search` to `false` in `config.toml`, or run `/dsowner 设置 参数:联网搜索 值:关`.
+- Cross-channel memory is off by default; turn it on with `/ds 记忆共享` when you want it.
+- Your existing `config.toml`, `.env` and database keep working.
+
+**Development**
+
+- Tests grew from 225 to 287; a new test double, `FakeSearcher`, fakes the web search.
+
 ## [1.2.0] - 2026-10-10
 
 > 1.1.0 没有单独发布，它的改动也包含在这个版本里。
@@ -101,5 +159,6 @@ First public release.
 - Sees uploaded images; managed with the `/ds` and `/dsowner` slash commands.
 - Docker Compose deployment and an offline self-check; 90 unit tests run automatically on GitHub Actions.
 
+[1.3.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.0.0...v1.2.0
 [1.0.0]: https://github.com/Longying-2403/Deepseek-X-Discord/releases/tag/v1.0.0

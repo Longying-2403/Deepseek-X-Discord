@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS usage (
     day TEXT NOT NULL,            -- 按 bot.timezone 的日期
     guild_id INTEGER NOT NULL,
     channel_id INTEGER NOT NULL,
-    kind TEXT NOT NULL,           -- mention / proactive / summary
+    kind TEXT NOT NULL,           -- mention / proactive / summary / search
     outcome TEXT NOT NULL,        -- reply / react / pass / error / summary
     hit INTEGER NOT NULL DEFAULT 0,
     miss INTEGER NOT NULL DEFAULT 0,
@@ -93,6 +93,8 @@ class Store:
             self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        # 上次运行到一半就停了（断电、强制关闭）的调用：不会再有结果了
+        self.db.execute("UPDATE usage SET outcome = 'error' WHERE outcome = 'pending'")
         self.db.commit()
         if self.path != ":memory:":
             self._make_private()
@@ -203,6 +205,15 @@ class Store:
         conv.summary = summary
         conv.turns = conv.turns[remove_count:]
 
+    def conversation_channels(self, guild_id: int) -> list[int]:
+        """这个服务器里有对话记录（或摘要）的频道。"""
+        rows = self.db.execute(
+            "SELECT channel_id FROM conversations c WHERE guild_id = ? AND (summary IS NOT NULL "
+            "OR EXISTS (SELECT 1 FROM turns t WHERE t.channel_id = c.channel_id)) ORDER BY channel_id",
+            (guild_id,),
+        ).fetchall()
+        return [r["channel_id"] for r in rows]
+
     def reset_conversation(self, channel_id: int) -> None:
         with self.db:
             self.db.execute("DELETE FROM turns WHERE channel_id = ?", (channel_id,))
@@ -235,9 +246,24 @@ class Store:
             )
         return int(cur.lastrowid)
 
+    def update_usage(
+        self, row_id: int, *, outcome: str, hit: int = 0, miss: int = 0, output: int = 0, cost: float = 0.0
+    ) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE usage SET outcome = ?, hit = ?, miss = ?, output = ?, cost = ? WHERE id = ?",
+                (outcome, hit, miss, output, cost, row_id),
+            )
+
     def set_outcome(self, row_id: int, outcome: str) -> None:
         with self.db:
             self.db.execute("UPDATE usage SET outcome = ? WHERE id = ?", (outcome, row_id))
+
+    def count_usage(self, day: str, *, guild_id: int, kind: str) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) AS n FROM usage WHERE day = ? AND guild_id = ? AND kind = ?", (day, guild_id, kind)
+        ).fetchone()
+        return int(row["n"])
 
     def spend_by_guild(self, day: str) -> dict[int, float]:
         rows = self.db.execute("SELECT guild_id, SUM(cost) AS c FROM usage WHERE day = ? GROUP BY guild_id", (day,))
@@ -253,8 +279,13 @@ class Store:
             args.append(channel_id)
         clause = " AND ".join(where)
         totals = self.db.execute(
-            f"SELECT COUNT(*) AS n, COALESCE(SUM(hit),0) AS hit, COALESCE(SUM(miss),0) AS miss, "
-            f"COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",
+            f"SELECT COUNT(*) AS n, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",
+            args,
+        ).fetchone()
+        # 缓存命中率只看聊天请求：搜索、压缩摘要是单独的请求，前缀本来就不一样
+        chat = self.db.execute(
+            f"SELECT COALESCE(SUM(hit),0) AS hit, COALESCE(SUM(miss),0) AS miss FROM usage "
+            f"WHERE {clause} AND kind IN ('mention', 'proactive')",
             args,
         ).fetchone()
         outcomes = {
@@ -263,7 +294,7 @@ class Store:
                 f"SELECT outcome, COUNT(*) AS n FROM usage WHERE {clause} GROUP BY outcome", args
             )
         }
-        hit, miss = totals["hit"], totals["miss"]
+        hit, miss = chat["hit"], chat["miss"]
         return {
             "calls": totals["n"],
             "hit": hit,

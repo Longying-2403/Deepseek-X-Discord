@@ -11,6 +11,7 @@ from .models import Action
 MAX_ACTIONS = 6
 MAX_MESSAGES_PER_REPLY = 3
 MAX_MESSAGE_CHARS = 1900
+MAX_QUERY_CHARS = 200
 
 _FENCED = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S | re.I)
 _OBJECT = re.compile(r"\{.*\}", re.S)
@@ -28,6 +29,18 @@ def _coerce_id(value: Any) -> int | None:
         digits = value.strip().lstrip("#")
         if _ASCII_DIGITS.fullmatch(digits):  # str.isdigit() 会放过 "①" "²" 之类，int() 却转不了
             return int(digits)
+    return None
+
+
+def _text_field(item: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, list):
+            value = " ".join(str(v) for v in value if isinstance(v, (str, int, float)))
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            text = " ".join(str(value).split())[:MAX_QUERY_CHARS]
+            if text:
+                return text
     return None
 
 
@@ -102,6 +115,17 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
         elif kind in ("read", "read_file", "open", "look"):
             if to is not None and not any(a.kind == "read" and a.to == to for a in actions):
                 actions.append(Action("read", to))
+        elif kind in ("search", "web_search", "websearch", "google", "lookup"):
+            query = _text_field(item, "query", "q", "keywords", "text")
+            if query and not any(a.kind == "search" and a.query == query for a in actions):
+                actions.append(Action("search", query=query))
+        elif kind in ("recall", "remember", "history", "look_back"):
+            channel = _text_field(item, "channel", "from", "where")
+            if channel:
+                channel = channel.lstrip("#＃ ").strip()
+            about = _text_field(item, "about", "query", "keywords")
+            if channel and not any(a.kind == "recall" and a.channel == channel and a.query == about for a in actions):
+                actions.append(Action("recall", channel=channel, query=about))
         elif kind in ("pass", "none", "silence"):
             continue
     return actions, True

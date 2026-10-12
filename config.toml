@@ -7,6 +7,10 @@ base_url = "https://api.deepseek.com"
 model = "deepseek-flash"          # V4.1 Flash
 timeout_seconds = 90
 max_retries = 2                   # 429 / 5xx 时自动重试几次
+# 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search），留空 = base_url 后面加 /anthropic
+search_base_url = ""
+search_timeout_seconds = 60
+search_max_uses = 3               # 一次搜索里最多让它搜几轮
 
 [bot]
 timezone = "Asia/Taipei"          # 每日预算按这个时区的自然日算；聊天记录里的时间也用它
@@ -36,6 +40,7 @@ max_wait_seconds = 180            # 一直没冷场的话，最多等 180 秒也
 mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
 aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
 persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
+share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
 
 # —— 只有你能改的（这里，或私人服务器里的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
@@ -46,6 +51,8 @@ global_daily_budget_usd = 3.0     # 所有服务器加起来的上限
 context_budget_tokens = 30000     # 上下文超过这么多 token，就把最早的一半压成摘要（最大 200000）
 vision = true                     # 是否把群里的图片发给模型
 files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
+web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 自带的搜索）
+daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
 
 [engine]
 # 一般不用动
@@ -70,3 +77,8 @@ max_output_tokens = 2000
 max_thinking_tokens = 6000
 hard_stop_multiplier = 2.0
 summary_max_chars = 600
+max_searches_per_round = 2        # 被叫到的一轮里最多搜几次
+search_max_chars = 2000           # 一次搜索的结果最多多少字
+share_recent_hours = 6            # 同一个人这么久之内在别的频道跟它聊过，就把那几句带过来
+recall_max_chars = 3000           # 翻别的频道的记录，一次最多多少字
+share_list_limit = 30             # 告诉它可以翻哪些频道，最多列多少个
