@@ -2,6 +2,54 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [1.3.1] - 2026-10-12
+
+### 中文
+
+**新增**
+
+- **英文版**：功能和中文版相同，命令、选项、回复、提示词和文档都是英文（比如 `/ds area`、`/ds share-memory`），放在仓库的 `english` 分支，发布时提供 `-en.zip`。和中文版有几处有意的不同：摘要长度上限从 600 调到 1500 字符（英文表达同样的内容需要更多字符）；开关和重置的值只认英文（on / off / default）。
+
+**改进**
+
+- `/dsowner` 改成和 `/ds` 一样，有“管理服务器”权限的人就看得到（之前要“管理员”权限）；能用的仍然只有 `OWNER_ID` 本人。这样 bot 放在朋友的服务器、你在那里是管理但不是管理员时，也能用 `/dsowner`。
+- 文档写清楚了 `CONTROL_GUILD_ID` 怎么填：平时聊天的服务器就行，朋友的也可以；不填就没有 `/dsowner`。
+- 文档补充：改了 `.env` 要用 `docker compose up -d --force-recreate`，`restart` 不会重新读 `.env`；群晖 Container Manager 里要先“停止”再“构建”。
+
+**升级须知**
+
+- 代码有小改动，Docker 部署照常重新构建：`docker compose up -d --build`。
+- 中文版和英文版记录聊天历史的格式不同。同一个部署要换版本时，建议换一个新的 `data` 文件夹，或者先在各频道清空记忆（中文版 `/ds 清空记忆`，英文版 `/ds clear-memory`）。
+
+**开发**
+
+- GitHub Actions 也会测试 `english` 分支。
+- 移除 `README.en.md`（中文版说明的英文翻译），英文文档改由英文版提供；中文 README 顶部的“English”链接改为指向 `english` 分支。
+- CONTRIBUTING.md 新增“中文版和英文版”一节，说明两个分支怎么同步。
+
+### English
+
+**Added**
+
+- **English edition**: the same features as the Chinese edition, with English commands, options, replies, prompts and docs (for example `/ds area` and `/ds share-memory`). It lives on the `english` branch, and releases include an `-en.zip`. A few differences are deliberate: the summary length limit goes from 600 to 1,500 characters (English needs more characters to say the same thing), and on/off and reset values are accepted in English only (on / off / default).
+
+**Changed**
+
+- `/dsowner` is now visible to anyone with the Manage Server permission, like `/ds` (it used to require Administrator); only `OWNER_ID` can actually use it. This means you can use `/dsowner` when the bot lives in a friend's server where you're a manager but not an admin.
+- The docs now explain how to fill in `CONTROL_GUILD_ID`: any server you chat in works, even a friend's; without it there's no `/dsowner`.
+- The docs now explain that after editing `.env` you need `docker compose up -d --force-recreate`, because `restart` doesn't re-read `.env`; in Synology Container Manager, Stop the project and then Build it.
+
+**Upgrading**
+
+- Small code changes, so rebuild as usual for Docker: `docker compose up -d --build`.
+- The Chinese and English editions store chat history in different formats. If you switch an existing deployment from one edition to the other, use a fresh `data` folder, or clear the memory in each channel first (`/ds 清空记忆` in the Chinese edition, `/ds clear-memory` in the English one).
+
+**Development**
+
+- GitHub Actions now tests the `english` branch too.
+- Removed `README.en.md` (an English translation of the Chinese edition's docs); English docs now come with the English edition, and the "English" link at the top of the Chinese README points to the `english` branch.
+- Added a "Chinese and English editions" section to CONTRIBUTING.md on keeping the two branches in sync.
+
 ## [1.3.0] - 2026-10-12
 
 ### 中文
@@ -159,6 +207,7 @@ First public release.
 - Sees uploaded images; managed with the `/ds` and `/dsowner` slash commands.
 - Docker Compose deployment and an offline self-check; 90 unit tests run automatically on GitHub Actions.
 
+[1.3.1]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.0.0...v1.2.0
 [1.0.0]: https://github.com/Longying-2403/Deepseek-X-Discord/releases/tag/v1.0.0

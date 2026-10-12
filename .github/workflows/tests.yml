@@ -3,7 +3,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, english] # 中文版和英文版两个分支
   pull_request:
   workflow_dispatch: # 也可以在 Actions 页面手动运行
 
