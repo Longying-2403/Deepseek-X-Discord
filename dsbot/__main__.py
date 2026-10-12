@@ -72,6 +72,9 @@ def check(config_path: str) -> int:
         print(f"✗ {exc}")
         secrets = Secrets("x", "x", 0, control_guild_id=1)
     check_files()
+    print(f"✓ 联网搜索：DeepSeek 自带的搜索（{cfg.deepseek.anthropic_url}）"
+          + ("，失败时改用 Tavily" if secrets.tavily_api_key else "")
+          + "。想实际搜一次试试：python -m dsbot --test-search 关键词")
 
     store = Store(":memory:")
     bot = DSBot(
@@ -98,15 +101,58 @@ def check(config_path: str) -> int:
     return 0
 
 
+def test_search(config_path: str, query: str) -> int:
+    """用 .env 里的 key 真的搜一次（花一点点钱），确认联网搜索能用。"""
+    import asyncio
+    import time
+
+    from .search import SearchError, WebSearch, today_text
+
+    cfg = load_config(config_path)
+    secrets = load_secrets()
+    searcher = WebSearch(
+        api_key=secrets.deepseek_api_key,
+        url=cfg.deepseek.anthropic_url,
+        model=cfg.deepseek.model,
+        timeout=cfg.deepseek.search_timeout_seconds,
+        max_uses=cfg.deepseek.search_max_uses,
+        tavily_key=secrets.tavily_api_key,
+    )
+
+    async def run():  # type: ignore[no-untyped-def]
+        try:
+            return await searcher.search(
+                query, today=today_text(time.time(), cfg.bot.timezone), max_chars=cfg.engine.search_max_chars
+            )
+        finally:
+            await searcher.close()
+
+    print(f"搜索「{query}」……")
+    try:
+        result = asyncio.run(run())
+    except SearchError as exc:
+        print(f"✗ 搜索失败：{exc}")
+        return 1
+    u = result.usage
+    print(f"✓ 用 {result.provider} 搜到了：\n{result.summary}")
+    for title, url in result.sources:
+        print(f"  - {title} {url}")
+    print(f"用量：输入 {u.prompt_tokens} token（命中 {u.hit}），输出 {u.output} token，约 ${cfg.pricing.cost(u, time.time()):.5f}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek 群友 Discord bot")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="只做离线自检，不启动")
+    parser.add_argument("--test-search", metavar="关键词", help="真的搜一次，确认联网搜索能用（花一点点钱）")
     args = parser.parse_args()
     _load_dotenv()
 
     if args.check:
         return check(args.config)
+    if args.test_search:
+        return test_search(args.config, args.test_search)
 
     cfg = load_config(args.config)
     logging.basicConfig(

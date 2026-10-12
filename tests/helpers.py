@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dsbot.config import AppConfig  # noqa: E402
 from dsbot.engine import Engine  # noqa: E402
 from dsbot.ledger import Ledger  # noqa: E402
-from dsbot.models import ChannelInfo, Completion, IncomingMessage, Usage  # noqa: E402
+from dsbot.models import ChannelInfo, ChannelPlace, Completion, IncomingMessage, SearchResult, Usage  # noqa: E402
 from dsbot.settings import Settings  # noqa: E402
 from dsbot.store import Store  # noqa: E402
 
@@ -80,9 +80,17 @@ class FakeTransport:
         self.typing_calls = 0
         self.can_send = True
         self._next_id = 90_000
+        # 频道 id -> 位置；没登记的频道当成 GUILD 里的公开频道
+        self.places: dict[int, ChannelPlace] = {}
+        self.names = {CHANNEL: "闲聊"}
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
-        return ChannelInfo(guild_name="测试服", channel_name="闲聊", bot_name="小D")
+        return ChannelInfo(guild_name="测试服", channel_name=self.names.get(channel_id, f"频道{channel_id}"), bot_name="小D")
+
+    def locate(self, channel_id: int) -> ChannelPlace | None:
+        if channel_id in self.places:
+            return self.places[channel_id]
+        return ChannelPlace(guild_id=GUILD, name=self.names.get(channel_id, f"频道{channel_id}"), public=True)
 
     async def send(self, channel_id, text, *, reply_to, ping):
         if not self.can_send:
@@ -100,7 +108,29 @@ class FakeTransport:
         return _NullTyping()
 
 
-def make_engine(responder=None, *, image_loader=None, defaults: dict[str, Any] | None = None):
+class FakeSearcher:
+    """假的联网搜索：记录调用，按关键词返回结果；结果是 Exception 时抛出。"""
+
+    def __init__(self, results: dict[str, Any] | None = None):
+        self.calls: list[tuple[str, str]] = []
+        self.results = results or {}
+
+    async def search(self, query: str, *, today: str, max_chars: int, user_id: str | None = None) -> SearchResult:
+        self.calls.append((query, today))
+        out = self.results.get(query)
+        if isinstance(out, Exception):
+            raise out
+        if out is None:
+            out = SearchResult(
+                summary=f"关于「{query}」搜到的内容",
+                sources=[("示例网站", "https://example.com/a")],
+                usage=Usage(prompt_tokens=3000, hit=0, miss=3000, output=200),
+                provider="DeepSeek",
+            )
+        return out
+
+
+def make_engine(responder=None, *, image_loader=None, defaults: dict[str, Any] | None = None, searcher=None):
     cfg = AppConfig()
     if defaults:
         cfg.defaults.update(defaults)
@@ -129,6 +159,7 @@ def make_engine(responder=None, *, image_loader=None, defaults: dict[str, Any] |
         sleep=fake_sleep,
         rng=random.Random(0),
         image_loader=image_loader or no_images,
+        searcher=searcher,
     )
     engine.test_sleeps = sleeps  # type: ignore[attr-defined]
     return engine, llm, transport, clock

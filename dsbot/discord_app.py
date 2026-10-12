@@ -16,7 +16,8 @@ from .convert import convert_message, parse_aliases, safe_category_id
 from .engine import Engine
 from .ledger import Ledger
 from .llm import DeepSeekClient
-from .models import ChannelInfo, IncomingMessage
+from .models import ChannelInfo, ChannelPlace, IncomingMessage
+from .search import WebSearch
 from .settings import Settings
 from .store import Store
 
@@ -93,6 +94,29 @@ class DiscordTransport:
             bot_name=bot_name,
         )
 
+    def locate(self, channel_id: int) -> ChannelPlace | None:
+        """频道在哪个服务器、哪个类别，以及是不是所有人都看得到（跨频道记忆用）。不在缓存里就返回 None。"""
+        channel = self.client.get_channel(channel_id)
+        guild = getattr(channel, "guild", None)
+        if channel is None or guild is None:
+            return None
+        is_thread = isinstance(channel, discord.Thread)
+        private_thread = is_thread and channel.is_private()
+        try:
+            # 成人内容（NSFW）频道也当私密：内容不该流到普通频道
+            nsfw = bool(channel.is_nsfw()) if hasattr(channel, "is_nsfw") else False
+            public = not private_thread and not nsfw and bool(channel.permissions_for(guild.default_role).view_channel)
+        except Exception:  # 帖子所在的频道没缓存之类：拿不准就当私密
+            public = False
+        return ChannelPlace(
+            guild_id=guild.id,
+            name=getattr(channel, "name", None) or str(channel_id),
+            parent_id=channel.parent_id if is_thread else None,
+            category_id=safe_category_id(channel),
+            public=public,
+            private_thread=private_thread,
+        )
+
     async def _resolve(self, channel_id: int) -> Any:
         channel = self.client.get_channel(channel_id)
         if channel is None:
@@ -110,6 +134,7 @@ class DiscordTransport:
         kwargs: dict[str, Any] = {
             # 只允许“提醒被回复的人”，模型输出里的 @everyone / @某人 / @身份组 都不会真的 ping
             "allowed_mentions": discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=ping),
+            "suppress_embeds": True,  # 回答里带的来源链接不展开预览，免得刷屏
         }
         if reply_to is not None:
             kwargs["reference"] = discord.MessageReference(
@@ -163,7 +188,15 @@ class DSBot(discord.Client):
         self.llm = llm
         self.tree = app_commands.CommandTree(self)
         self.transport = DiscordTransport(self)
-        self.engine = Engine(cfg, settings, store, llm, ledger, self.transport)
+        self.searcher = WebSearch(
+            api_key=secrets.deepseek_api_key,
+            url=cfg.deepseek.anthropic_url,
+            model=cfg.deepseek.model,
+            timeout=cfg.deepseek.search_timeout_seconds,
+            max_uses=cfg.deepseek.search_max_uses,
+            tavily_key=secrets.tavily_api_key,
+        )
+        self.engine = Engine(cfg, settings, store, llm, ledger, self.transport, searcher=self.searcher)
         self._ticker: asyncio.Task[None] | None = None
 
         from .commands import register_commands
@@ -215,6 +248,7 @@ class DSBot(discord.Client):
         except asyncio.TimeoutError:
             log.warning("关闭时还有没跑完的轮次，直接退出")
         await self.llm.close()
+        await self.searcher.close()
         await super().close()
 
     # ---------------------------------------------------------------- 事件
