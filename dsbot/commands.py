@@ -1,7 +1,8 @@
 """斜杠命令。
 
 /ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、状态。
-/dsowner …  只注册在 CONTROL_GUILD_ID 那个私人服务器里，并且只认 OWNER_ID：预算、思考强度等。
+/dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索等。
+            和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
 """
 
 from __future__ import annotations
@@ -408,11 +409,13 @@ def register_commands(bot: "DSBot") -> None:
         log.info("没有设置 CONTROL_GUILD_ID，不注册主人命令；预算等参数请改 config.toml")
         return
 
+    # 能不能用由 is_owner 决定；default_permissions 只是让普通成员看不到。用“管理服务器”而不是“管理员”：
+    # bot 放在朋友的服务器时，你在那里多半只是管理（能用 /ds），不一定有“管理员”权限
     owner = app_commands.Group(
         name="dsowner",
         description="DeepSeek 群友：主人专用",
         guild_only=True,
-        default_permissions=discord.Permissions(administrator=True),
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     async def is_owner(interaction: discord.Interaction) -> bool:

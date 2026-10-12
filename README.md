@@ -1,8 +1,8 @@
 # DeepSeek 群友（Discord Bot）
 
-**中文** | [English](README.en.md)
+**中文** | [English](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)
 
-[![tests](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml/badge.svg)](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml)
+[![tests](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Longying-2403/Deepseek-X-Discord/actions/workflows/tests.yml)
 
 一个用 DeepSeek V4.1 Flash（`deepseek-flash`）驱动、像普通群友一样待在 Discord 服务器里的 bot：
 
@@ -17,6 +17,8 @@
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
+> 这是中文版（命令、回复和文档都是中文）。英文版功能相同、全部是英文，在 [`english` 分支](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)，也可以在 [Releases](https://github.com/Longying-2403/Deepseek-X-Discord/releases) 下载 `-en.zip`。
+
 A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like a regular member:
 
 - **Answers when called**: replies right away when someone @mentions it, replies to one of its messages, or uses one of its aliases.
@@ -30,7 +32,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share their memory. Private channels don't share by default.
 - **Stays where you want it**: you can limit where it responds by channel, category or the whole server.
 
-Setup, commands and settings in English: [README.en.md](README.en.md)
+> **English edition:** this page describes the Chinese edition, whose commands and replies are in Chinese. The English edition has the same features with English commands, replies and docs. It lives on the [`english` branch](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english), or download the `-en.zip` from [Releases](https://github.com/Longying-2403/Deepseek-X-Discord/releases).
 
 ---
 
@@ -61,7 +63,7 @@ cp .env.example .env
 | `DISCORD_TOKEN` | 上面复制的 bot token |
 | `DEEPSEEK_API_KEY` | DeepSeek 的 key |
 | `OWNER_ID` | 你自己的 Discord 用户 ID（开发者模式下右键头像 → 复制用户 ID） |
-| `CONTROL_GUILD_ID` | 可选。你的私人服务器 ID，主人命令 `/dsowner` 只注册在这里 |
+| `CONTROL_GUILD_ID` | 想在 Discord 里改主人参数（预算、联网搜索等）就要填：放 `/dsowner` 的服务器 ID（右键服务器图标 → 复制服务器 ID）。平时聊天的服务器就行（朋友的也可以），命令和 `/ds` 一样只有有“管理服务器”权限的人看得到，也只有 `OWNER_ID` 本人能用。只填 `OWNER_ID` 不会有 `/dsowner` |
 | `DISCORD_PROXY` | 可选。连 Discord 需要代理时填，如 `http://127.0.0.1:7890` |
 | `TAVILY_API_KEY` | 可选。DeepSeek 自带的搜索用不了时，改用 [Tavily](https://tavily.com)（每月免费 1000 次） |
 
@@ -76,7 +78,9 @@ docker compose up -d --build
 docker compose logs -f          # 看日志，确认“已登录”
 ```
 
-数据库在 `./data/`，改了 `config.toml` 之后 `docker compose restart` 就行。
+数据库在 `./data/`。改了 `config.toml` 之后 `docker compose restart` 就行；改了 `.env` 要用 `docker compose up -d --force-recreate`（restart 不会重新读 `.env`）。
+
+用群晖 Container Manager 的话：改了 `.env` 或换了代码文件，到“项目”里选中它 → 操作 → 停止，再 操作 → 构建（会删掉旧容器、用新的代码和 `.env` 重建；数据在 `./data/` 里不受影响）。只在“容器”页面点重新启动不会读新的 `.env`。
 
 ### 方式 B：直接用 Python（3.11 及以上）
 
@@ -129,14 +133,14 @@ python -m dsbot
 
 > 想彻底隔开某些频道，也可以直接在 Discord 的频道权限里去掉 bot 的“查看频道”，那样消息根本不会传给 bot。
 
-### `/dsowner`（只有你；只注册在 `CONTROL_GUILD_ID` 那个服务器）
+### `/dsowner`（只有你能用；只出现在 `CONTROL_GUILD_ID` 那个服务器，有“管理服务器”权限的人看得到）
 
 | 命令 | 作用 |
 |---|---|
 | `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索开关和每日搜索上限），可以指定某个服务器 ID，不填就是全局 |
 | `/dsowner 总览` | 今天每个服务器花了多少、调用多少次、缓存命中率 |
 
-没设置 `CONTROL_GUILD_ID` 时不注册主人命令，直接改 `config.toml` 即可。
+没设置 `CONTROL_GUILD_ID` 时没有 `/dsowner`（只填 `OWNER_ID` 不够），主人参数只能改 `config.toml` 里的 `[defaults]`。
 
 ---
 
@@ -229,7 +233,7 @@ python -m dsbot
 - 每个服务器每天最多搜 30 次，用 `/dsowner 设置 参数:每日搜索上限` 改（可以指定服务器）；`/dsowner 设置 参数:联网搜索 值:关` 关掉。超了预算也不搜。
 - 回答里带的链接不会展开预览，免得刷屏。
 - 搜到的网页内容和文件一样当成资料处理，里面写的“忽略之前的设定”之类不会照做。
-- 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。如果 DeepSeek 自带的搜索用不了（比如接口改了），在 `.env` 里填 `TAVILY_API_KEY`，会自动改用 Tavily。
+- 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。如果 DeepSeek 自带的搜索用不了（比如接口改了），在 `.env` 里填 `TAVILY_API_KEY`（填完 `docker compose up -d --force-recreate`），会自动改用 Tavily。
 
 ## 九、它是怎么工作的
 
@@ -285,7 +289,7 @@ python -m dsbot
 
 ## 十一、开发
 
-欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤和几条设计约束。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
+欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤、几条设计约束，以及中英两个版本怎么同步。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ```bash
 python -m unittest discover -s tests      # 核心逻辑测试，不需要装 discord.py

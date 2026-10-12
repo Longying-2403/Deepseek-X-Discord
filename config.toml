@@ -42,7 +42,7 @@ aliases = ""                      # 别名，逗号分隔；消息里出现也�
 persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
 share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
 
-# —— 只有你能改的（这里，或私人服务器里的 /dsowner）——
+# —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
 proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
 mention_thinking = "off"          # 被叫到时思考强度：off 最快
