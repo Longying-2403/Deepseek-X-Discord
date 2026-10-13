@@ -2,6 +2,95 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [1.4.0] - 2026-10-13
+
+> 1.3.2 没有单独发布，它的改动也包含在这个版本里。
+> 1.3.2 was never released on its own; its changes are included here.
+
+### 中文
+
+**新增**
+
+- **读链接**：平时只看 Discord 生成的链接预览（标题、描述、预览图），不额外花钱；被叫到时会真的打开链接再回答。X（推特）的推文走 FxTwitter（不用账号、不用 key），能拿到全文、引用的推文、投票、社区笔记和图片；别的网页交给 Tavily（要填 `TAVILY_API_KEY`）。要登录才能看的网站只看预览。每个链接最多读 4000 字，一轮最多打开 3 个，每个服务器每天最多 100 个。
+- **表情包库**：通用库放在 `data/表情包`，文件名就是表情包的名字，所有服务器都能用，放进去就生效；各服务器用新命令 `/ds 表情包` 上传、删除、列出自己的。支持 PNG、JPG、GIF、WebP，每张 8 MB 以内。
+- **上网找图**（要 `TAVILY_API_KEY`）：库里没有合适的图时会上网找，候选图先让模型看一遍，合适才发；网上的动图不发。每个服务器每天最多找 10 次，同一个频道 10 分钟最多找一次。
+- **服务器表情和贴图**：知道这个服务器有哪些自定义表情和贴图，可以写在回复里、用来加反应，也能单独发一张贴图。
+- **角色扮演**：被群友拉去演戏时，照设定演、跟着剧情走，动作写在斜体括号里；戏散了会自动回到平时的样子。
+- **在聊天里改人设**：`OWNER_ID` 本人叫它说“以后说话毒舌一点”之类，它会改好人设并保存，在那条消息上加 📝 表示改好了；说“改回去”可以一步步撤销，修改记录存在数据库里。别人提这类要求时，它会让对方找 dsowner。
+- 新参数：`发图`（`images`，管理员可调），`读链接`（`links`）和 `每日找图上限`（`daily_image_limit`，主人可调）；`config.toml` 新增表情包文件夹，以及读链接、找图的各项上限。
+- 新的测试命令：`python -m dsbot --test-link 网址`、`python -m dsbot --test-image 关键词`。
+- `/ds 状态` 会显示今天读链接和找图的次数。
+
+**改进**
+
+- 说话长短看场合：随口接话一两句，接剧情时多写几句。别人聊得正起劲时会委婉地插一句，被拒绝就道个歉，这个话题里不再插话。
+- 链接预览里的图也会一起看。
+- 单条消息进上下文前的长度上限从 1200 字调到 1800 字，方便贴角色卡这类长设定；更长的可以做成 .txt 发出来。
+- 邀请链接的权限多了“附加文件”，发表情包和图要用。
+
+**安全**
+
+- bot 不直接打开群友发的网页：推文由 FxTwitter 读，网页由 Tavily 读，链接碰不到家里的内网，对方网站也看不到你的 IP。
+- 下载网上的图时只连公网地址，每次跳转都重新检查，不走代理。
+- 改人设只认 dsowner 本人这一轮的消息（按用户 ID 判断）；别人转述、文件里写的、转发的消息都不算。人设内容不能取自网上搜到的东西或别的频道的记录。
+- 网页内容和文件一样只当资料，里面写的指令不会照做。
+
+**升级须知**
+
+- 代码有更新，Docker 部署要重新构建：`docker compose up -d --build`（群晖 Container Manager 里是项目的“操作 → 停止”，再“操作 → 构建”）。依赖没有变化。
+- **推荐填上 `TAVILY_API_KEY`**：打开网页和上网找图都要用它（[tavily.com](https://tavily.com)，每月免费 1000 次；打开 5 个网页算 1 次，找一次图算 1 次）。填完运行 `docker compose up -d --force-recreate`。不填也能读推文，表情包库也照常能用。
+- 发图和读链接默认开启。不想要的话：`/ds 设置 参数:发图 值:关`、`/dsowner 设置 参数:读链接 值:关`。
+- 发表情包和图需要“附加文件”权限。1.4.0 之前邀请的 bot 一般也有（@everyone 默认就有这个权限）；发不出去时检查一下频道权限。
+- 旧的 `config.toml`、`.env` 和数据库可以直接沿用，数据库会自动加上人设修改记录。注意：旧 `config.toml` 里写着 `max_chars_per_message = 1200`，会盖过新的默认值 1800，想用新值就改一下。
+- 要用通用表情包库，就在项目的 `data` 文件夹里新建 `表情包` 文件夹，把图放进去。英文版的文件夹叫 `memes`、`server-memes`，换版本时注意改名。
+
+**开发**
+
+- 测试从 287 个增加到 428 个。
+- CONTRIBUTING.md 新增两条设计约束：只从公网下载、网页交给外部服务去读；改人设只认 dsowner 本人这一轮的消息。
+
+### English
+
+**Added**
+
+- **Reading links**: normally it only looks at the link previews Discord generates (title, description, preview image), at no extra cost; when it's called, it actually opens the link before answering. Posts on X (Twitter) go through FxTwitter (no account or key needed), which provides the full text, quoted posts, polls, community notes and images; other web pages go through Tavily (requires `TAVILY_API_KEY`). Sites that require logging in only get the preview. Up to 4,000 characters per link, 3 links per round, and 100 links per server per day.
+- **Meme library**: a shared library lives in `data/表情包` (`data/memes` in the English edition); the file name is the meme's name, every server can use it, and new files take effect right away. Each server can upload, delete and list its own with the new `/ds 表情包` command (`/ds meme` in the English edition). PNG, JPG, GIF and WebP up to 8 MB each.
+- **Finding pictures online** (requires `TAVILY_API_KEY`): when the library has nothing suitable, it searches the web; the model looks at the candidates first and only sends one if it fits. Animated images from the web are never sent. Up to 10 searches per server per day, and at most one every 10 minutes per channel.
+- **Server emoji and stickers**: it knows the server's custom emoji and stickers and can use them in replies, as reactions, or send a sticker on its own.
+- **Roleplay**: when people pull it into a scene, it plays the part they set up and follows the story, with actions in italic parentheses; once the scene is over, it goes back to its usual self.
+- **Changing the persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites and saves its persona and reacts with 📝 to confirm; "change it back" undoes changes one step at a time, with the history kept in the database. If anyone else asks, it tells them to ask dsowner.
+- New settings: 发图 (`images`, adjustable by admins), 读链接 (`links`) and 每日找图上限 (`daily_image_limit`, owner only); `config.toml` gains the meme folders and limits for reading links and finding pictures.
+- New test commands: `python -m dsbot --test-link URL` and `python -m dsbot --test-image "query"`.
+- `/ds 状态` (status) shows today's link and picture-search counts.
+
+**Changed**
+
+- Reply length fits the moment: a sentence or two for a quick comeback, a few more when playing along with a story. When people are deep in a conversation it may tactfully chime in; if it's told to stay out, it apologizes and keeps out of that topic.
+- Images in link previews are looked at too.
+- The per-message length limit before a message enters the context goes from 1,200 to 1,800 characters, which helps with long setups like character cards; longer ones can be sent as a .txt file.
+- The invite link now includes the Attach Files permission, which sending memes and pictures needs.
+
+**Security**
+
+- The bot never opens the web pages people post itself: posts on X are read by FxTwitter and web pages by Tavily, so links can't reach your home network and the sites never see your IP.
+- When downloading pictures from the web, it only connects to public addresses, re-checks every redirect, and doesn't use a proxy.
+- Persona changes are accepted only from dsowner's own message in the current round (checked by user ID); relayed requests, text in files and forwarded messages don't count. The new persona can't be taken from web results or other channels' history.
+- Web content, like files, is treated as reference material; instructions in it aren't followed.
+
+**Upgrading**
+
+- The code changed, so Docker deployments need a rebuild: `docker compose up -d --build` (in Synology Container Manager: the project's Action → Stop, then Action → Build). Dependencies are unchanged.
+- **Setting `TAVILY_API_KEY` is recommended**: opening web pages and finding pictures online both need it ([tavily.com](https://tavily.com), 1,000 free credits a month; 5 opened pages or 1 picture search costs 1 credit). After adding it, run `docker compose up -d --force-recreate`. Without it, the bot can still read posts on X, and the meme library still works.
+- Sending pictures and reading links are on by default. To turn them off: `/ds 设置 参数:发图 值:关` and `/dsowner 设置 参数:读链接 值:关`.
+- Sending memes and pictures needs the Attach Files permission. Bots invited before 1.4.0 usually have it already (@everyone has it by default); if pictures don't go through, check the channel permissions.
+- Your existing `config.toml`, `.env` and database keep working, and the database gets the persona history table automatically. Note: an old `config.toml` sets `max_chars_per_message = 1200`, which overrides the new default of 1800; change it if you want the new value.
+- To use the shared meme library, create a `表情包` folder inside the project's `data` folder and put pictures in it. The English edition uses `memes` and `server-memes` instead, so rename the folders if you switch editions.
+
+**Development**
+
+- Tests grew from 287 to 428.
+- CONTRIBUTING.md adds two design rules: download only from public addresses and let outside services read web pages; accept persona changes only from dsowner's own message in the current round.
+
 ## [1.3.1] - 2026-10-12
 
 ### 中文
@@ -207,6 +296,7 @@ First public release.
 - Sees uploaded images; managed with the `/ds` and `/dsowner` slash commands.
 - Docker Compose deployment and an offline self-check; 90 unit tests run automatically on GitHub Actions.
 
+[1.4.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.0.0...v1.2.0
