@@ -44,6 +44,7 @@ _SPEC_LIST = [
     Spec("aliases", "别名", str, "admin", "消息里出现这些名字也算叫它，用逗号分隔，例如：DS,小D"),
     Spec("persona", "人设", str, "admin", "人设描述，留空用默认人设"),
     Spec("share_memory", "记忆共享", bool, "admin", "和别的也开了共享的频道互通记忆（私密频道要单独开才会分享出去）"),
+    Spec("images", "发图", bool, "admin", "让它自己发表情包库里的图，或者上网找图（找到的图它会先看一遍再决定发不发）"),
     # —— 主人 ——
     Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
@@ -55,6 +56,8 @@ _SPEC_LIST = [
     Spec("files", "读文件", bool, "owner", "是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）"),
     Spec("web_search", "联网搜索", bool, "owner", "被叫到时，需要最新信息就上网搜（用 DeepSeek 自带的搜索）"),
     Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
+    Spec("links", "读链接", bool, "owner", "被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily）"),
+    Spec("daily_image_limit", "每日找图上限", int, "owner", "每个服务器每天最多上网找几次图（0 = 不找，表情包库照常能用）", 0, 1000),
 ]
 
 SPECS: dict[str, Spec] = {s.key: s for s in _SPEC_LIST}
@@ -73,6 +76,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "aliases": "",
     "persona": "",
     "share_memory": False,
+    "images": True,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -83,6 +87,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "files": True,
     "web_search": True,
     "daily_search_limit": 30,
+    "links": True,
+    "daily_image_limit": 10,
 }
 
 # 一键档位：只动“话量”相关的三个参数
@@ -178,6 +184,8 @@ class BotConfig:
     sync_commands_on_start: bool = True
     log_level: str = "INFO"
     tick_seconds: float = 5.0
+    meme_dir: str = "data/表情包"  # 通用表情包库：自己在 NAS 上建这个文件夹放图
+    server_meme_dir: str = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的
 
 
 @dataclass
@@ -185,7 +193,7 @@ class EngineConfig:
     max_batch_messages: int = 40  # 一轮最多带多少条新消息（更早的只记数量）
     max_pending_messages: int = 120  # 缓冲区上限，防止长期没人叫它时无限增长
     pending_max_age_seconds: float = 21600  # 缓冲区里超过 6 小时的旧消息直接丢掉
-    max_chars_per_message: int = 1200  # 单条消息进上下文前截断到多少字
+    max_chars_per_message: int = 1800  # 单条消息进上下文前截断到多少字（角色卡之类更长的，发 .txt 再叫它）
     max_images_per_round: int = 4
     image_max_side: int = 1024  # 叫到它的那条消息里的图片：缩到最长边多少像素
     low_detail_max_side: int = 512  # 其他图片（detail=low，模型那边也只看 512×512）
@@ -208,6 +216,15 @@ class EngineConfig:
     share_recent_hours: float = 6.0  # 同一个人这么久之内在别的频道跟它聊过，就把那几句带过来
     recall_max_chars: int = 3000  # 翻别的频道的记录，一次最多多少字
     share_list_limit: int = 30  # 告诉它可以翻哪些频道，最多列多少个
+    emoji_list_limit: int = 100  # 告诉它服务器里有哪些表情，最多列多少个
+    sticker_list_limit: int = 30  # 告诉它服务器里有哪些贴图，最多列多少个
+    link_max_chars: int = 4000  # 打开一个链接，最多读多少字
+    max_links_per_round: int = 3  # 一轮最多打开几个链接
+    daily_link_limit: int = 100  # 每个服务器每天最多打开多少个链接（Tavily 每打开 5 个网页算 1 次额度）
+    image_cooldown_seconds: float = 600  # 同一个频道两次上网找图至少隔多久
+    image_candidates: int = 4  # 上网找图时给它看几张候选
+    image_max_bytes: int = 8_000_000  # 发出去的图最大多少（Discord 默认上传上限 10 MB）
+    meme_list_limit: int = 80  # 告诉它表情包库里有哪些图，最多列多少个
 
 
 @dataclass
@@ -269,7 +286,7 @@ class Secrets:
     owner_id: int
     control_guild_id: int | None = None
     discord_proxy: str | None = None
-    tavily_api_key: str | None = None  # 可选：DeepSeek 自带搜索用不了时改用 Tavily
+    tavily_api_key: str | None = None  # 可选：打开网页、上网找图都靠它；DeepSeek 自带搜索用不了时也改用它
 
 
 def load_secrets(env: dict[str, str] | None = None) -> Secrets:

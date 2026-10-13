@@ -8,29 +8,41 @@
 
 - **被叫到就回**：有人 @ 它、回复它的消息、或叫它的别名，立刻回应。
 - **主动接话**（按频道开启）：等群里冷场一小会儿（或等太久），再让模型判断要不要说话；默认倾向沉默。
-- **像真人**：回复短、口语化；先显示“正在输入”，按字数等几秒再发；可以把一段话拆成两三条，或只加个表情。
+- **像真人**：口语化，长短看场合（随口接话一两句，接剧情时多写几句）；先显示“正在输入”，按字数等几秒再发；可以把一段话拆成两三条，或只加个表情。别人聊得正起劲时也会委婉地插一句，被拒绝就道个歉，这个话题里不再插话。
+- **会用服务器的表情和贴图**：知道这个服务器有哪些自定义表情和贴图，回复里、加表情反应、单独发一张贴图都行。
+- **能陪着演**：群友拉它角色扮演时，照设定演、跟着剧情走，动作写在斜体括号里；戏散了自动回到平时的样子。
+- **dsowner 能在聊天里改人设**：`OWNER_ID` 本人叫它说“以后说话毒舌一点”，它会把人设改好并存进设置，说“改回去”还能撤销；别人这么说，它会让对方找 dsowner。
 - **话量可控**：主动发言额度按群里的消息量恢复，群越热闹恢复越快；档位和各项参数都能在 Discord 里调。
 - **省钱**：对话历史只追加不改写，尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
-- **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
+- **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
+- **能打开链接**：平时看 Discord 生成的链接预览；被叫到时真的打开：X（推特）的推文走 FxTwitter（不用账号），别的网页交给 Tavily。要登录才能看的网站只看预览。
+- **会发表情包和图**：有表情包库（通用的放在 NAS 上，各服务器也能自己上传），也会上网找图——找到的图它先看一遍，合适才发。
 - **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 自带的搜索查一下再回答。每个服务器每天有次数上限。
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
 > 这是中文版（命令、回复和文档都是中文）。英文版功能相同、全部是英文，在 [`english` 分支](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)，也可以在 [Releases](https://github.com/Longying-2403/Deepseek-X-Discord/releases) 下载 `-en.zip`。
 
-A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like a regular member:
+A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like any other member:
 
-- **Answers when called**: replies right away when someone @mentions it, replies to one of its messages, or uses one of its aliases.
-- **Chimes in on its own** (enabled per channel): waits until the chat goes quiet for a moment (or until it has waited too long), then lets the model decide whether to say something. It leans toward staying silent.
-- **Feels human**: short, casual replies; shows "typing…" and waits a few seconds based on length before sending; may split a reply into two or three messages, or just react with an emoji.
-- **Controllable chattiness**: proactive messages draw from a quota that refills with the channel's message volume, so the busier the chat, the faster it refills. Presets and individual settings can all be changed inside Discord.
-- **Cheap to run**: conversation history is append-only to get the most out of DeepSeek's prefix cache; no model call at all when the quota is empty; automatic fallback when the daily budget runs out.
-- **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links and Discord stickers are all sent to the model (only the first frame of animated images; can be turned off).
-- **Reads files**: text and code, PDF (for scanned PDFs it looks at the first few pages as images), Word, Excel and PowerPoint. Files attached when someone calls it are read right away; for requests like "take a look at that file above", it opens the file itself.
-- **Searches the web**: when someone calls it with a question that needs up-to-date information it doesn't have (news, prices, scores, weather…), it looks it up with DeepSeek's built-in search before answering. Each server has a daily search limit.
-- **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share their memory. Private channels don't share by default.
-- **Stays where you want it**: you can limit where it responds by channel, category or the whole server.
+- **Answers when called**: when someone @mentions it, replies to one of its messages, or uses one of its aliases, it responds right away.
+- **Joins in on its own** (per channel): it waits for a short lull in the chat (or until it has waited long enough), then lets the model decide whether to say anything; by default it leans toward staying quiet.
+- **Feels human**: casual, with the length fitting the moment (a sentence or two for a quick comeback, a few more when it's playing along with a story). It shows "typing…" first and waits a few seconds based on the length before sending; it can split a thought into two or three messages, or just react with an emoji. When people are deep in a conversation it may tactfully chime in, and if it's told to stay out of it, it apologizes and keeps out of that topic.
+- **Uses the server's emoji and stickers**: it knows which custom emoji and stickers this server has, and can use them in replies, as reactions, or send a sticker on its own.
+- **Plays along**: when people pull it into a roleplay, it plays the part they set up and follows the story, with actions in italic parentheses; once the scene is over, it goes back to its usual self.
+- **dsowner can change its persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites its persona and saves it to the settings, and "change it back" undoes that; if anyone else asks, it tells them to ask dsowner.
+- **You control how much it talks**: its quota for speaking up on its own refills with the chat's message volume, so the livelier the chat, the faster it refills. Presets and every parameter can be adjusted from inside Discord.
+- **Saves money**: the conversation history is append-only and never rewritten, to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
+- **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
+- **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
+- **Opens links**: normally it sees the link previews Discord generates; when it's called it really opens them: posts on X (Twitter) through FxTwitter (no account needed), other web pages through Tavily. Sites you have to log in to see only get the preview.
+- **Sends memes and pictures**: it has a meme library (a shared one on your NAS, and each server can upload its own), and it can also look for pictures online. It looks at what it finds first and only sends one if it fits.
+- **Searches the web**: when it's called with a question about news, prices, scores, weather or anything else recent that it doesn't know, it looks it up with DeepSeek's built-in search first, then answers. Each server has a daily search cap.
+- **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share. Private channels don't share by default.
+- **You control where it responds**: limit it by channel, by category, or for the whole server.
+
+It replies in the language of the message it's answering, so it also works in mixed-language servers.
 
 > **English edition:** this page describes the Chinese edition, whose commands and replies are in Chinese. The English edition has the same features with English commands, replies and docs. It lives on the [`english` branch](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english), or download the `-en.zip` from [Releases](https://github.com/Longying-2403/Deepseek-X-Discord/releases).
 
@@ -44,7 +56,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 2. 左侧 **Bot** 页：
    - 点 Reset Token，复制 token（填到 `.env` 的 `DISCORD_TOKEN`）。
    - 往下找到 **Privileged Gateway Intents**，打开 **Message Content Intent**（必须，否则看不到消息内容）。
-3. 邀请进服务器：bot 第一次启动时会在日志里打印邀请链接（已带好权限）。也可以在后台 **OAuth2 → URL Generator** 里勾 `bot` 和 `applications.commands`，权限勾：查看频道、发送消息、在帖子中发送消息、读取消息历史、添加反应、嵌入链接。
+3. 邀请进服务器：bot 第一次启动时会在日志里打印邀请链接（已带好权限）。也可以在后台 **OAuth2 → URL Generator** 里勾 `bot` 和 `applications.commands`，权限勾：查看频道、发送消息、在帖子中发送消息、读取消息历史、添加反应、嵌入链接、附加文件（发表情包和图要用；1.4.0 之前邀请的 bot 一般也有，因为 @everyone 默认就有这个权限）。
 
 > 小规模用不需要审核。bot 进到 100 个服务器以上要先完成 Discord 的应用验证；能看到它的用户超过 1 万人时，Message Content 这个特权 intent 也要提交审核，到时 Discord 会通知你。
 
@@ -65,7 +77,7 @@ cp .env.example .env
 | `OWNER_ID` | 你自己的 Discord 用户 ID（开发者模式下右键头像 → 复制用户 ID） |
 | `CONTROL_GUILD_ID` | 想在 Discord 里改主人参数（预算、联网搜索等）就要填：放 `/dsowner` 的服务器 ID（右键服务器图标 → 复制服务器 ID）。平时聊天的服务器就行（朋友的也可以），命令和 `/ds` 一样只有有“管理服务器”权限的人看得到，也只有 `OWNER_ID` 本人能用。只填 `OWNER_ID` 不会有 `/dsowner` |
 | `DISCORD_PROXY` | 可选。连 Discord 需要代理时填，如 `http://127.0.0.1:7890` |
-| `TAVILY_API_KEY` | 可选。DeepSeek 自带的搜索用不了时，改用 [Tavily](https://tavily.com)（每月免费 1000 次） |
+| `TAVILY_API_KEY` | 可选，推荐填。打开群友发的网页链接、上网找图都靠 [Tavily](https://tavily.com)；DeepSeek 自带的搜索用不了时也改用它（每月免费 1000 次额度）。不填也能读 X 的推文，表情包库也照常能用 |
 
 ---
 
@@ -89,6 +101,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m dsbot --check         # 离线自检：配置、斜杠命令定义（不连 Discord、不花钱）
 python -m dsbot --test-search "台北 今天 天气"   # 可选：真的搜一次，确认联网搜索能用（花一点点钱）
+python -m dsbot --test-link https://x.com/…/status/…   # 可选：真的打开一个链接
+python -m dsbot --test-image "水豚"              # 可选：真的找一次图（用掉 1 次 Tavily 额度），候选图存到 data/找图测试/
 python -m dsbot
 ```
 
@@ -101,9 +115,10 @@ python -m dsbot
 1. 先圈定它能待的地方（可选）：`/ds 区域 操作:禁止 范围:全服务器`，再到要用的频道执行 `/ds 区域 操作:允许`，或者选 `范围:本类别` 放开整个区
 2. 在想让它主动聊天的频道里：`/ds 主动 开关:开`
 3. 选个话量：`/ds 档位`（安静 / 普通 / 话痨）
-4. 给它定人设：`/ds 人设`（弹出编辑框）
+4. 给它定人设：`/ds 人设`（弹出编辑框）；`OWNER_ID` 本人也可以直接在聊天里 @ 它让它改（见下面“十一”）
 5. 想让它记得别的频道聊过的事：`/ds 记忆共享 操作:开 范围:全服务器`（见下面“七、跨频道记忆”）
-6. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率、记忆共享和搜索次数）；`/ds 区域列表` 看它在哪些地方会回应
+6. 给它几张表情包：`/ds 表情包 操作:上传`（见下面“十、发表情包和图”）
+7. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/ds 区域列表` 看它在哪些地方会回应
 
 不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
 
@@ -122,12 +137,13 @@ python -m dsbot
 | `/ds 主动` | 开关主动发言 |
 | `/ds 档位` | 一键套用：安静 / 普通 / 话痨 |
 | `/ds 设置` | 调整单项参数，值填“默认”可恢复 |
-| `/ds 人设` | 修改人设（弹出编辑框） |
+| `/ds 人设` | 修改人设（弹出编辑框）。`OWNER_ID` 本人也能在聊天里让它改，见“十一” |
 | `/ds 记忆共享` | 开 / 关 / 跟随上级。开了共享的频道之间互通记忆；私密频道要在那个频道里单独开才会分享出去 |
-| `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费、记忆共享、今天的搜索次数 |
+| `/ds 表情包` | 这个服务器的表情包库：上传（附上图片、写个名字）/ 删除 / 列表 |
+| `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数 |
 | `/ds 清空记忆` | 清空本频道的对话记录和摘要 |
 
-除了“区域列表”“状态”和“清空记忆”，这些命令都有一个“范围”选项：**本频道**（默认，人设除外）、**本类别**（Discord 里的“XX区”）、**全服务器**。
+除了“区域列表”“状态”“清空记忆”和“表情包”，这些命令都有一个“范围”选项：**本频道**（默认，人设除外）、**本类别**（Discord 里的“XX区”）、**全服务器**。
 
 设置的优先级：**本频道 > 帖子所在的频道 > 所在类别 > 本服务器 > 主人设的全局值 > config.toml**。比如全服务器禁止、“闲聊区”类别允许、其中某个频道又单独禁止，结果就是只有闲聊区里除那个频道以外的地方会回应。
 
@@ -137,7 +153,7 @@ python -m dsbot
 
 | 命令 | 作用 |
 |---|---|
-| `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索开关和每日搜索上限），可以指定某个服务器 ID，不填就是全局 |
+| `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索、读链接、每日搜索上限和每日找图上限），可以指定某个服务器 ID，不填就是全局 |
 | `/dsowner 总览` | 今天每个服务器花了多少、调用多少次、缓存命中率 |
 
 没设置 `CONTROL_GUILD_ID` 时没有 `/dsowner`（只填 `OWNER_ID` 不够），主人参数只能改 `config.toml` 里的 `[defaults]`。
@@ -157,6 +173,7 @@ python -m dsbot
 | 最长等待秒 | 180 | 一直没冷场时，最多等多久也判断一次 |
 | 每人每分钟点名 | 3 | 防止有人连续 @ 刷它 |
 | 别名 | 空 | 消息里出现这些名字也算叫它，逗号分隔，如 `DS,小D`。英文别名要整词出现（`DS` 不会匹配 words） |
+| 发图 | 开 | 让它自己发表情包库里的图、上网找图。关掉后两样都不发 |
 
 区域（`/ds 区域`）对应的参数叫“允许回应”，默认开。想让所有服务器一开始就是白名单模式，把 `config.toml` 里的 `enabled` 改成 `false`。
 
@@ -174,6 +191,8 @@ python -m dsbot
 | 读文件 | 开 | 是否读取群友上传的文件 |
 | 联网搜索 | 开 | 被叫到时，需要最新信息就上网搜 |
 | 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
+| 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily） |
+| 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
 
 “一轮”的意思：同一个人 20 秒内连发的几条算一轮，免得分行打字刷额度。
 
@@ -235,7 +254,57 @@ python -m dsbot
 - 搜到的网页内容和文件一样当成资料处理，里面写的“忽略之前的设定”之类不会照做。
 - 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。如果 DeepSeek 自带的搜索用不了（比如接口改了），在 `.env` 里填 `TAVILY_API_KEY`（填完 `docker compose up -d --force-recreate`），会自动改用 Tavily。
 
-## 九、它是怎么工作的
+## 九、读链接
+
+群友发的链接，它分两种情况看：
+
+- **平时**（包括主动聊天）：只看 Discord 自己生成的链接预览：标题、作者、开头一段描述，预览图也会看（排在群友发的图后面）。不额外花钱。
+- **被叫到时真的打开**：叫它的那条消息里的链接、叫它时回复的那条消息里的链接、同一个人两分钟内刚发的链接，会直接打开再回答；“帮我看看上面那个链接”这种，它会自己去打开（和看文件一样，多一次调用，慢几秒）。
+  - **X（推特）的推文**：走 [FxTwitter](https://github.com/FxEmbed/FxEmbed) 的免费接口，不用账号、不用 key。能拿到全文、引用的推文、投票、社区笔记和图片（图片交给它看图）。视频只看得到时长和封面。
+  - **别的网页**：交给 [Tavily](https://tavily.com) 去抓，要在 `.env` 里填 `TAVILY_API_KEY`。每打开 5 个网页算 1 次额度（免费每月 1000 次）。没填的话，别的网站只看预览。
+  - **要登录才能看的网站**（Threads、IG、Facebook、小红书……）多半打不开，它会照实说只看到了预览，不会照着标题瞎猜。
+- 每个链接最多读 4000 字，一轮最多打开 3 个，每个服务器每天最多打开 100 个（都在 `config.toml` 的 `[engine]` 里改）。打不开的链接（要登录、被删了）只说一次，之后不会每次都再试，除非明确让它再打开。
+- **安全**：NAS 自己不去打开网页。推文由 FxTwitter 读，网页由 Tavily 的服务器读，所以群友发的链接碰不到你家的内网，对方网站也看不到你家的 IP。只有推文里的图片由 bot 自己下载，而且只从 X 的图片服务器下载。图片、视频、压缩包、Discord 自己的链接、内网地址（192.168.x.x、xxx.local 之类）不会被当成网页打开。网页里写的“忽略之前的设定”之类，和文件一样只当资料。
+- 推文和网页的内容会经过 FxTwitter / Tavily，再和聊天记录一样发给 DeepSeek。
+- 开关：`/dsowner 设置 参数:读链接 值:关`。部署后可以先试一下：`docker compose exec dsbot python -m dsbot --test-link 网址`。
+
+## 十、发表情包和图
+
+它可以像群友一样斗图：
+
+- **表情包库**（不花钱）：
+  - **通用库**：在 NAS 上项目文件夹的 `data` 里新建一个 `表情包` 文件夹，把图放进去，所有服务器都能用。文件名就是表情包的名字，它是看名字挑图的，所以名字要写清楚意思，比如 `熊猫头-无语.png`、`猫猫-震惊.gif`。放进去就生效，不用重启。
+  - **每个服务器自己的库**：管理员用 `/ds 表情包 操作:上传 图片:（附上图片） 名字:熊猫头-无语`；`操作:列表` 看全部，`操作:删除` 删掉。同名时这个服务器自己的优先。存在 `data/服务器表情包/` 里。
+  - 支持 PNG、JPG、GIF（动图也行）、WebP，每张 8 MB 以内，每个服务器最多上传 300 张。名单放在 system prompt 里，最多列 80 个（`[engine]` 的 `meme_list_limit`）；表情包有增删时，那个服务器的缓存会失效一次。
+- **上网找图**（要 `TAVILY_API_KEY`）：库里没有合适的、又真的想发图时，它会上网找。找到的几张候选图先给它看，它自己审核一遍：
+  - 跟话题对得上、看得清楚才发；色情、血腥、恶心的，带别人个人信息的（聊天截图里的名字、头像之类），被水印或广告盖满的都不要；都不合适就不发。Tavily 那边也开了安全搜索。
+  - 网上找到的动图不发：它只看得到第一帧，后面的画面审核不了。动图表情包可以放进表情包库。
+  - 审核靠它自己看图，没办法保证百分之百准，比如图里的小字、梗图里的暗喻可能看漏。所以有次数上限和冷却，也能随时关掉。
+  - 每次找图用掉 1 次 Tavily 额度，加上让它审核的那一次调用（通常不到 0.1 美分）。每个服务器每天最多 10 次（`/dsowner 设置 参数:每日找图上限` 改），同一个频道 10 分钟最多找一次（`[engine]` 的 `image_cooldown_seconds`）。
+  - 发出去的是原图（作为附件上传，bot 要有“附加文件”权限）。只有透明底的图会先铺上白底、存成 JPEG 再发，和它审核时看到的一样，免得深色主题里冒出它没看到的东西。超过 8 MB 的图不下载。
+  - 下载候选图时只连公网地址、不走代理；内网地址、奇怪的 IP 写法一律不连，跳转也会重新检查。
+- 主动聊天时也能发（和说话一样算一次发言、扣额度），被叫到时也会用；大多数时候它还是用文字。
+- 关掉：`/ds 设置 参数:发图 值:关`，表情包和上网找图都不发了（范围可以选本频道、本类别或全服务器）。
+- 部署后可以先试一下：`docker compose exec dsbot python -m dsbot --test-image "水豚"`，候选图会存到 `data/找图测试/`，看完可以删掉。
+
+## 十一、角色扮演、表情、聊天里改人设
+
+**角色扮演**：群友拉它演戏（“来演个戏，你是酒馆老板”）时，它会照着设定演、跟着剧情走，回复可以比平时长，动作和神态写在斜体括号里，比如 *（擦着杯子抬头）*。最近的聊天跟那场戏没关系了、或者有人说不玩了，它就回到平时的样子；带“场外”“OOC”的话算戏外闲聊，戏不会因此结束。演完一直出不了戏的话，`/ds 清空记忆`。
+
+角色卡之类的长设定：单条消息进上下文前最多 1800 字（`config.toml` 里的 `max_chars_per_message`）。更长的就做成 .txt 发出来，在同一条消息里 @ 它，会整份读（最多 2 万字）。
+
+**服务器表情和贴图**：它知道这个服务器有哪些自定义表情和贴图（名单放在 system prompt 里，最多列 100 个表情、30 张贴图，在 `[engine]` 的 `emoji_list_limit`、`sticker_list_limit` 改）。回复里写 `:名字:` 会变成那个表情，加表情反应也能用服务器表情，也能单独发一张贴图（和说话一样算一次发言、扣额度）。只给某些身份组用、bot 又没有那个身份组的表情，以及因为加成等级掉了的表情和贴图，不会列出来。
+
+**聊天里改人设**：`OWNER_ID` 本人叫它（@、回复它或者叫别名都行）说“以后说话毒舌一点”之类，它会把改好的完整人设存进设置，和用 `/ds 人设` 改一样，下一轮生效。改好后它会在你那条消息上加个 📝，看到它就是真的改了。
+- **改哪一份**：默认改这个频道现在用的那份。大多数时候就是全服务器的；如果这个频道（或所在频道、类别）单独设过人设，改的就是那一份。说“只改这个频道”就只改这里。明确说“全服务器都改”、而这里又单独设过人设时，它不会改，会请你用 `/ds 人设` 去改全服务器的。
+- **恢复和撤销**：说“改回默认人设”，全服务器那一级会恢复默认；频道、类别那一级则是不再单独设置、沿用上一级。说“改回去”“撤销”，会回到上一次修改之前的样子，再说一次就再往前撤一次（用 `/ds 人设` 改的也算一次）。每次修改都记在 `./data` 的数据库里，重建容器也还在。人设本来就是那样时不会记、也不会加 📝。
+- **照着文件改**：可以说“看看上面那个角色卡，照着改你的人设”，它会先看文件再改。照着网上搜到的、或者别的频道里的内容改不行，免得别人写在那里的东西被拿来改人设。人设最长 4000 字。
+- **只认你本人这一次的话**：聊天记录里你的消息会标上〔dsowner〕。这是按用户 ID 认的，别人改昵称冒充不了。代码还会再核对一次：只认这一轮里你本人叫它的那条消息。别人转述“dsowner 同意了”、文件里写的、转发的消息都不算。
+- 别人提要求时，它会让对方去找 dsowner。群友先提、你再叫它说“可以，照他说的改”也行。改动比较大的话，记得 `/ds 清空记忆`。
+
+这些规则都写在 `dsbot/prompts.py` 里，改那里要重新构建容器（Container Manager 里是项目先停止再构建）。
+
+## 十二、它是怎么工作的
 
 ```
 消息进来 ──► 存进该频道的缓冲区
@@ -245,10 +314,11 @@ python -m dsbot
               └─ 每 5 秒检查：开了主动 + 有新消息 + (冷场 或 等太久)
                               + 有额度 + 间隔够 + 没超预算 ──► 跑一轮
 
-一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息（该读的文件内容跟在后面）
+一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息（该读的文件、该打开的链接的内容跟在后面）
       → 连同全部历史发给 DeepSeek（JSON 输出）
-      → 模型返回 {"actions": [...]}：回复 / 加表情 / 看文件 / 上网搜 / 翻别的频道 / 什么都不做
-        （要看文件、搜索、翻记录时：办完把结果追加进去，再问它一次）
+      → 模型返回 {"actions": [...]}：回复 / 加表情 / 发贴图 / 发表情包 / 找图 / 发找到的图 / 看文件或打开链接 /
+        上网搜 / 翻别的频道 / 改人设 / 什么都不做
+        （要看文件、打开链接、搜索、找图、翻记录、改人设时：办完把结果追加进去，再问它一次）
       → 这一轮的 user + assistant 原样追加进历史（沉默也记）
       → 显示“正在输入”，按字数等几秒再发
 ```
@@ -259,7 +329,7 @@ python -m dsbot
 
 ---
 
-## 十、常见问题
+## 十三、常见问题
 
 **@ 它没反应**
 - 这个频道不在允许的区域：`/ds 状态` 第一行会提示，`/ds 区域列表` 看整体设置。
@@ -273,7 +343,7 @@ python -m dsbot
 
 **换了人设但说话风格没变**：历史里还有旧风格的发言，`/ds 清空记忆` 后重新开始。
 
-**GIF 说看不到**：GIF 选单发的 GIF 其实是一个链接，Discord 过一两秒才补上预览图。它会读这个预览图（动图的第一帧）；如果 @ 它的那条消息自己就带链接，它会先等两秒再回。网页链接（比如 YouTube）只读标题，不看缩略图。
+**GIF 说看不到**：GIF 选单发的 GIF 其实是一个链接，Discord 过一两秒才补上预览图。它会读这个预览图（动图的第一帧）；如果 @ 它的那条消息自己就带链接，它会先等两秒再回。网页链接会看 Discord 生成的预览（标题、描述、预览图），被叫到时会真的打开（见“九”）。
 
 **它说文件读不了**：看它说的原因。常见的是老格式（.doc/.xls/.ppt）、设了打开密码的文件、超过 20 MB。如果它说“解析文件的进程启动不了”，是 bot 这边的问题（日志里有详细原因，多半是权限），修好后再叫它读就行。`python -m dsbot --check`（Docker 里是 `docker compose exec dsbot python -m dsbot --check`）会检查 PDF 组件和解析子进程是否正常。
 
@@ -283,11 +353,19 @@ python -m dsbot
 
 **频道里发不出消息**（缺权限）：连续 3 轮发不出去，这个频道的主动发言会暂停 30 分钟，`/ds 状态` 里能看到提示。
 
+**表情显示成 :名字: / 贴图没发出来**：那个表情或贴图可能刚被删掉，或者只给某些身份组用。名单里没有的贴图它不会发，日志里会写“没有叫 XX 的贴图”。
+
+**它说链接打不开**：要登录才能看的网站（Threads、IG、Facebook 之类）打不开；别的网站要填 `TAVILY_API_KEY`（`/ds 状态` 里能看到读链接是哪种模式）。推文打不开，可能是被删了、私密账号，或者 FxTwitter 暂时出问题。
+
+**表情包、找到的图没发出来**：先看 bot 在那个频道有没有“附加文件”权限（日志里会有“发图失败”）。连着两轮发不出去时，那个频道 30 分钟内先不发图、也不上网找图（`/ds 状态` 里会显示），补上权限后过一会儿会自己恢复。表情包名对不上库里的名字时不会发（日志里有“表情包库里没有…”）。网上找的候选图它都觉得不合适时，会选择不发。
+
+**dsowner 让它改人设，它说改不了**：要你本人叫它（@、回复它或者叫别名），光在聊天里提一句不算；`.env` 里的 `OWNER_ID` 要是你自己的用户 ID。如果它说这个频道单独设了人设，那是你说了“全服务器”：在这个频道里不说“全服务器”就是改这里的，要改全服务器的就用 `/ds 人设`。
+
 **私信**：目前只在服务器里工作，不处理私信。
 
 ---
 
-## 十一、开发
+## 十四、开发
 
 欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤、几条设计约束，以及中英两个版本怎么同步。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -304,7 +382,10 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 | `dsbot/llm.py` | DeepSeek HTTP 客户端（思考开关、JSON 模式、用量解析） |
 | `dsbot/files.py` | 读文件：分类、解码、PDF / Office 解析、解析子进程 |
 | `dsbot/search.py` | 联网搜索：DeepSeek 自带的 web_search（Anthropic 兼容接口），Tavily 备用 |
-| `dsbot/discord_app.py` / `convert.py` | Discord 事件与消息转换、发送、表情、“正在输入” |
+| `dsbot/links.py` / `tavily.py` | 读链接：推文走 FxTwitter，网页走 Tavily Extract |
+| `dsbot/pictures.py` / `memes.py` | 上网找图（Tavily）、表情包库 |
+| `dsbot/net.py` | 调用外部 API；下载网上的图时只连公网地址 |
+| `dsbot/discord_app.py` / `convert.py` | Discord 事件与消息转换、发送、表情和贴图、“正在输入” |
 | `dsbot/commands.py` | 斜杠命令和人设编辑框 |
 | `dsbot/config.py` / `settings.py` | 配置、参数定义与分层覆盖 |
 | `dsbot/store.py` / `ledger.py` | SQLite 存储、每日花费 |

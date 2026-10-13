@@ -1,14 +1,16 @@
 """斜杠命令。
 
-/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、状态。
+/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、状态。
 /dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索等。
             和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -17,7 +19,7 @@ from discord.app_commands import Choice
 
 from .config import ADMIN_KEYS, OWNER_KEYS, PRESETS, RESET_WORDS, SPECS, format_value
 from .convert import safe_category_id
-from .prompts import DEFAULT_PERSONA
+from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
 
 if TYPE_CHECKING:
     from .discord_app import DSBot
@@ -39,6 +41,16 @@ SHARE_ACTIONS = [
     Choice(name="关", value="off"),
     Choice(name="跟随上级", value="inherit"),
 ]
+MEME_ACTIONS = [
+    Choice(name="上传", value="add"),
+    Choice(name="删除", value="remove"),
+    Choice(name="列表", value="list"),
+]
+LINK_MODES = {
+    "all": "读链接：开（推文走 FxTwitter，网页走 Tavily）",
+    "x": "读链接：只读推文（没填 TAVILY_API_KEY，别的网站只看 Discord 的预览）",
+    "off": "读链接：关",
+}
 NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
 # 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
@@ -115,9 +127,9 @@ class PersonaModal(discord.ui.Modal):
         self.inherited = inherited  # 这个范围不单独设置时会用到的人设
         self.text = discord.ui.TextInput(
             style=discord.TextStyle.long,
-            default=current[:4000] or None,
+            default=current[:PERSONA_MAX_CHARS] or None,
             required=False,
-            max_length=4000,
+            max_length=PERSONA_MAX_CHARS,
             placeholder="留空 = 恢复默认人设",
         )
         self.add_item(
@@ -130,13 +142,27 @@ class PersonaModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         value = self.text.value.strip()
+        old = self.bot.settings.overrides(self.scope, self.scope_id).get("persona")
         if not value or value == self.inherited.strip():
             # 没改（和上一级一样）就不单独存，以后上一级改了这里也会跟着变
             self.bot.settings.unset(self.scope, self.scope_id, "persona")
+            new = None
             done = "已恢复默认人设" if self.scope == "guild" else "已改为沿用上一级的人设"
         else:
             self.bot.settings.set(self.scope, self.scope_id, "persona", value)
+            new = value
             done = "人设已更新"
+        if new != old:
+            # 记进人设历史：dsowner 在聊天里说“改回去”时能撤销
+            self.bot.store.add_persona_change(
+                ts=time.time(),
+                scope=self.scope,
+                scope_id=self.scope_id,
+                old=old,
+                new=new,
+                by_user=interaction.user.id,
+                via="command",
+            )
         await _reply(
             interaction,
             f"{self.where}：{done}，下一轮对话生效。\n改动比较大的话，可以用 `/ds 清空记忆` 让它不受之前说话风格的影响。",
@@ -194,6 +220,22 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append(f"联网搜索：开 · 今天本服务器已搜 {st['searches']} / {view.daily_search_limit} 次")
     else:
         lines.append("联网搜索：关")
+    link_line = LINK_MODES.get(st["links_mode"], LINK_MODES["off"])
+    if st["links_mode"] != "off":
+        link_line += f" · 今天本服务器打开了 {st['links_opened']} 个"
+    lines.append(link_line)
+    if st["memes_on"]:
+        own, shared = st["meme_counts"]
+        if st["can_find_images"]:
+            found = f"上网找图：今天本服务器 {st['images_found']} / {view.daily_image_limit} 次"
+        else:
+            found = "上网找图：关（没填 TAVILY_API_KEY，或者每日找图上限是 0）"
+        lines.append(f"发图：开 · 表情包库 {own + shared} 张（本服务器 {own}、通用 {shared}）· {found}")
+    else:
+        lines.append(f"发图：关（来自{view.source('images')}）")
+    if st["memes_on"] and st["media_blocked_for"] > 0:
+        minutes = max(1, round(st["media_blocked_for"] / 60))
+        lines.append(f"⚠️ 这里最近连着发不出图（多半是 bot 没有“附加文件”权限），约 {minutes} 分钟内先不发图，之后自动再试")
     if st["last_decision"]:
         lines.append(f"上次：{st['last_decision']}")
     lines.append(
@@ -211,6 +253,18 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
     if st["send_blocked"]:
         lines.append("⚠️ 最近几轮在这里发不出消息（检查 bot 的发言权限），主动发言暂停 30 分钟")
+    return "\n".join(lines)
+
+
+def meme_list_text(bot: "DSBot", guild_id: int) -> str:
+    entries = bot.memes.entries(guild_id)
+    own = sorted(name for name, meme in entries.items() if not meme.shared)
+    shared = sorted(name for name, meme in entries.items() if meme.shared)
+    lines = [f"**表情包库**（本服务器 {len(own)} 张 · 通用 {len(shared)} 张）"]
+    lines.append("本服务器：" + ("、".join(own) if own else "还没有（用 `/ds 表情包 操作:上传` 加）"))
+    lines.append("通用：" + ("、".join(shared) if shared else f"没有（bot 主人可以在 NAS 上的 `{bot.cfg.bot.meme_dir}/` 里放图）"))
+    if not bot.settings.get("images", guild_id=guild_id):
+        lines.append("⚠️ 这个服务器关掉了发图：`/ds 设置 参数:发图 值:开 范围:全服务器` 打开")
     return "\n".join(lines)
 
 
@@ -296,6 +350,64 @@ def register_commands(bot: "DSBot") -> None:
         if action.value == "on" and scope_name != "channel":
             lines.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
         await _reply(interaction, "\n".join(lines))
+
+    @admin.command(name="表情包", description="管理这个服务器的表情包库：上传、删除、查看（它会按名字挑着发）")
+    @app_commands.rename(action="操作", name="名字", image="图片")
+    @app_commands.describe(
+        action="上传 / 删除 / 列表",
+        name="表情包的名字，写清楚是什么意思，比如“熊猫头-无语”（它按名字挑图）；上传时不填就用文件名",
+        image="上传时附上图片：PNG、JPG、GIF、WebP，8 MB 以内",
+    )
+    @app_commands.choices(action=MEME_ACTIONS)
+    async def meme_cmd(
+        interaction: discord.Interaction,
+        action: Choice[str],
+        name: Optional[str] = None,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        guild_id = interaction.guild_id
+        library = bot.memes
+        if action.value == "list":
+            await _reply(interaction, meme_list_text(bot, guild_id))
+            return
+        if action.value == "remove":
+            if not name or not name.strip():
+                await _reply(interaction, "要删哪一张？在「名字」里填上表情包的名字（`/ds 表情包 操作:列表` 能看到全部）。")
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)  # 可能要等正在上传的那张写完
+            result = await asyncio.to_thread(library.remove, guild_id, name)
+            if result == "removed":
+                await _reply(interaction, f"已删掉表情包「{name.strip()}」。")
+            elif result == "shared":
+                await _reply(interaction, f"「{name.strip()}」是通用库里的，要在 NAS 上的 `{bot.cfg.bot.meme_dir}/` 文件夹里删。")
+            else:
+                await _reply(interaction, f"这个服务器没有叫「{name.strip()}」的表情包。")
+            return
+        if image is None:
+            await _reply(interaction, "上传要在「图片」里附上一张图。")
+            return
+        if image.size > library.max_bytes:
+            await _reply(interaction, f"图片太大了（最多 {library.max_bytes // 1_000_000} MB）。")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)  # 下载图片要一会儿
+        try:
+            data = await image.read()
+        except discord.HTTPException as exc:
+            await _reply(interaction, f"下载图片失败：{exc}")
+            return
+        try:
+            meme = await asyncio.to_thread(library.add, guild_id, name or PurePath(image.filename).stem, data)
+        except ValueError as exc:
+            await _reply(interaction, f"没存成：{exc}")
+            return
+        except OSError as exc:
+            log.exception("保存表情包失败")
+            await _reply(interaction, f"没存成（写文件出错）：{exc}")
+            return
+        text = f"已加入这个服务器的表情包库：「{meme.name}」。它看名字决定什么时候发，名字写清楚是什么意思最好。"
+        if not bot.settings.view(*_ids(interaction)).images:
+            text += "\n⚠️ 但这里关掉了发图，它不会发：`/ds 设置 参数:发图 值:开`"
+        await _reply(interaction, text)
 
     @admin.command(name="区域列表", description="看看它在这个服务器的哪些地方会回应")
     async def area_list_cmd(interaction: discord.Interaction) -> None:

@@ -22,8 +22,9 @@ from typing import Any, AsyncContextManager, Awaitable, Callable, Protocol
 from .actions import dump_actions, parse_actions
 from .config import AppConfig
 from .files import classify, max_bytes_for, read_file
-from .images import MAX_RAW_BYTES, to_data_uri
+from .images import MAX_RAW_BYTES, filename_for, to_data_uri, upload_ready
 from .ledger import Ledger
+from .links import site_name
 from .llm import LLMError
 from .models import (
     Action,
@@ -35,13 +36,40 @@ from .models import (
     FileText,
     ImageAttachment,
     IncomingMessage,
+    LinkRef,
+    LinkResult,
+    Picture,
     SearchResult,
     Usage,
 )
-from .prompts import SUMMARY_SYSTEM, build_system_prompt
+from .prompts import (
+    DEFAULT_PERSONA,
+    IMAGE_BLOCKED,
+    IMAGE_BUDGET,
+    IMAGE_COOLDOWN,
+    IMAGE_FAILED,
+    IMAGE_LIMIT,
+    IMAGE_NONE,
+    IMAGE_OFF,
+    PERSONA_DONE,
+    PERSONA_MAX_CHARS,
+    PERSONA_NO_ASKER,
+    PERSONA_NO_HISTORY,
+    PERSONA_NO_TEXT,
+    PERSONA_NOT_HERE,
+    PERSONA_NOT_OWNER,
+    PERSONA_RESET,
+    PERSONA_TOO_LONG,
+    PERSONA_UNCHANGED,
+    PERSONA_UNDONE,
+    SUMMARY_SYSTEM,
+    build_system_prompt,
+    clean_persona,
+)
 from .quota import QuotaBucket, SlidingWindow, TurnTracker
 from .search import today_text
 from .render import (
+    Gallery,
     assistant_text,
     content_tokens,
     history_lines,
@@ -79,8 +107,13 @@ MAX_PASTE_PREVIEWS = 3
 KEEP_RECENT_TURNS = 12  # 压缩记忆时，最近 6 轮（12 条）不动
 DOWNLOAD_TIMEOUT = 60.0  # 下载一个附件最多等多久
 FORCE_COMPACT_TOKENS = 100_000  # 上下文超过预算两倍、也超过这么多时，不等旧记录攒够就压缩
-TOOL_KINDS = ("read", "search", "recall")  # 被叫到时才能用、用完再问一次模型的动作
+# 用完要再问一次模型的动作。read / search / recall / persona 只在被叫到时能用；image 主动聊天时也能用
+TOOL_KINDS = ("read", "search", "recall", "persona", "image")
+SEND_KINDS = ("sticker", "meme", "pick")  # 发出去的是一张图：和说话一样算“开口了”
+RECENT_LINKS_KEEP = 30  # 每个频道记住最近多少条带链接的消息（模型可以用 read 要求打开）
 MAX_RECALLS = 2
+OWNER_EXTRA_TOKENS = 4000  # dsowner 叫它的那一轮：可能要整段重写人设（最多 4000 字），输出上限多给一些
+MAX_OUTPUT_CAP = 8000
 INTERACTIONS_PER_PERSON = 3  # 每个人记住最近几次跟它的对话（跨频道带近况用）
 
 
@@ -91,6 +124,12 @@ class Transport(Protocol):
 
     async def react(self, channel_id: int, message_id: int, emoji: str) -> bool: ...
 
+    async def send_sticker(self, channel_id: int, name: str, *, reply_to: int | None, ping: bool) -> int | None: ...
+
+    async def send_file(
+        self, channel_id: int, data: bytes, filename: str, *, reply_to: int | None, ping: bool
+    ) -> int | None: ...
+
     def typing(self, channel_id: int) -> AsyncContextManager[Any]: ...
 
     def locate(self, channel_id: int) -> ChannelPlace | None: ...
@@ -98,6 +137,28 @@ class Transport(Protocol):
 
 class Searcher(Protocol):
     async def search(self, query: str, *, today: str, max_chars: int, user_id: str | None = None) -> SearchResult: ...
+
+
+class LinkOpener(Protocol):
+    def mode(self) -> str: ...  # all：推文和网页都能打开；x：只能打开推文
+
+    def readable(self, url: str) -> bool: ...
+
+    async def read(self, url: str, *, max_chars: int, image_side: int | None = None) -> LinkResult: ...
+
+
+class PictureSource(Protocol):
+    async def find(self, query: str) -> list[Picture]: ...
+
+
+class MemeStore(Protocol):
+    def names(self, guild_id: int) -> list[str]: ...
+
+    def find(self, guild_id: int, wanted: str) -> Any: ...  # 找到返回有 .name 的对象，找不到返回 None
+
+    def load(self, meme: Any) -> tuple[bytes, str] | None: ...  # (内容, 文件名)
+
+    def counts(self, guild_id: int) -> tuple[int, int]: ...
 
 
 class LLM(Protocol):
@@ -141,6 +202,27 @@ class _Planned:
 
 
 @dataclass
+class LinkEntry:
+    """频道里最近一条带链接的消息。"""
+
+    message: IncomingMessage
+    read_turns: dict[str, int] = field(default_factory=dict)  # 打开过、内容在对话里的链接 → 那条记录的 id
+    failed: set[str] = field(default_factory=set)  # 确定打不开的：不再自动打开，模型要求时才再试
+    titles: dict[str, str] = field(default_factory=dict)  # 打开时拿到的标题（再提到时用同一个名字）
+
+    def unread(self) -> list[LinkRef]:
+        return [link for link in self.message.links if link.url not in self.read_turns and link.url not in self.failed]
+
+
+@dataclass
+class _LinkPlan:
+    anchor: int  # 内容块放在哪条消息后面
+    entry: LinkEntry
+    link: LinkRef
+    partial: bool = False  # 这一轮剩下的字数不够，没读完（或者少附了图）：之后还能再完整打开
+
+
+@dataclass
 class _Budget:
     """一轮（包括看文件的第二步）里还能读多少。"""
 
@@ -148,6 +230,7 @@ class _Budget:
     chars: int
     images: int
     allow_images: bool
+    links: int = 0  # 还能打开几个链接
 
 
 def _add_detail(detail: str, note: str) -> str:
@@ -161,11 +244,17 @@ def _size(n: int) -> str:
 def _block_without_images(block: DocBlock) -> DocBlock:
     if not block.result.images:
         return block
-    return replace(block, result=replace(block.result, images=[], detail=_add_detail(block.result.detail, "页面图没能发给你")))
+    note = "图没能发给你" if block.source == "链接" else "页面图没能发给你"
+    return replace(block, result=replace(block.result, images=[], detail=_add_detail(block.result.detail, note)))
 
 
 def _without_images(docs: dict[int, list[DocBlock]]) -> dict[int, list[DocBlock]]:
     return {k: [_block_without_images(b) for b in v] for k, v in docs.items()}
+
+
+def _sticker_label(name: str) -> str:
+    """贴图名在提示词里的写法（模型照着这个写回来，所以核对时也按这个比）。"""
+    return neutralize(one_line(name, 30))
 
 
 def _norm_channel(name: str) -> str:
@@ -272,6 +361,11 @@ class ChannelState:
     sid_by_msg: dict[int, int] = field(default_factory=dict)
     msg_by_sid: dict[int, int] = field(default_factory=dict)
     recent_files: dict[int, FileEntry] = field(default_factory=dict)  # message_id -> 带文件的消息
+    recent_links: dict[int, LinkEntry] = field(default_factory=dict)  # message_id -> 带链接的消息
+    last_image_at: float = 0.0  # 上次上网找图的时间（同一个频道隔一会儿才能再找）
+    media_failures: int = 0  # 连着几次图发不出去（多半是缺“附加文件”权限）
+    media_blocked_until: float = 0.0  # 发图连着失败：这之前先不发图（文字照常）
+    gallery: list[Picture] = field(default_factory=list)  # 这一轮找到的候选图（pick 从这里挑）
     digest_seen: dict[int, int] = field(default_factory=dict)  # 人 -> 已经带进这个频道的、他在别处最近一次对话的序号
     listed: tuple[str, ...] | None = None  # 已经写进这个频道记录里的“能翻记录的频道”名单
     last_decision: str = ""
@@ -293,8 +387,16 @@ class Engine:
         image_loader: Callable[[ImageAttachment, int], Awaitable[str | None]] | None = None,
         file_reader: Callable[[FileAttachment, int], Awaitable[FileText]] | None = None,
         searcher: Searcher | None = None,
+        owner_id: int | None = None,
+        link_reader: LinkOpener | None = None,
+        pictures: PictureSource | None = None,
+        memes: MemeStore | None = None,
     ):
         self.cfg = cfg
+        self.link_reader = link_reader  # 打开链接（推文走 FxTwitter，网页走 Tavily）
+        self.pictures = pictures  # 上网找图（要 Tavily）
+        self.memes = memes  # 表情包库
+        self.owner_id = owner_id  # OWNER_ID：聊天记录里标〔dsowner〕，只有他能在聊天里改人设
         self.ec = cfg.engine
         self.settings = settings
         self.store = store
@@ -335,6 +437,9 @@ class Engine:
             st.category_id = category_id  # 频道可能被挪到别的类别（帖子的类别取不到时保留旧值）
         return st
 
+    def _is_owner(self, m: IncomingMessage) -> bool:
+        return self.owner_id is not None and m.author_id == self.owner_id and not m.is_bot
+
     def view(self, st: ChannelState) -> View:
         return self.settings.view(st.guild_id, st.channel_id, st.parent_id, st.category_id)
 
@@ -348,6 +453,7 @@ class Engine:
     async def handle_message(self, msg: IncomingMessage) -> None:
         now = self.clock()
         msg.received_at = now
+        msg.from_owner = self._is_owner(msg)
         if not self.enabled(msg.guild_id, msg.channel_id, msg.parent_id, msg.category_id):
             # 不在允许的区域：完全不看，之前攒下的也一起丢掉
             st = self.states.get(msg.channel_id)
@@ -361,6 +467,8 @@ class Engine:
         st.pending.append(msg)
         if msg.files:
             st.recent_files[msg.message_id] = FileEntry(msg)
+        if msg.links:
+            st.recent_links[msg.message_id] = LinkEntry(msg)
         self._prune(st, now)
 
         if msg.is_bot:
@@ -403,7 +511,11 @@ class Engine:
         m.images = updated.images
         m.files = updated.files
         m.stickers = updated.stickers
+        m.links = updated.links  # 预览到了之后，链接多了标题
         m.awaiting_embeds = updated.awaiting_embeds
+        st = self.states.get(m.channel_id)
+        if st is not None and m.links and m.message_id not in st.recent_links:
+            st.recent_links[m.message_id] = LinkEntry(m)
         return True
 
     def _prune(self, st: ChannelState, now: float) -> None:
@@ -421,6 +533,10 @@ class Engine:
             del st.recent_files[mid]
         while len(st.recent_files) > RECENT_FILES_KEEP:
             del st.recent_files[next(iter(st.recent_files))]
+        for mid in [mid for mid, e in st.recent_links.items() if e.message.received_at < cutoff]:
+            del st.recent_links[mid]
+        while len(st.recent_links) > RECENT_LINKS_KEEP:
+            del st.recent_links[next(iter(st.recent_links))]
 
     # ------------------------------------------------------------------ 调度
 
@@ -517,6 +633,7 @@ class Engine:
                         m.trigger = False
                 finally:
                     st.inflight = []
+                    st.gallery = []  # 找到的候选图只在这一轮里能挑
         if st.mention_due and st.pending:
             self._kick(st)
 
@@ -582,15 +699,14 @@ class Engine:
         shown_ids = {id(m) for m in shown}
         targets = [st.sid_by_msg[m.message_id] for m in triggers if id(m) in shown_ids]
         images = await self._images(shown, triggers) if view.vision else {}
-        budget = _Budget(self.ec.max_files_per_round, self.ec.file_round_max_chars, MAX_DOC_IMAGES, bool(view.vision))
-        docs: dict[int, list[DocBlock]] = {}
-        planned: list[tuple[_Planned, FileText]] = []
-        if view.files:
-            if kind == "mention":
-                async with self.transport.typing(st.channel_id):
-                    docs, planned = await self._round_docs(st, shown, triggers, budget)
-            else:
-                docs, planned = await self._round_docs(st, shown, triggers, budget)
+        budget = _Budget(
+            self.ec.max_files_per_round,
+            self.ec.file_round_max_chars,
+            MAX_DOC_IMAGES,
+            bool(view.vision),
+            links=max(0, self.ec.max_links_per_round),
+        )
+        docs, planned, opened = await self._round_content(st, view, kind, shown, triggers, budget, now)
         if st.generation != generation:
             # 读文件的时候记忆被清空了：这一轮作废，点名留着，马上用新的记忆重来
             st.mention_due = st.mention_due or any(m.trigger for m in batch)
@@ -617,10 +733,12 @@ class Engine:
 
         has_images = bool(images) or any(b.result.images for blocks in docs.values() for b in blocks)
         thinking = view.mention_thinking if kind == "mention" else view.proactive_thinking
+        base_tokens = self.ec.max_output_tokens if thinking == "off" else self.ec.max_thinking_tokens
+        max_tokens = min(MAX_OUTPUT_CAP, base_tokens + OWNER_EXTRA_TOKENS) if any(m.from_owner for m in triggers) else None
         started = self.clock()
         try:
             user_content, completion, cost, row = await self._ask_with_fallback(
-                st, kind, build, has_images, thinking, generation
+                st, kind, build, has_images, thinking, generation, max_tokens=max_tokens
             )
         except LLMError as exc:
             if exc.status in BAD_REQUEST:
@@ -628,7 +746,10 @@ class Engine:
             await self._on_error(st, kind, exc, now, batch, targets, conv, info)
             return
 
-        actions, stored = self._interpret(st, completion, kind, targets, allow_tools=kind == "mention")
+        # 主动聊天时也能上网找图（发图是群友的日常）；其他要查资料的动作只在被叫到时用。
+        # 主动聊天时找不了（冷却中、次数用完）就当它没说要找图，不为它多问一次模型
+        extra = ("image",) if kind == "proactive" and self._image_ready(st, view, now) else ()
+        actions, stored = self._interpret(st, completion, kind, targets, allow_tools=kind == "mention", extra_tools=extra)
         if st.generation != generation:
             log.info("频道 %s：这一轮进行中记忆被清空，丢弃结果", st.channel_id)
             self.store.set_outcome(row, "discarded")
@@ -639,27 +760,50 @@ class Engine:
         self.store.append_round(conv, user_content, stored, [(sid, m.message_id) for sid, m in numbered], now=now)
         self._consume(st, batch, now)
         self._mark_read(conv, planned)
+        self._mark_links(conv, opened)
         st.digest_seen.update(digest_marks)
         if listed is not None:
             st.listed = listed
 
         tools = [a for a in actions if a.kind in TOOL_KINDS]
         if tools:
-            # 模型要先看文件 / 上网搜 / 翻别的频道：办完再问它一次（第二步不能再用这些）
+            # 模型要先看文件 / 打开链接 / 上网搜 / 找图 / 翻别的频道 / 改人设：办完再问它一次（第二步不能再用这些，
+            # 只有第一步没改人设时，第二步还能改一次人设，比如看完角色卡再照着改）
             self.store.set_outcome(row, "+".join(sorted({a.kind for a in tools})))
-            st.last_decision = "被点名，先去查资料"
-            step = await self._tool_step(st, conv, tools, targets, view, info, system, generation, budget)
+            st.last_decision = "被点名，先去查资料" if kind == "mention" else "想发图，先去找"
+            allow_persona = any(m.from_owner for m in triggers) and any(a.kind == "read" for a in tools)
+            step = await self._tool_step(
+                st, conv, tools, targets, view, info, system, generation, budget, numbered, allow_persona, max_tokens, kind=kind
+            )
             if step is None:
                 return
             completion, cost, row, actions = step
+            late = [a for a in actions if a.kind == "persona"]
+            if late:
+                self.store.set_outcome(row, "persona")
+                step = await self._tool_step(
+                    st, conv, late, targets, view, info, system, generation, budget, numbered, False, max_tokens
+                )
+                if step is None:
+                    return
+                completion, cost, row, actions = step
 
-        decided_reply = any(a.kind == "reply" and a.messages for a in actions)
+        actions, dropped = self._check_stickers(st, actions, info)
+        actions, dropped_media = self._check_media(st, view, actions)
+        if (dropped or dropped_media) and kind == "mention" and targets and not any(
+            a.kind in ("reply", "react", *SEND_KINDS) for a in actions
+        ):
+            actions.append(Action("react", targets[-1], emoji="👍"))  # 想发的贴图、表情包发不了：被叫到了总得有点回应
+        # 发贴图、表情包、找到的图和说话一样算“开口了”：扣额度、计发言间隔
+        decided_reply = any((a.kind == "reply" and a.messages) or a.kind in SEND_KINDS for a in actions)
         decided_react = any(a.kind == "react" for a in actions)
         outcome = "reply" if decided_reply else ("react" if decided_react else "pass")
         if st.generation == generation:
             self._remember_interactions(st, numbered, actions, kind, targets, triggers)
+        reacted = False
+        failed_media: set[str] = set()
         try:
-            spoke, _ = await self._execute(st, actions, kind, targets, elapsed=self.clock() - started)
+            spoke, reacted, failed_media = await self._execute(st, actions, kind, targets, elapsed=self.clock() - started)
         finally:
             # 额度按模型的决定扣，不按发没发成功扣：没权限的频道也不会无限判断
             if decided_reply:
@@ -671,7 +815,16 @@ class Engine:
                     st.bucket.spend(self.ec.react_cost)
             self.store.set_outcome(row, outcome)
             st.last_decision = self._describe(kind, outcome, actions, completion)
-        if decided_reply and not spoke:
+        decided_text = any(a.kind == "reply" and a.messages for a in actions)
+        uploads = {"meme", "pick"}  # 要“附加文件”权限的那两种
+        self._note_media(st, bool(failed_media & uploads), any(a.kind in uploads for a in actions))
+        if failed_media and not spoke and not reacted and kind == "mention" and targets:
+            # 想发的图发不出去（多半是缺“附加文件”权限），这一轮也没说别的：被叫到了至少回个表情
+            mid = st.msg_by_sid.get(targets[-1])
+            if mid is not None:
+                await self._safe_react(st, mid, "👍")
+        if decided_text and not spoke:
+            # 只算发文字失败：只是图发不出去时，文字照样能发，主动发言不用停
             st.send_failures += 1
             if st.send_failures >= SEND_FAIL_LIMIT:
                 st.error_until = self.clock() + SEND_FAIL_BACKOFF
@@ -712,21 +865,30 @@ class Engine:
         has_images: bool,
         thinking: str,
         generation: int,
+        *,
+        max_tokens: int | None = None,
     ) -> tuple[Any, Completion, float, int]:
         """调用模型；带图的请求被拒（400 之类）时去掉图片再试一次。返回 (实际发出的 user 内容, 结果, 花费, 用量记录)。"""
         content, messages = build(True)
         try:
-            completion, cost, row = await self._ask(st, kind, messages, thinking, generation)
+            completion, cost, row = await self._ask(st, kind, messages, thinking, generation, max_tokens)
         except LLMError as exc:
             if exc.status not in BAD_REQUEST or not has_images or st.generation != generation:
                 raise
             log.warning("频道 %s：带图片的请求被拒（%s），去掉图片再试一次", st.channel_id, exc)
             content, messages = build(False)
-            completion, cost, row = await self._ask(st, kind, messages, thinking, generation)
+            completion, cost, row = await self._ask(st, kind, messages, thinking, generation, max_tokens)
         return content, completion, cost, row
 
     def _interpret(
-        self, st: ChannelState, completion: Completion, kind: str, targets: list[int], *, allow_tools: bool
+        self,
+        st: ChannelState,
+        completion: Completion,
+        kind: str,
+        targets: list[int],
+        *,
+        allow_tools: bool,
+        extra_tools: tuple[str, ...] = (),
     ) -> tuple[list[Action], str]:
         """解析模型输出，返回 (动作, 写进历史的内容)。"""
         actions, ok = parse_actions(completion.content)
@@ -739,13 +901,20 @@ class Engine:
         tools = [a for a in actions if a.kind in TOOL_KINDS]
         if not tools:
             return actions, completion.content
-        if allow_tools:
+        if not allow_tools:
+            tools = [a for a in tools if a.kind in extra_tools]
+        if tools:
             # 要查资料时这一次只算这些动作；历史里也只记它们，和实际做的事一致
             picked = (
                 [a for a in tools if a.kind == "read"][:MAX_READ_TARGETS]
                 + [a for a in tools if a.kind == "search"][: max(1, self.ec.max_searches_per_round)]
                 + [a for a in tools if a.kind == "recall"][:MAX_RECALLS]
+                + [a for a in tools if a.kind == "image"][:1]
             )
+            if not picked:
+                # 改人设要单独来：和看文件放在一起时先不改（看完文件那一步还能改），和搜索、翻记录一起时不改，
+                # 免得照着没看过的内容、或者网页、别的频道里别人写的东西去改
+                picked = [a for a in tools if a.kind == "persona"][:1]
             return picked, dump_actions(picked)
         actions = [a for a in actions if a.kind not in TOOL_KINDS]  # 没被叫到、或者已经查过一次了
         return actions, dump_actions(actions)
@@ -761,62 +930,145 @@ class Engine:
         system: str,
         generation: int,
         budget: _Budget,
+        numbered: list[tuple[int, IncomingMessage]],
+        allow_persona: bool = False,
+        max_tokens: int | None = None,
+        *,
+        kind: str = "mention",
     ) -> tuple[Completion, float, int, list[Action]] | None:
         now = self.clock()
         reads = [a for a in tools if a.kind == "read"]
-        plan, file_notes = self._plan_reads(st, view, reads)
+        plan, link_plan, file_notes, wanted = self._plan_reads(st, view, reads)
         sections: list[str] = []
-        async with self.transport.typing(st.channel_id):
+        gallery: Gallery | None = None
+
+        async def work() -> tuple[list[tuple[int, DocBlock, _Planned, FileText]], list[tuple[_LinkPlan, DocBlock, FileText]]]:
+            nonlocal gallery
             results = await self._read_planned(st, plan, budget)
+            opened = await self._read_links(st, link_plan, budget, now)
             for action in tools:
                 if action.kind == "search":
                     sections.append(await self._search_section(st, view, action, now))
                 elif action.kind == "recall":
                     sections.append(self._recall_section(st, view, action, info))
+                elif action.kind == "persona":
+                    sections.append(await self._persona_section(st, action, numbered, targets))
+                elif action.kind == "image":
+                    note, found = await self._image_section(st, view, action, now)
+                    if found:
+                        gallery = Gallery(action.query or "", [(p.description, p.uri) for p in found])
+                    elif note:
+                        sections.append(note)
+            return results, opened
+
+        if kind == "mention":
+            async with self.transport.typing(st.channel_id):
+                results, opened = await work()
+        else:
+            results, opened = await work()  # 主动聊天时找图：还没决定发不发，先不显示“正在输入”
         if st.generation != generation:
             return None  # 查资料的时候记忆被清空了
-        blocks = [block for _, block, _, _ in results]
+        blocks = [block for _, block, _, _ in results] + [block for _, block, _ in opened]
+        if not reads:
+            header = None
+        elif wanted == {"链接"}:
+            header = "（你要打开的链接：）"
+        elif wanted == {"文件", "链接"}:
+            header = "（你要看的文件和链接：）"
+        else:
+            header = "（你要看的文件：）"
 
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
             used = blocks if with_images else [_block_without_images(b) for b in blocks]
-            content = render_tool_result(used, file_notes, sections, [], targets=targets, files=bool(reads))
+            notes: list[str] = []
+            if gallery is not None and not with_images:
+                st.gallery = []  # 候选图没能给它看：这一轮就不能发了
+                notes.append("（找到的图没能给你看，这次不发图。）")
+            content = render_tool_result(
+                used,
+                file_notes,
+                sections,
+                notes,
+                targets=targets,
+                files=bool(reads),
+                header=header,
+                gallery=gallery if with_images else None,
+                kind=kind,
+            )
             return content, self._messages(system, conv, content)
 
-        has_images = any(b.result.images for b in blocks)
+        has_images = any(b.result.images for b in blocks) or gallery is not None
+        thinking = view.mention_thinking if kind == "mention" else view.proactive_thinking
         try:
             content, completion, cost, row = await self._ask_with_fallback(
-                st, "mention", build, has_images, view.mention_thinking, generation
+                st, kind, build, has_images, thinking, generation, max_tokens=max_tokens
             )
         except LLMError as exc:
-            await self._on_error(st, "mention", exc, now, [], targets, conv, info)
+            await self._on_error(st, kind, exc, now, [], targets, conv, info)
             return None
-        actions, stored = self._interpret(st, completion, "mention", targets, allow_tools=False)
+        extra = ("persona",) if allow_persona else ()
+        actions, stored = self._interpret(st, completion, kind, targets, allow_tools=False, extra_tools=extra)
         if st.generation != generation:
             self.store.set_outcome(row, "discarded")
             return None
         self.store.append_round(conv, content, stored, [], now=now)
         self._mark_read(conv, [(item, result) for _, _, item, result in results])
+        self._mark_links(conv, opened)
         return completion, cost, row, actions
 
-    def _plan_reads(self, st: ChannelState, view: View, reads: list[Action]) -> tuple[list[_Planned], list[str]]:
+    def _plan_reads(
+        self, st: ChannelState, view: View, reads: list[Action]
+    ) -> tuple[list[_Planned], list[_LinkPlan], list[str], set[str]]:
+        """read 动作要看的文件和链接。返回 (要读的文件, 要打开的链接, 给模型的说明, 要看的是文件还是链接)。"""
         plan: list[_Planned] = []
+        link_plan: list[_LinkPlan] = []
         notes: list[str] = []
+        wanted: set[str] = set()
+        files_off_noted = links_off_noted = False
+        mode = self._links_mode(view)
         for action in reads:
-            if not view.files:
-                notes.append("（读文件的功能被关掉了，看不了文件）")
-                break
             mid = st.msg_by_sid.get(action.to) if action.to is not None else None
-            entry = st.recent_files.get(mid) if mid is not None else None
-            if mid is None or entry is None or not entry.message.files:
-                notes.append(f"（#{action.to} 里没有能读的文件，或者文件太久已经拿不到了）")
+            fentry = st.recent_files.get(mid) if mid is not None else None
+            lentry = st.recent_links.get(mid) if mid is not None else None
+            has_files = fentry is not None and bool(fentry.message.files)
+            has_links = lentry is not None and bool(lentry.message.links)
+            if not has_files and not has_links:
+                notes.append(f"（#{action.to} 里没有能读的文件或链接，或者太久已经拿不到了）")
                 continue
-            for att in entry.message.files:
-                if att_key(att) in entry.read_turns:
-                    name = neutralize(one_line(att.filename, 60))
-                    notes.append(f"（#{action.to} 的文件「{name}」前面已经给你看过了，往上翻就有）")
+            if has_files:
+                wanted.add("文件")
+            if has_links:
+                wanted.add("链接")
+            if has_files and not view.files:
+                if not files_off_noted:
+                    notes.append("（读文件的功能被关掉了，看不了文件）")
+                    files_off_noted = True
+            elif has_files:
+                assert fentry is not None
+                for att in fentry.message.files:
+                    if att_key(att) in fentry.read_turns:
+                        name = neutralize(one_line(att.filename, 60))
+                        notes.append(f"（#{action.to} 的文件「{name}」前面已经给你看过了，往上翻就有）")
+                    else:
+                        plan.append(_Planned(mid, mid, att, self._file_chars(), entry=fentry))
+            if not has_links:
+                continue
+            assert lentry is not None
+            if mode == "off":
+                if not links_off_noted:
+                    notes.append("（打开链接的功能被关掉了，链接只看得到 Discord 的预览）")
+                    links_off_noted = True
+                continue
+            assert self.link_reader is not None
+            for link in lentry.message.links:
+                name = neutralize(one_line(lentry.titles.get(link.url) or link.title or site_name(link.url), 40))
+                if link.url in lentry.read_turns:
+                    notes.append(f"（#{action.to} 的链接「{name}」前面已经给你看过了，往上翻就有）")
+                elif not self.link_reader.readable(link.url):
+                    notes.append(f"（#{action.to} 的链接「{name}」打不开：这里只能打开 X 的推文，别的网站只看得到 Discord 的预览）")
                 else:
-                    plan.append(_Planned(mid, mid, att, self._file_chars(), entry=entry))
-        return plan, notes
+                    link_plan.append(_LinkPlan(mid, lentry, link))
+        return plan, link_plan, notes, wanted
 
     # ------------------------------------------------------------------ 上网搜
 
@@ -865,6 +1117,317 @@ class Engine:
         cost = self.pricing.cost(usage, now)
         self.ledger.add(st.guild_id, cost, now)
         self.store.update_usage(row, outcome=outcome, hit=usage.hit, miss=usage.miss, output=usage.output, cost=cost)
+
+    # ------------------------------------------------------------------ 链接
+
+    def _links_mode(self, view: View) -> str:
+        """打开链接的能力：all（推文和网页）/ x（只有推文，没配置 Tavily）/ off。"""
+        if not view.links or self.link_reader is None:
+            return "off"
+        return self.link_reader.mode()
+
+    async def _round_content(
+        self,
+        st: ChannelState,
+        view: View,
+        kind: str,
+        shown: list[IncomingMessage],
+        triggers: list[IncomingMessage],
+        budget: _Budget,
+        now: float,
+    ) -> tuple[dict[int, list[DocBlock]], list[tuple[_Planned, FileText]], list[tuple[_LinkPlan, DocBlock, FileText]]]:
+        """这一轮直接附上的文件和链接内容。被叫到时显示“正在输入”（读文件、打开链接要几秒）。"""
+
+        async def gather() -> tuple[
+            dict[int, list[DocBlock]], list[tuple[_Planned, FileText]], list[tuple[_LinkPlan, DocBlock, FileText]]
+        ]:
+            docs: dict[int, list[DocBlock]] = {}
+            planned: list[tuple[_Planned, FileText]] = []
+            if view.files:
+                docs, planned = await self._round_docs(st, shown, triggers, budget)
+            opened: list[tuple[_LinkPlan, DocBlock, FileText]] = []
+            if kind == "mention":
+                opened = await self._round_links(st, view, shown, triggers, budget, now)
+                for item, block, _ in opened:
+                    docs.setdefault(item.anchor, []).append(block)
+            return docs, planned, opened
+
+        if kind == "mention":
+            async with self.transport.typing(st.channel_id):
+                return await gather()
+        return await gather()
+
+    def _auto_links(
+        self, st: ChannelState, shown: list[IncomingMessage], triggers: list[IncomingMessage]
+    ) -> list[tuple[LinkEntry, int]]:
+        """不用模型开口就直接打开的链接：叫它的那条消息里的、叫它时回复的那条里的、同一个人刚刚（两分钟内）发的。"""
+        shown_ids = {m.message_id for m in shown}
+        picked: dict[int, tuple[LinkEntry, int]] = {}
+        for t in triggers:
+            candidates = [st.recent_links.get(t.message_id)]
+            if t.reply_to_id is not None:
+                candidates.append(st.recent_links.get(t.reply_to_id))
+            for entry in reversed(list(st.recent_links.values())):
+                m = entry.message
+                if m.author_id == t.author_id and 0 <= t.received_at - m.received_at <= AUTO_READ_WINDOW:
+                    candidates.append(entry)
+            for entry in candidates:
+                if entry is None or not entry.unread():
+                    continue
+                mid = entry.message.message_id
+                if mid not in picked:
+                    picked[mid] = (entry, mid if mid in shown_ids else t.message_id)
+        return list(picked.values())
+
+    async def _round_links(
+        self,
+        st: ChannelState,
+        view: View,
+        shown: list[IncomingMessage],
+        triggers: list[IncomingMessage],
+        budget: _Budget,
+        now: float,
+    ) -> list[tuple[_LinkPlan, DocBlock, FileText]]:
+        if not triggers or self._links_mode(view) == "off":
+            return []
+        assert self.link_reader is not None
+        plan = [
+            _LinkPlan(anchor, entry, link)
+            for entry, anchor in self._auto_links(st, shown, triggers)
+            for link in entry.unread()
+            if self.link_reader.readable(link.url)  # 没配置 Tavily 时，一般网页就只看预览，不用提
+        ]
+        return await self._read_links(st, plan, budget, now)
+
+    async def _read_links(
+        self, st: ChannelState, plan: list[_LinkPlan], budget: _Budget, now: float
+    ) -> list[tuple[_LinkPlan, DocBlock, FileText]]:
+        """打开这些链接（同时打开，最多几秒）。名额、字数、每日次数不够的，告诉模型没打开。"""
+        if not plan:
+            return []
+        assert self.link_reader is not None
+        day = self.ledger.day(now)
+        limit = max(0, int(self.ec.daily_link_limit))
+        used = self.store.count_usage(day, guild_id=st.guild_id, kind="link")
+        slots: list[tuple[_LinkPlan, FileText | None, int, int]] = []  # (链接, 没打开的原因, 记账的行, 最多读多少字)
+        for item in plan:
+            if budget.links <= 0:
+                why = f"一次最多打开 {self.ec.max_links_per_round} 个链接，这个没打开"
+                slots.append((item, FileText(error=why, transient=True), 0, 0))
+            elif budget.chars < 500:
+                slots.append((item, FileText(error="这一轮读的内容已经太多了，这个没打开", transient=True), 0, 0))
+            elif used >= limit:
+                why = f"今天这个服务器打开链接的次数用完了（{limit} 个）"
+                slots.append((item, FileText(error=why, transient=True), 0, 0))
+            else:
+                cap = max(1, min(self.ec.link_max_chars, budget.chars))
+                budget.chars -= cap
+                budget.links -= 1
+                used += 1
+                # 先记一笔占住名额，再去打开：别的频道同时在打开时，也不会一起超过上限
+                row = self.store.record_usage(
+                    ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="link", outcome="pending"
+                )
+                slots.append((item, None, row, cap))
+
+        async def open_one(item: _LinkPlan, cap: int) -> LinkResult:
+            assert self.link_reader is not None
+            side = self.ec.image_max_side if budget.allow_images and not item.link.preview_image else None
+            return await self.link_reader.read(item.link.url, max_chars=cap, image_side=side)
+
+        jobs = [(i, item, cap) for i, (item, skipped, _, cap) in enumerate(slots) if skipped is None]
+        try:
+            fetched = await asyncio.gather(*(open_one(item, cap) for _, item, cap in jobs), return_exceptions=True)
+        except asyncio.CancelledError:
+            for item, skipped, row, _ in slots:
+                if skipped is None:
+                    self.store.update_usage(row, outcome="error")  # 关机时被取消：别留下一笔一直“进行中”的记录
+            raise
+        results: dict[int, LinkResult] = {}
+        for (i, item, _), got in zip(jobs, fetched):
+            if isinstance(got, BaseException):
+                if not isinstance(got, Exception):
+                    raise got
+                log.warning("频道 %s：打开链接 %s 出错：%r", st.channel_id, site_name(item.link.url), got)
+                got = LinkResult("", FileText(error="打不开（出错了）", transient=True))
+            results[i] = got
+
+        out: list[tuple[_LinkPlan, DocBlock, FileText]] = []
+        for i, (item, skipped, row, cap) in enumerate(slots):
+            title = item.link.title or ""
+            if skipped is not None:
+                result = skipped
+            else:
+                got = results[i]
+                result = got.result
+                title = got.title or title
+                self.store.update_usage(row, outcome="error" if result.error else "link")
+                budget.chars += cap - len(result.text)  # 先按上限占的字数，没用完的还回去
+                result, trimmed = self._fit_images(result, budget, link=True)
+                # 网页本身比单个链接的上限还长、只能读前面的，不算没读完；是这一轮的额度不够才算
+                item.partial = (result.truncated and cap < self.ec.link_max_chars) or trimmed
+                log.info(
+                    "频道 %s：打开链接 %s%s",
+                    st.channel_id,
+                    site_name(item.link.url),
+                    f"失败：{result.error}" if result.error else f"（{len(result.text)} 字）",
+                )
+            name = title or item.entry.titles.get(item.link.url) or site_name(item.link.url) or "链接"
+            if not result.error:
+                item.entry.titles[item.link.url] = name
+            block = DocBlock(self._label(st, item.entry.message.message_id), name, result, source="链接")
+            out.append((item, block, result))
+        return out
+
+    def _mark_links(self, conv: Conversation, opened: list[tuple[_LinkPlan, DocBlock, FileText]]) -> None:
+        """打开过的链接记成“内容在对话里了”（压缩记忆删掉那条记录时再取消）；确定打不开的以后不再自动打开。"""
+        if not conv.turns or not opened:
+            return
+        turn_id = conv.turns[-2].id if len(conv.turns) >= 2 else conv.turns[-1].id
+        for item, _, result in opened:
+            url = item.link.url
+            if item.partial:
+                continue  # 这次只读了一部分：下次被要求时再完整打开
+            if result.error:
+                if not result.transient:
+                    item.entry.failed.add(url)
+            else:
+                item.entry.read_turns[url] = turn_id
+                item.entry.failed.discard(url)
+
+    # ------------------------------------------------------------------ 发图
+
+    def _memes_on(self, view: View) -> bool:
+        return bool(view.images) and self.memes is not None
+
+    def _can_find_images(self, view: View) -> bool:
+        return bool(view.images) and self.pictures is not None and int(view.daily_image_limit) > 0
+
+    def _image_ready(self, st: ChannelState, view: View, now: float) -> bool:
+        """现在就能找图：能找、这个频道没在冷却、今天还有次数。"""
+        if not self._can_find_images(view) or now < st.media_blocked_until:
+            return False
+        if st.last_image_at and now - st.last_image_at < self.ec.image_cooldown_seconds:
+            return False
+        return self.store.count_usage(self.ledger.day(now), guild_id=st.guild_id, kind="image") < int(view.daily_image_limit)
+
+    async def _image_section(self, st: ChannelState, view: View, action: Action, now: float) -> tuple[str | None, list[Picture]]:
+        """上网找图。找到了返回 (None, 候选图)，候选图也记在 st.gallery 里（pick 从这里挑）；没找成返回 (说明, [])。"""
+        query = action.query or ""
+        shown = neutralize(one_line(query, 60))
+        if not self._can_find_images(view):
+            return IMAGE_OFF.format(query=shown), []
+        if now < st.media_blocked_until:  # 找到了也发不出去：别白花额度
+            return IMAGE_BLOCKED.format(query=shown), []
+        limit = int(view.daily_image_limit)
+        day = self.ledger.day(now)
+        if self.store.count_usage(day, guild_id=st.guild_id, kind="image") >= limit:
+            return IMAGE_LIMIT.format(query=shown, limit=limit), []
+        if st.last_image_at and now - st.last_image_at < self.ec.image_cooldown_seconds:
+            return IMAGE_COOLDOWN.format(query=shown), []
+        if self._over_budget(st, view, now)[0]:
+            return IMAGE_BUDGET.format(query=shown), []
+        assert self.pictures is not None
+        st.last_image_at = now
+        # 先记一笔占住名额，再去找
+        row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="image", outcome="pending")
+        try:
+            found = await self.pictures.find(query)
+        except asyncio.CancelledError:
+            self.store.update_usage(row, outcome="error")
+            raise
+        except Exception as exc:  # TavilyError，以及意料之外的错误
+            log.warning("频道 %s：找图「%s」失败：%s", st.channel_id, one_line(query, 60), exc)
+            self.store.update_usage(row, outcome="error")
+            return IMAGE_FAILED.format(query=shown), []
+        self.store.update_usage(row, outcome="image")
+        found = found[: max(1, self.ec.image_candidates)]
+        if not found:
+            return IMAGE_NONE.format(query=shown), []
+        st.gallery = list(found)
+        log.info("频道 %s：找图「%s」，给它看 %d 张候选", st.channel_id, one_line(query, 60), len(found))
+        return None, st.gallery
+
+    def _find_meme(self, st: ChannelState, view: View, wanted: str) -> Any:
+        """按名字找表情包：先按库里的名字比，再按提示词里列出来的写法（中和过标记符号、截短过）比。"""
+        if not self._memes_on(view) or not wanted:
+            return None
+        assert self.memes is not None
+        found = self.memes.find(st.guild_id, wanted)
+        if found is not None:
+            return found
+        labels = {_sticker_label(name): name for name in self.memes.names(st.guild_id)}
+        real = labels.get(wanted.strip())
+        if real is None:
+            folded = {label.casefold(): name for label, name in labels.items()}
+            real = folded.get(wanted.strip().casefold())
+        return self.memes.find(st.guild_id, real) if real is not None else None
+
+    def _note_media(self, st: ChannelState, failed: bool, tried: bool) -> None:
+        """图连着两轮发不出去（多半是缺“附加文件”权限）：这个频道 30 分钟内先不发图，免得每轮都白费。"""
+        if not tried:
+            return
+        if not failed:
+            st.media_failures = 0
+            return
+        st.media_failures += 1
+        if st.media_failures >= 2:
+            st.media_failures = 0
+            st.media_blocked_until = self.clock() + SEND_FAIL_BACKOFF
+            log.warning("频道 %s：连着发不出图（缺“附加文件”权限？），30 分钟内先不发图", st.channel_id)
+
+    def _check_media(self, st: ChannelState, view: View, actions: list[Action]) -> tuple[list[Action], bool]:
+        """表情包要库里真有；pick 要这一轮真的找过图、编号也对得上。对不上的跳过。返回 (动作, 有没有跳过)。"""
+        if not any(a.kind in ("meme", "pick") for a in actions):
+            return actions, False
+        if self.clock() < st.media_blocked_until:
+            log.info("频道 %s：最近发不出图，这次的图先不发", st.channel_id)
+            out = [a for a in actions if a.kind not in ("meme", "pick")]
+            return out, True
+        out: list[Action] = []
+        for a in actions:
+            if a.kind == "meme":
+                meme = self._find_meme(st, view, a.name or "")
+                if meme is None:
+                    log.info("频道 %s：表情包库里没有「%s」，跳过", st.channel_id, one_line(a.name or "", 40))
+                    continue
+                a = replace(a, name=meme.name)
+            elif a.kind == "pick":
+                if not st.gallery or a.image is None or not 1 <= a.image <= len(st.gallery):
+                    log.info("频道 %s：要发的图 %s 不在这一轮找到的图里，跳过", st.channel_id, a.image)
+                    continue
+            out.append(a)
+        return out, len(out) < len(actions)
+
+    async def _send_media(self, st: ChannelState, action: Action, reply_to: int | None, ping: bool) -> int | None:
+        """发贴图 / 表情包 / 找到的图。发不出去返回 None。"""
+        try:
+            if action.kind == "sticker":
+                return await self.transport.send_sticker(st.channel_id, action.name or "", reply_to=reply_to, ping=ping)
+            if action.kind == "meme":
+                meme = self.memes.find(st.guild_id, action.name or "") if self.memes is not None else None
+                # 读文件放到线程里：NAS 的硬盘没缓存时，读一张几 MB 的动图也要一会儿
+                loaded = await asyncio.to_thread(self.memes.load, meme) if meme is not None and self.memes is not None else None
+                if loaded is None:
+                    log.info("频道 %s：表情包「%s」读不出来（可能刚被删了）", st.channel_id, action.name)
+                    return None
+                data, filename = loaded
+                return await self.transport.send_file(st.channel_id, data, filename, reply_to=reply_to, ping=ping)
+            if action.kind == "pick" and action.image is not None and 1 <= action.image <= len(st.gallery):
+                picture = st.gallery[action.image - 1]
+                # 透明的铺白底（和它看到的一样）、太大的缩小；放到线程里做，大图要一两秒
+                ready = await asyncio.to_thread(upload_ready, picture.data, self.ec.image_max_bytes)
+                if ready is None:
+                    log.info("频道 %s：找到的图%d 没法发（太大或者坏了）", st.channel_id, action.image)
+                    return None
+                data, mime = ready
+                sent = await self.transport.send_file(st.channel_id, data, filename_for(mime), reply_to=reply_to, ping=ping)
+                if sent is not None:
+                    log.info("频道 %s：发了找到的图%d（%s）", st.channel_id, action.image, picture.host)
+                return sent
+        except Exception:
+            log.exception("频道 %s：发图出错", st.channel_id)
+        return None
 
     # ------------------------------------------------------------------ 跨频道记忆
 
@@ -931,7 +1494,12 @@ class Engine:
         return None
 
     def _system_prompt(self, st: ChannelState, view: View, conv: Conversation, info: ChannelInfo) -> str:
-        # 名单不放这里：它会变（新频道、帖子归档），放在 system prompt 里每变一次整段缓存都失效
+        # 频道名单不放这里：它会变（新频道、帖子归档），放在 system prompt 里每变一次整段缓存都失效。
+        # 表情、贴图很少变，放这里（名单已经排好序，不变就不影响缓存）
+        emojis = info.emojis[: max(0, self.ec.emoji_list_limit)]
+        stickers = [_sticker_label(n) for n in info.stickers[: max(0, self.ec.sticker_list_limit)]]
+        meme_names = self.memes.names(st.guild_id) if self._memes_on(view) and self.memes is not None else []
+        memes = [_sticker_label(n) for n in meme_names[: max(0, self.ec.meme_list_limit)]]
         return build_system_prompt(
             guild=neutralize(one_line(info.guild_name, 60)),
             channel=neutralize(one_line(info.channel_name, 60)),
@@ -940,7 +1508,150 @@ class Engine:
             summary=conv.summary,
             search=self._can_search(view),
             share=bool(view.share_memory),
+            emojis=emojis,
+            stickers=stickers,
+            more_emojis=len(info.emojis) - len(emojis),
+            more_stickers=len(info.stickers) - len(stickers),
+            memes=memes,
+            more_memes=len(meme_names) - len(memes),
+            images=self._can_find_images(view),
+            links=self._links_mode(view),
         )
+
+    def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:
+        """贴图名对上服务器里的贴图才发（换成真实名字）；对不上的直接跳过，不当成“发不出消息”。返回 (动作, 有没有跳过)。"""
+        if not any(a.kind == "sticker" for a in actions):
+            return actions, False
+        names: dict[str, str] = {}
+        for real in info.stickers:
+            for key in (real, _sticker_label(real), real.casefold(), _sticker_label(real).casefold()):
+                names.setdefault(key, real)
+        out: list[Action] = []
+        for a in actions:
+            if a.kind == "sticker":
+                wanted = (a.name or "").strip()
+                real = names.get(wanted) or names.get(wanted.casefold())
+                if real is None:
+                    log.info("频道 %s：没有叫「%s」的贴图，跳过", st.channel_id, one_line(wanted, 40))
+                    continue
+                a = replace(a, name=real)
+            out.append(a)
+        return out, len(out) < len(actions)
+
+    def _persona_target(self, st: ChannelState, scope: str | None) -> tuple[str, int, str] | str:
+        """改哪一级的人设：(范围, id, 给人看的说法)；改不了时返回原因（给模型看的提示）。
+
+        不写 scope：改这里现在用的那份（模型看到、照着改的就是它）。"channel"：只改这个频道。
+        "server"：全服务器；但这里的人设来自更具体的一级（频道、所在频道、类别）时不改，免得把那一份抄到全服务器去。
+        """
+        ids = {"guild_id": st.guild_id, "channel_id": st.channel_id, "parent_id": st.parent_id, "category_id": st.category_id}
+        origin = self.settings.origin("persona", **ids)
+        if scope == "channel":
+            return "channel", st.channel_id, "这个频道"
+        if origin is None or origin[0] in ("guild", "global"):
+            return "guild", st.guild_id, "全服务器"
+        where = {
+            ("channel", st.channel_id): "这个频道",
+            ("channel", st.parent_id): "所在频道",
+            ("category", st.category_id): "所在类别",
+        }.get(origin, "这个频道")
+        if scope == "server":
+            return PERSONA_NOT_HERE.format(origin=where)
+        return origin[0], origin[1], where
+
+    def _inherited_persona(self, st: ChannelState, scope: str, scope_id: int) -> str:
+        """这一级不单独设置时会用的人设（和 /ds 人设 的“上一级”一致）。"""
+        if scope == "guild":
+            value = self.settings.get("persona")
+        elif scope == "category":
+            value = self.settings.get("persona", guild_id=st.guild_id)
+        elif scope_id == st.channel_id:  # 这个频道：帖子所在频道 → 类别 → 服务器 → 全局
+            value = self.settings.get("persona", guild_id=st.guild_id, channel_id=st.parent_id, category_id=st.category_id)
+        else:  # 帖子所在的频道：类别 → 服务器 → 全局
+            value = self.settings.get("persona", guild_id=st.guild_id, category_id=st.category_id)
+        return clean_persona(value or "") or DEFAULT_PERSONA
+
+    async def _persona_section(
+        self, st: ChannelState, action: Action, numbered: list[tuple[int, IncomingMessage]], targets: list[int]
+    ) -> str:
+        """改人设：只认这一轮里 dsowner 本人叫它的那条消息。改完（或没改成）的结果告诉模型，它再回话。"""
+        by_sid = dict(numbered)
+        to = action.to
+        if to is None:
+            # 没写是哪条：这一轮 dsowner 只叫了它一次，就是那条
+            owners = [sid for sid in targets if sid in by_sid and self._is_owner(by_sid[sid]) and by_sid[sid].addressed]
+            if len(owners) != 1:
+                return PERSONA_NO_ASKER
+            to = owners[0]
+        asker = by_sid.get(to)
+        if asker is None or to not in targets or not self._is_owner(asker) or not asker.addressed:
+            log.warning("频道 %s：有人想让它改人设，但 #%s 不是 dsowner 这一轮叫它的消息，没改", st.channel_id, to)
+            return PERSONA_NOT_OWNER.format(to=to)
+
+        if action.undo:
+            chain = [("channel", st.channel_id), ("guild", st.guild_id)]
+            if st.parent_id is not None:
+                chain.append(("channel", st.parent_id))
+            if st.category_id is not None:
+                chain.append(("category", st.category_id))
+            last = self.store.last_persona_change(chain)
+            if last is None:
+                return PERSONA_NO_HISTORY
+            self.store.mark_persona_reverted(last["id"])  # 撤过的不再撤：再说一次“改回去”就再往前撤一次
+            scope, scope_id = last["scope"], last["scope_id"]
+            where = {"guild": "全服务器", "category": "所在类别"}.get(
+                scope, "这个频道" if scope_id == st.channel_id else "所在频道"
+            )
+            restored = last["old"]
+            note = PERSONA_UNDONE.format(to=to, where=where)
+        else:
+            if action.text is None:
+                return PERSONA_NO_TEXT
+            text = clean_persona(action.text)
+            if len(text) > PERSONA_MAX_CHARS:
+                return PERSONA_TOO_LONG.format(limit=PERSONA_MAX_CHARS)
+            target = self._persona_target(st, action.scope)
+            if isinstance(target, str):
+                return target
+            scope, scope_id, where = target
+            if not text or text == self._inherited_persona(st, scope, scope_id):
+                # 和上一级一样就不单独存，以后上一级改了这里也会跟着变
+                restored = None
+                what = "恢复了默认人设（全服务器）" if scope == "guild" else f"让{where}改回沿用上一级的人设"
+                note = PERSONA_RESET.format(to=to, what=what)
+            else:
+                restored = text
+                note = PERSONA_DONE.format(to=to, where=where)
+
+        old = self.settings.overrides(scope, scope_id).get("persona")
+        if restored == old and not action.undo:
+            return PERSONA_UNCHANGED  # 本来就是这样：不写、不记、不打记号
+        if restored is None:
+            self.settings.unset(scope, scope_id, "persona")
+        else:
+            self.settings.set(scope, scope_id, "persona", restored)
+        # 每次改动都记进数据库（./data 里，重建容器也还在），说“改回去”就能撤销
+        self.store.add_persona_change(
+            ts=self.clock(),
+            scope=scope,
+            scope_id=scope_id,
+            old=old,
+            new=restored,
+            by_user=asker.author_id,
+            via="undo" if action.undo else "chat",
+            request=one_line(asker.text, 300),
+        )
+        log.info(
+            "频道 %s：dsowner 在聊天里%s人设（%s）。要求：%s\n  原来：%s\n  现在：%s",
+            st.channel_id,
+            "撤销了上一次修改的" if action.undo else "改了",
+            where,
+            one_line(asker.text, 200),
+            old if old else "（没单独设置，沿用上一级）",
+            restored if restored else "（不单独设置，沿用上一级）",
+        )
+        await self._safe_react(st, asker.message_id, "📝")  # 让 dsowner 一眼看到人设真的改了
+        return note
 
     def _recall_section(self, st: ChannelState, view: View, action: Action, info: ChannelInfo) -> str:
         shown = neutralize(one_line(action.channel or "", 40))
@@ -1102,17 +1813,18 @@ class Engine:
             return FileText(error=f"文件太大（{_size(att.size)}），最多读 {_size(limit)}")
         return None
 
-    def _fit_images(self, result: FileText, budget: _Budget) -> tuple[FileText, bool]:
-        """返回 (结果, 是不是因为这一轮图太多少附了页面图)。"""
+    def _fit_images(self, result: FileText, budget: _Budget, *, link: bool = False) -> tuple[FileText, bool]:
+        """返回 (结果, 是不是因为这一轮图太多少附了页面图)。link：打开的链接里的图（说法不一样）。"""
         if not result.images:
             return result, False
+        what, unit = ("图", "张") if link else ("页面图", "页")
         if not budget.allow_images:
-            return replace(result, images=[], detail=_add_detail(result.detail, "看图功能关着，没附页面图")), False
+            return replace(result, images=[], detail=_add_detail(result.detail, f"看图功能关着，没附{what}")), False
         keep = result.images[: max(0, budget.images)]
         budget.images -= len(keep)
         if len(keep) == len(result.images):
             return result, False
-        note = f"这一轮图太多，只附了 {len(keep)} 页" if keep else "这一轮图太多，页面图没附上"
+        note = f"这一轮图太多，只附了 {len(keep)} {unit}" if keep else f"这一轮图太多，{what}没附上"
         return replace(result, images=keep, detail=_add_detail(result.detail, note)), True
 
     async def _read_planned(
@@ -1184,25 +1896,32 @@ class Engine:
         st.error_until = 0.0
 
     async def _ask(
-        self, st: ChannelState, kind: str, messages: list[dict[str, Any]], thinking: str, generation: int
+        self,
+        st: ChannelState,
+        kind: str,
+        messages: list[dict[str, Any]],
+        thinking: str,
+        generation: int,
+        max_tokens: int | None = None,
     ) -> tuple[Completion, float, int]:
         """调用模型；被点名时显示“正在输入”，空回复（或推理把 token 用光）时关掉思考重试一次。"""
         if kind != "mention":
-            return await self._call(st, kind, messages, thinking)
+            return await self._call(st, kind, messages, thinking, max_tokens)
         async with self.transport.typing(st.channel_id):
-            completion, cost, row = await self._call(st, kind, messages, thinking)
+            completion, cost, row = await self._call(st, kind, messages, thinking, max_tokens)
             empty = not completion.content.strip() or (
                 completion.finish_reason == "length" and not parse_actions(completion.content)[1]
             )
             if empty and st.generation == generation:  # 记忆刚被清空就别再花一次钱了
                 self.store.set_outcome(row, "empty")
-                completion, cost, row = await self._call(st, kind, messages, "off")
+                completion, cost, row = await self._call(st, kind, messages, "off", max_tokens)
         return completion, cost, row
 
     async def _call(
-        self, st: ChannelState, kind: str, messages: list[dict[str, Any]], thinking: str
+        self, st: ChannelState, kind: str, messages: list[dict[str, Any]], thinking: str, max_tokens: int | None = None
     ) -> tuple[Completion, float, int]:
-        max_tokens = self.ec.max_output_tokens if thinking == "off" else self.ec.max_thinking_tokens
+        if max_tokens is None:
+            max_tokens = self.ec.max_output_tokens if thinking == "off" else self.ec.max_thinking_tokens
         completion = await self.llm.complete(
             messages, thinking=thinking, json_mode=True, max_tokens=max_tokens, user_id=f"guild-{st.guild_id}"
         )
@@ -1280,9 +1999,12 @@ class Engine:
 
     async def _execute(
         self, st: ChannelState, actions: list[Action], kind: str, targets: list[int], elapsed: float
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, set[str]]:
+        """返回 (发出去了什么, 加了表情, 没发出去的图是哪几种：sticker / meme / pick)。"""
         spoke = reacted = False
+        failed: set[str] = set()
         sent_count = 0
+        pinged: set[int] = set()  # 同一条消息只提醒一次（比如又回话又发贴图）
         for action in actions:
             if action.kind == "react":
                 mid = st.msg_by_sid.get(action.to) if action.to is not None else None
@@ -1294,7 +2016,24 @@ class Engine:
             if to is None and kind == "mention" and targets:
                 to = targets[-1]
             reply_mid = st.msg_by_sid.get(to) if to is not None else None
-            ping = kind == "mention" and to in targets
+            ping = kind == "mention" and to in targets and reply_mid not in pinged
+            if ping and reply_mid is not None:
+                pinged.add(reply_mid)
+            if action.kind in SEND_KINDS:
+                if sent_count >= MAX_MESSAGES_PER_ROUND or (action.kind != "pick" and not action.name):
+                    continue
+                delay = self.ec.typing_min_seconds
+                if sent_count == 0:
+                    delay = max(0.5, delay - elapsed)
+                async with self.transport.typing(st.channel_id):
+                    await self.sleep(delay)
+                sent = await self._send_media(st, action, reply_mid, ping)
+                if sent is not None:
+                    spoke = True
+                else:
+                    failed.add(action.kind)
+                sent_count += 1
+                continue
             for i, text in enumerate(action.messages):
                 if sent_count >= MAX_MESSAGES_PER_ROUND:
                     break
@@ -1321,7 +2060,7 @@ class Engine:
                     if sent is not None:
                         spoke = True
                 sent_count += 1
-        return spoke, reacted
+        return spoke, reacted, failed
 
     async def _images(
         self, shown: list[IncomingMessage], triggers: list[IncomingMessage]
@@ -1329,17 +2068,21 @@ class Engine:
         out: dict[int, list[tuple[str, str]]] = {}
         budget = self.ec.max_images_per_round
         trigger_ids = {m.message_id for m in triggers}
-        for m in reversed(shown):  # 优先最近的图
-            for att in m.images:
-                if budget <= 0:
-                    return out
-                wanted = m.message_id in trigger_ids  # 叫它的人发的图看清楚点，其他图看个大概
-                side = self.ec.image_max_side if wanted else self.ec.low_detail_max_side
-                uri = await self.image_loader(att, side)
-                if uri is None:
-                    continue
-                budget -= 1
-                out.setdefault(m.message_id, []).append((uri, "auto" if wanted else "low"))
+        # 先看群友发的图、GIF、贴图（优先最近的），名额还有剩才看链接预览的图
+        for previews in (False, True):
+            for m in reversed(shown):
+                for att in m.images:
+                    if (att.kind == "preview") != previews:
+                        continue
+                    if budget <= 0:
+                        return out
+                    wanted = m.message_id in trigger_ids  # 叫它的人发的图看清楚点，其他图看个大概
+                    side = self.ec.image_max_side if wanted else self.ec.low_detail_max_side
+                    uri = await self.image_loader(att, side)
+                    if uri is None:
+                        continue
+                    budget -= 1
+                    out.setdefault(m.message_id, []).append((uri, "auto" if wanted else "low"))
         return out
 
     async def _load_image(self, att: ImageAttachment, max_side: int) -> str | None:
@@ -1406,13 +2149,21 @@ class Engine:
         for entry in st.recent_files.values():
             # 文件内容随旧记录一起压成了摘要，被问到时要能重新读
             entry.read_turns = {k: v for k, v in entry.read_turns.items() if v > last_removed}
+        for link_entry in st.recent_links.values():
+            link_entry.read_turns = {k: v for k, v in link_entry.read_turns.items() if v > last_removed}
         log.info("频道 %s：已把 %d 条旧记录压成摘要", st.channel_id, remove)
 
     @staticmethod
     def _describe(kind: str, outcome: str, actions: list[Action], completion: Completion) -> str:
         if outcome == "reply":
             said = next((a.messages[0] for a in actions if a.kind == "reply" and a.messages), "")
-            text = f"说了：{one_line(said, 40)}"
+            media = next((a for a in actions if a.kind in SEND_KINDS), None)
+            if said or media is None:
+                text = f"说了：{one_line(said, 40)}"
+            elif media.kind == "pick":
+                text = "发了一张网上找的图"
+            else:
+                text = f"发了{'贴图' if media.kind == 'sticker' else '表情包'}：{one_line(media.name or '', 40)}"
         elif outcome == "react":
             text = "加了表情 " + " ".join(a.emoji or "" for a in actions if a.kind == "react")
         else:
@@ -1432,6 +2183,9 @@ class Engine:
             for entry in st.recent_files.values():
                 entry.read_turns.clear()  # 读过的内容随记忆一起清掉了
                 entry.failed.clear()
+            for link_entry in st.recent_links.values():
+                link_entry.read_turns.clear()
+                link_entry.failed.clear()
             st.digest_seen.clear()
             st.listed = None
         for key, log_ in list(self.interactions.items()):
@@ -1463,4 +2217,11 @@ class Engine:
             "day": self.ledger.day(now),
             "searches": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="search"),
             "can_search": self._can_search(view),
+            "images_found": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="image"),
+            "links_opened": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="link"),
+            "can_find_images": self._can_find_images(view),
+            "memes_on": self._memes_on(view),
+            "meme_counts": self.memes.counts(guild_id) if self.memes is not None else (0, 0),
+            "links_mode": self._links_mode(view),
+            "media_blocked_for": max(0.0, st.media_blocked_until - now) if st else 0.0,
         }

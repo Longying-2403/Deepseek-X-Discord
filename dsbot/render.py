@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .models import DocBlock, IncomingMessage
-from .prompts import HINT_MENTION, HINT_PROACTIVE
+from .prompts import GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE
 from .textutil import one_line, truncate
 
 
@@ -26,11 +27,39 @@ def _attachments(m: IncomingMessage) -> str:
     return " ".join(bits)
 
 
-_MARKERS = str.maketrans({"〔": "[", "〕": "]", "【": "[", "】": "]", "↪": "->"})
+_MARKERS = str.maketrans(
+    {
+        "〔": "[",
+        "〕": "]",
+        "【": "[",
+        "】": "]",
+        "↪": "->",
+        # 长得像的括号也换掉，免得拿来冒充“〔dsowner〕”之类的标记
+        "﹝": "[",
+        "﹞": "]",
+        "〘": "[",
+        "〙": "]",
+        "〖": "[",
+        "〗": "]",
+        "⦗": "[",
+        "⦘": "]",
+        "︹": "[",
+        "︺": "]",
+        "︻": "[",
+        "︼": "]",
+        "❲": "[",
+        "❳": "]",
+        "⟬": "[",
+        "⟭": "]",
+    }
+)
+# 别的换行写法统一成 \n：续行才会被缩进，没法伪造一条以 #编号 开头的新消息
+_LINE_BREAKS = re.compile("\r\n?|[\u2028\u2029\x85\x0b\x0c]")
 
 
 def neutralize(text: str) -> str:
     """群友的原话和文件里不能出现我们用来标注的符号，否则可以伪造“〔@你〕”、文件块之类的标记。"""
+    text = _LINE_BREAKS.sub("\n", text)
     return text.translate(_MARKERS).replace("<<<", "‹‹‹").replace(">>>", "›››")
 
 
@@ -41,6 +70,8 @@ def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_ch
     head = f"#{sid} {_neutralize(one_line(m.author_name or '某人'))}"
     if m.is_bot:
         head += " 〔bot〕"
+    elif m.from_owner:
+        head += " 〔dsowner〕"  # 按 OWNER_ID 标的，群友改昵称冒充不了（〔〕在原话和名字里都会被中和）
     if m.reply_to_bot:
         head += " ↪你"
     elif m.reply_to_id is not None:
@@ -71,11 +102,13 @@ def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str) -> 
 
 
 def render_doc(block: DocBlock) -> tuple[list[str], list[str]]:
-    """一个文件内容块 → (文字行, 图片 data URI)。内容放在 <<< 和 >>> 之间。"""
+    """一个文件（或打开的链接）内容块 → (文字行, 图片 data URI)。内容放在 <<< 和 >>> 之间。"""
     result = block.result
-    head = f"【{block.label} 的文件「{_neutralize(one_line(block.filename, 60))}」"
+    source = "链接" if block.source == "链接" else "文件"
+    head = f"【{block.label} 的{source}「{_neutralize(one_line(block.filename, 60))}」"
     if result.error:
-        return [f"{head}· 读不了：{_neutralize(one_line(result.error, 200))}】"], []
+        verb = "打不开" if source == "链接" else "读不了"
+        return [f"{head}· {verb}：{_neutralize(one_line(result.error, 200))}】"], []
     info = _neutralize(one_line(result.kind + (f"，{result.detail}" if result.detail else ""), 300))
     lines = [f"{head}· {info}】" if info else f"{head}】"]
     if result.text:
@@ -103,7 +136,19 @@ class _Builder:
             text_lines, uris = render_doc(block)
             self.lines += text_lines
             name = _neutralize(one_line(block.filename, 60))
-            self.images([(u, "auto") for u in uris], after=f"（以上是 {block.label} 的文件「{name}」的页面）")
+            if block.source == "链接":
+                after = f"（以上是 {block.label} 的链接「{name}」里的图）"
+            else:
+                after = f"（以上是 {block.label} 的文件「{name}」的页面）"
+            self.images([(u, "auto") for u in uris], after=after)
+
+    def gallery(self, gallery: "Gallery") -> None:
+        """上网找到的候选图：每张图前面一行「图N：说明」，整组放在 <<< 和 >>> 之间（压缩记忆时整组去掉）。"""
+        self.lines += [GALLERY_HEAD.format(query=neutralize(one_line(gallery.query, 60)), count=len(gallery.items)), "<<<"]
+        for i, (caption, uri) in enumerate(gallery.items, 1):
+            self.lines.append(f"图{i}：{neutralize(one_line(caption, 160)) or '（没有说明）'}")
+            self.images([(uri, "low")])
+        self.lines += [">>>", GALLERY_FOOT]
 
     def finish(self) -> str | list[dict[str, Any]]:
         if not self.parts:
@@ -129,7 +174,7 @@ def render_round(
     omitted: int = 0,
     images: dict[int, list[tuple[str, str]]] | None = None,
     docs: dict[int, list[DocBlock]] | None = None,
-    max_chars: int = 1200,
+    max_chars: int = 1800,
     context: list[str] | None = None,
 ) -> str | list[dict[str, Any]]:
     """messages: [(编号, 消息)]；images: message_id -> [(data_uri, detail)]；docs: message_id -> 放在这条消息后面的文件块。
@@ -156,6 +201,14 @@ def render_read_result(blocks: list[DocBlock], notes: list[str], *, targets: lis
     return render_tool_result(blocks, notes, [], [], targets=targets)
 
 
+@dataclass
+class Gallery:
+    """上网找图找到的候选图：[(说明, 缩小后的 data URI)]。"""
+
+    query: str
+    items: list[tuple[str, str]]
+
+
 def render_tool_result(
     blocks: list[DocBlock],
     file_notes: list[str],
@@ -164,14 +217,21 @@ def render_tool_result(
     *,
     targets: list[int],
     files: bool = True,
+    header: str | None = None,
+    gallery: Gallery | None = None,
+    kind: str = "mention",
 ) -> str | list[dict[str, Any]]:
-    """看文件、搜索、翻别的频道之后，把结果交给模型。files=False 表示这次没要看文件。"""
-    out = _Builder("（你要看的文件：）" if files else None)
+    """看文件、打开链接、搜索、找图、翻别的频道之后，把结果交给模型。
+
+    files=False 表示这次没要看文件；header 可以换掉开头那句（比如这次要打开的是链接）。"""
+    out = _Builder(header if header is not None else ("（你要看的文件：）" if files else None))
     out.docs(blocks)
     out.lines += file_notes
     out.lines += sections
+    if gallery is not None and gallery.items:
+        out.gallery(gallery)
     out.lines += notes
-    out.lines.append(_hint("mention", targets))
+    out.lines.append(_hint(kind, targets))
     return out.finish()
 
 
@@ -196,7 +256,8 @@ def render_recall(channel: str, summary: str | None, lines: list[str], about: st
 
 LIST_HEAD = "（能翻记录的别的频道："
 LIST_EMPTY = "（现在没有能翻记录的别的频道）"
-_FILE_HEAD = re.compile(r"^【\S+ 的文件「")
+_FILE_HEAD = re.compile(r"^【\S+ 的(?:文件|链接)「")
+_GALLERY_START = GALLERY_HEAD.split("「", 1)[0]  # “（你找了”
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
@@ -230,7 +291,9 @@ def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
 
 
 def own_text(content: Any) -> str:
-    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录和搜索结果。
+    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录、搜索结果和找图的候选图。
+
+    群友发的文件和链接打开后的内容算这个频道自己的，留着。
 
     顶格以“（”开头的行一定是 bot 自己加的（群友的消息都以 #编号 开头，续行缩进，文件内容在 <<< >>> 里）。
     """
@@ -264,10 +327,10 @@ def own_text(content: Any) -> str:
         after_search = after_file = False
         if line.startswith("（") and (line.endswith("跟你聊过：") or line == LIST_HEAD):
             skipping_block = True
-        elif line.startswith(("（你翻了", "（你搜了")):
+        elif line.startswith(("（你翻了", "（你搜了", _GALLERY_START)):
             skipping_fence = True
             after_search = line.startswith("（你搜了")
-        elif line != LIST_EMPTY:
+        elif line != LIST_EMPTY and line != GALLERY_FOOT:
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
     return "\n".join(out)
@@ -289,7 +352,16 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
     for role, content in turns:
         if role != "user":
             raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-            said = [m for a in parse_actions(raw)[0] if a.kind == "reply" for m in a.messages]
+            said = []
+            for a in parse_actions(raw)[0]:
+                if a.kind == "reply":
+                    said += a.messages
+                elif a.kind == "sticker" and a.name:
+                    said.append(f"[贴图: {a.name}]")
+                elif a.kind == "meme" and a.name:
+                    said.append(f"[表情包: {a.name}]")
+                elif a.kind == "pick":
+                    said.append("[图片]")
             if said:
                 out.append(f"{bot_name}：" + " / ".join(one_line(m, 300) for m in said))
             continue
@@ -306,7 +378,7 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
                 out.append(_STAMP_LINE.match(line).group(0))
                 continuing = False
             elif _MSG_LINE.match(line):
-                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@你〕", "")
+                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@你〕", "").replace(" 〔dsowner〕", "", 1)
                 out.append(text)
                 continuing = True
             elif continuing and line.startswith("  "):
@@ -371,5 +443,15 @@ def assistant_text(content: str, name: str) -> str:
         elif a.get("type") == "react":
             out.append(f"{name} 给 #{to} 加了表情 {a.get('emoji', '')}")
         elif a.get("type") == "read":
-            out.append(f"{name} 打开了 #{to} 的文件")
+            out.append(f"{name} 打开了 #{to} 的文件或链接")
+        elif a.get("type") == "sticker":
+            out.append(f"{name}{prefix} 发了贴图「{a.get('name', '')}」")
+        elif a.get("type") == "meme":
+            out.append(f"{name}{prefix} 发了表情包「{a.get('name', '')}」")
+        elif a.get("type") == "pick":
+            out.append(f"{name}{prefix} 发了一张网上找的图")
+        elif a.get("type") == "image":
+            out.append(f"{name} 上网找了「{a.get('query', '')}」的图")
+        elif a.get("type") == "persona":
+            out.append(f"{name} 想按 #{to} 的要求改人设")
     return "\n".join(out)

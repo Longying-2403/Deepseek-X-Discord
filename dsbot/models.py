@@ -58,11 +58,46 @@ class FileText:
 
 @dataclass
 class DocBlock:
-    """要放进聊天记录的一个文件内容块。"""
+    """要放进聊天记录的一个内容块：文件，或者打开的链接。"""
 
     label: str  # 文件所在的消息，比如 "#12"；不知道编号时是 "之前"
-    filename: str
+    filename: str  # 文件名；链接是标题
     result: FileText
+    source: str = "文件"  # 文件 / 链接
+
+
+@dataclass
+class LinkRef:
+    """消息里的一个链接。title / site 来自 Discord 生成的预览（可能没有）。"""
+
+    url: str
+    title: str | None = None
+    site: str | None = None
+    preview_image: bool = False  # 预览里已经有图（会走看图），打开时就不用再附图了
+
+
+@dataclass
+class LinkResult:
+    """打开一个链接的结果。result.error 不为空表示没打开。"""
+
+    title: str
+    result: FileText
+
+
+@dataclass
+class Picture:
+    """上网找到的一张候选图。"""
+
+    data: bytes = field(repr=False)
+    mime: str  # image/png / image/jpeg / image/gif / image/webp
+    uri: str = field(repr=False)  # 给模型看的缩小版（data URI）
+    description: str = ""
+    host: str = ""  # 图片所在的网站
+
+    @property
+    def filename(self) -> str:
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}.get(self.mime, "png")
+        return f"image.{ext}"
 
 
 @dataclass
@@ -82,9 +117,11 @@ class IncomingMessage:
     images: list[ImageAttachment] = field(default_factory=list)
     files: list[FileAttachment] = field(default_factory=list)
     stickers: list[str] = field(default_factory=list)
+    links: list[LinkRef] = field(default_factory=list)  # 能打开的网页链接（图片、GIF、Discord 自己的链接不算）
     received_at: float = 0.0
     trigger: bool = False  # 引擎设置：这条点名通过了限速，需要立刻回应
     awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
+    from_owner: bool = False  # 引擎设置：发言的是 OWNER_ID（dsowner）本人
 
     @property
     def addressed(self) -> bool:
@@ -94,14 +131,45 @@ class IncomingMessage:
 
 @dataclass
 class Action:
-    kind: str  # "reply" | "react" | "read" | "search" | "recall"
+    # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
+    kind: str
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
-    query: str | None = None  # search：要搜什么；recall：想找的关键词（可以没有）
+    query: str | None = None  # search / image：要搜什么；recall：想找的关键词（可以没有）
     channel: str | None = None  # recall：哪个频道
+    name: str | None = None  # sticker：贴图名；meme：表情包名
+    text: str | None = None  # persona：改好之后的完整人设（"" = 恢复默认；None = 没写）
+    scope: str | None = None  # persona：None = 改这里现在用的那份；"server" = 全服务器；"channel" = 这个频道
+    undo: bool = False  # persona：撤销上一次修改
+    image: int | None = None  # pick：发找到的第几张图（从 1 开始）
 
     def to_json(self) -> dict[str, Any]:
+        if self.kind in ("sticker", "meme"):
+            d: dict[str, Any] = {"type": self.kind}
+            if self.to is not None:
+                d["to"] = self.to
+            d["name"] = self.name
+            return d
+        if self.kind == "pick":
+            d = {"type": "pick"}
+            if self.to is not None:
+                d["to"] = self.to
+            d["image"] = self.image
+            return d
+        if self.kind == "image":
+            return {"type": "image", "query": self.query}
+        if self.kind == "persona":
+            d = {"type": "persona"}
+            if self.to is not None:
+                d["to"] = self.to
+            if self.scope:
+                d["scope"] = self.scope
+            if self.undo:
+                d["undo"] = True
+            if self.text is not None:
+                d["text"] = self.text
+            return d
         if self.kind == "read":
             return {"type": "read", "to": self.to}
         if self.kind == "search":
@@ -146,6 +214,8 @@ class ChannelInfo:
     guild_name: str
     channel_name: str
     bot_name: str
+    emojis: list[str] = field(default_factory=list)  # 这个服务器里 bot 能用的自定义表情名（排好序）
+    stickers: list[str] = field(default_factory=list)  # 这个服务器里能发的贴图名（排好序）
 
 
 @dataclass

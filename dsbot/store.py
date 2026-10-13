@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS usage (
     cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_day ON usage (day, guild_id, channel_id);
+CREATE TABLE IF NOT EXISTS persona_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    scope TEXT NOT NULL,          -- guild / category / channel
+    scope_id INTEGER NOT NULL,
+    old TEXT,                     -- 改之前这一级单独设置的人设；NULL = 没单独设置（沿用上一级）
+    new TEXT,                     -- 改之后；NULL = 不再单独设置
+    by_user INTEGER NOT NULL,     -- 谁改的（用户 ID）
+    via TEXT NOT NULL,            -- chat（聊天里让它改）/ command（/ds 人设）/ undo（撤销）
+    request TEXT,                 -- 当时那条要求，方便以后查
+    reverted INTEGER NOT NULL DEFAULT 0  -- 这次修改已经被撤销了
+);
 """
 
 MSGMAP_KEEP = 3000  # 每个频道保留最近多少个消息编号的映射
@@ -222,6 +234,45 @@ class Store:
                 (time.time(), channel_id),
             )
 
+    # ---- 人设修改记录 ----
+    def add_persona_change(
+        self,
+        *,
+        ts: float,
+        scope: str,
+        scope_id: int,
+        old: str | None,
+        new: str | None,
+        by_user: int,
+        via: str,
+        request: str = "",
+    ) -> int:
+        with self.db:
+            cur = self.db.execute(
+                "INSERT INTO persona_history (ts, scope, scope_id, old, new, by_user, via, request) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, scope, scope_id, old, new, by_user, via, request),
+            )
+        return int(cur.lastrowid)
+
+    def last_persona_change(self, scopes: Iterable[tuple[str, int]]) -> dict[str, Any] | None:
+        """这些范围里最近一次还没被撤销的人设修改（撤销用；撤销本身不算一次修改，所以连着撤会一步步往前撤）。"""
+        keys = list(scopes)
+        if not keys:
+            return None
+        where = " OR ".join("(scope = ? AND scope_id = ?)" for _ in keys)
+        params = [x for key in keys for x in key]
+        row = self.db.execute(
+            f"SELECT id, ts, scope, scope_id, old, new, by_user, via FROM persona_history WHERE ({where}) "
+            "AND via != 'undo' AND reverted = 0 ORDER BY id DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_persona_reverted(self, row_id: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE persona_history SET reverted = 1 WHERE id = ?", (row_id,))
+
     # ---- 用量 ----
     def record_usage(
         self,
@@ -277,6 +328,8 @@ class Store:
         if channel_id is not None:
             where.append("channel_id = ?")
             args.append(channel_id)
+        # 打开链接、上网找图只是记次数（不是 DeepSeek 的调用），不算进调用次数和结果统计
+        where.append("kind NOT IN ('link', 'image')")
         clause = " AND ".join(where)
         totals = self.db.execute(
             f"SELECT COUNT(*) AS n, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",

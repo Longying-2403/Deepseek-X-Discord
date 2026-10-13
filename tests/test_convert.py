@@ -150,8 +150,8 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
         m = self.conv(fake_message(
             clean_content="看 https://x.com/a.png 和 https://x.com/b.gif",
             embeds=[
-                embed("image", url="https://x.com/a.png", thumb="https://x.com/a.png"),
-                embed("image", url="https://x.com/b.gif", thumb="https://x.com/b.gif"),
+                embed("image", url="https://x.com/a.png", thumb="https://x.com/a.png", proxy="https://images-ext-1.discordapp.net/external/1/https/x.com/a.png"),
+                embed("image", url="https://x.com/b.gif", thumb="https://x.com/b.gif", proxy="https://images-ext-1.discordapp.net/external/2/https/x.com/b.gif"),
             ],
         ))
         self.assertEqual([i.kind for i in m.images], ["image", "gif"])
@@ -160,10 +160,12 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
     async def test_article_preview_becomes_text(self):
         m = self.conv(fake_message(
             clean_content="https://youtu.be/abc",
-            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", title="猫猫合集", provider="YouTube")],
+            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", proxy="https://images-ext-2.discordapp.net/external/t.jpg", title="猫猫合集", provider="YouTube")],
         ))
-        self.assertEqual(m.images, [])
+        # 1.4.0 起预览图也看（排在群友发的图后面），链接记下来、被叫到时可以打开
+        self.assertEqual([i.kind for i in m.images], ["preview"])
         self.assertEqual(m.text, "https://youtu.be/abc [链接预览: YouTube - 猫猫合集]")
+        self.assertEqual([(link.url, link.title, link.site, link.preview_image) for link in m.links], [("https://youtu.be/abc", "猫猫合集", "YouTube", True)])
 
     async def test_stickers(self):
         stickers = [
@@ -177,6 +179,20 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
     async def test_awaiting_embeds_flag(self):
         self.assertTrue(self.conv(fake_message(clean_content="https://tenor.com/view/x")).awaiting_embeds)
         self.assertFalse(self.conv(fake_message(clean_content="没有链接")).awaiting_embeds)
+
+    async def test_only_discord_media_is_downloaded(self):
+        """预览里的原始网址是发链接的人写的：bot 只从 Discord 的图片代理 / CDN 下载，不直接连。"""
+        m = self.conv(fake_message(
+            clean_content="https://example.com/page",
+            embeds=[
+                embed("image", url="http://192.168.1.1/cam.jpg", thumb="http://192.168.1.1/cam.jpg"),
+                embed("rich", url="https://example.com/page", thumb="https://evil.example/x.png", proxy="http://images-ext-1.discordapp.net/x.png", title="页面"),
+                embed("rich", url="https://example.com/other", thumb="https://cdn.discordapp.com/attachments/1/2/a.png", title="另一个"),
+            ],
+        ))
+        self.assertEqual([i.kind for i in m.images], ["preview"])
+        await m.images[0].fetch()
+        self.assertEqual(self.fetched, ["https://cdn.discordapp.com/attachments/1/2/a.png"])
 
     async def test_without_fetcher_no_link_images(self):
         m = convert_message(

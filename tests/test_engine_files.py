@@ -156,7 +156,7 @@ class ReadAction(unittest.IsolatedAsyncioTestCase):
         engine, llm, transport, clock, reader = setup(lambda c: outputs[len(llm.calls) - 1])
         await engine.handle_message(msg(501, "@小D 看看那个文件", mentions_bot=True))
         await engine.drain()
-        self.assertIn("（#99 里没有能读的文件，或者文件太久已经拿不到了）", user_text(llm.calls[1]))
+        self.assertIn("（#99 里没有能读的文件或链接，或者太久已经拿不到了）", user_text(llm.calls[1]))
         self.assertEqual(reader.calls, [])
 
     async def test_files_off_gets_a_note(self):
@@ -277,7 +277,7 @@ class Paste(unittest.IsolatedAsyncioTestCase):
         clock.advance(31)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(reader.calls, [("message.txt", 1200)])  # 和普通长消息一样只看开头
+        self.assertEqual(reader.calls, [("message.txt", 1800)])  # 和普通长消息一样只看开头（max_chars_per_message）
         self.assertIn("【#1 的文件「message.txt」", user_text(llm.calls[0]))
         self.assertEqual(len(engine.states[CHANNEL].recent_files[501].unread()), 1)  # 只看了开头，被叫到时还能完整读
 

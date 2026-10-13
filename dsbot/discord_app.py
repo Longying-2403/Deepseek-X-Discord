@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import signal
 from collections import deque
@@ -12,14 +13,28 @@ import discord
 from discord import app_commands
 
 from .config import AppConfig, Secrets
-from .convert import convert_message, parse_aliases, safe_category_id
+from .convert import (
+    convert_message,
+    emoji_lookup,
+    parse_aliases,
+    resolve_reaction,
+    safe_category_id,
+    usable_emojis,
+    usable_stickers,
+)
 from .engine import Engine
 from .ledger import Ledger
+from .links import LinkReader
 from .llm import DeepSeekClient
+from .memes import MemeLibrary
 from .models import ChannelInfo, ChannelPlace, IncomingMessage
+from .net import HttpClient
+from .pictures import PictureFinder
 from .search import WebSearch
 from .settings import Settings
 from .store import Store
+from .tavily import Tavily
+from .textutil import DISCORD_LIMIT, render_custom_emoji
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +48,7 @@ BOT_PERMISSIONS = discord.Permissions(
     read_message_history=True,
     add_reactions=True,
     embed_links=True,
+    attach_files=True,  # 发表情包、网上找的图
 )
 
 
@@ -92,6 +108,9 @@ class DiscordTransport:
             guild_name=guild.name if guild is not None else "未知服务器",
             channel_name=getattr(channel, "name", None) or str(channel_id),
             bot_name=bot_name,
+            # 排好序：这两份名单放在 system prompt 里，顺序一乱缓存就失效
+            emojis=sorted({e.name for e in usable_emojis(guild)}),
+            stickers=sorted({st.name for st in usable_stickers(guild)}),
         )
 
     def locate(self, channel_id: int) -> ChannelPlace | None:
@@ -127,19 +146,61 @@ class DiscordTransport:
                 return None
         return channel
 
-    async def send(self, channel_id: int, text: str, *, reply_to: int | None, ping: bool) -> int | None:
-        channel = await self._resolve(channel_id)
-        if channel is None:
-            return None
+    @staticmethod
+    def _base_kwargs(channel_id: int, reply_to: int | None, ping: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             # 只允许“提醒被回复的人”，模型输出里的 @everyone / @某人 / @身份组 都不会真的 ping
             "allowed_mentions": discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=ping),
-            "suppress_embeds": True,  # 回答里带的来源链接不展开预览，免得刷屏
         }
         if reply_to is not None:
             kwargs["reference"] = discord.MessageReference(
                 message_id=reply_to, channel_id=channel_id, fail_if_not_exists=False
             )
+        return kwargs
+
+    async def send_sticker(self, channel_id: int, name: str, *, reply_to: int | None, ping: bool) -> int | None:
+        """发一张这个服务器自己的贴图（name 是贴图名，引擎已经核对过）。"""
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        sticker = next((st for st in usable_stickers(getattr(channel, "guild", None)) if st.name == name), None)
+        if sticker is None:
+            log.info("频道 %s：找不到贴图「%s」（可能刚被删掉）", channel_id, name)
+            return None
+        try:
+            sent = await channel.send(stickers=[sticker], **self._base_kwargs(channel_id, reply_to, ping))
+        except Exception as exc:  # 没权限、贴图不能用之类
+            log.warning("发贴图失败（频道 %s）：%r", channel_id, exc)
+            return None
+        self.remember_sent(sent.id)
+        return sent.id
+
+    async def send_file(
+        self, channel_id: int, data: bytes, filename: str, *, reply_to: int | None, ping: bool
+    ) -> int | None:
+        """发一张图（表情包、网上找的图），作为附件上传。"""
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        try:
+            sent = await channel.send(
+                file=discord.File(io.BytesIO(data), filename=filename), **self._base_kwargs(channel_id, reply_to, ping)
+            )
+        except Exception as exc:  # 没有“附加文件”权限、图太大之类
+            log.warning("发图失败（频道 %s）：%r", channel_id, exc)
+            return None
+        self.remember_sent(sent.id)
+        return sent.id
+
+    async def send(self, channel_id: int, text: str, *, reply_to: int | None, ping: bool) -> int | None:
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        converted = render_custom_emoji(text, emoji_lookup(getattr(channel, "guild", None)))  # :名字: → 服务器表情
+        if len(converted) <= DISCORD_LIMIT:  # 换成 <:名字:id> 会变长；超过上限就原样发，别整条发不出去
+            text = converted
+        kwargs = self._base_kwargs(channel_id, reply_to, ping)
+        kwargs["suppress_embeds"] = True  # 回答里带的来源链接不展开预览，免得刷屏
         try:
             sent = await channel.send(text, **kwargs)
         except Exception as exc:  # HTTPException，以及网络断开时的 OSError / aiohttp 错误
@@ -153,7 +214,7 @@ class DiscordTransport:
         if channel is None or not hasattr(channel, "get_partial_message"):
             return False
         try:
-            await channel.get_partial_message(message_id).add_reaction(emoji)
+            await channel.get_partial_message(message_id).add_reaction(resolve_reaction(emoji, getattr(channel, "guild", None)))
             return True
         except Exception as exc:
             log.info("加表情 %s 失败：%r", emoji, exc)
@@ -196,7 +257,36 @@ class DSBot(discord.Client):
             max_uses=cfg.deepseek.search_max_uses,
             tavily_key=secrets.tavily_api_key,
         )
-        self.engine = Engine(cfg, settings, store, llm, ledger, self.transport, searcher=self.searcher)
+        # 读链接、找图：推文走 FxTwitter（不用 key），网页和找图要 Tavily。
+        # 注意别叫 self.http：那是 discord.py 自己连 Discord 用的客户端，覆盖掉就登录不了
+        self.web = HttpClient()
+        tavily = Tavily(self.web, secrets.tavily_api_key) if secrets.tavily_api_key else None
+        self.links = LinkReader(self.web, tavily, tz=cfg.bot.timezone)
+        self.pictures = (
+            PictureFinder(
+                self.web,
+                tavily,
+                keep=cfg.engine.image_candidates,
+                max_bytes=cfg.engine.image_max_bytes,
+                view_side=cfg.engine.low_detail_max_side,
+            )
+            if tavily is not None
+            else None
+        )
+        self.memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)
+        self.engine = Engine(
+            cfg,
+            settings,
+            store,
+            llm,
+            ledger,
+            self.transport,
+            searcher=self.searcher,
+            owner_id=secrets.owner_id,
+            link_reader=self.links,
+            pictures=self.pictures,
+            memes=self.memes,
+        )
         self._ticker: asyncio.Task[None] | None = None
 
         from .commands import register_commands
@@ -249,6 +339,7 @@ class DSBot(discord.Client):
             log.warning("关闭时还有没跑完的轮次，直接退出")
         await self.llm.close()
         await self.searcher.close()
+        await self.web.close()
         await super().close()
 
     # ---------------------------------------------------------------- 事件

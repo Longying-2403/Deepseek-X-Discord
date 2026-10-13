@@ -75,6 +75,16 @@ def check(config_path: str) -> int:
     print(f"✓ 联网搜索：DeepSeek 自带的搜索（{cfg.deepseek.anthropic_url}）"
           + ("，失败时改用 Tavily" if secrets.tavily_api_key else "")
           + "。想实际搜一次试试：python -m dsbot --test-search 关键词")
+    if secrets.tavily_api_key:
+        print("✓ 读链接：推文走 FxTwitter，网页走 Tavily；上网找图：Tavily。"
+              "想试试：python -m dsbot --test-link 网址 / --test-image 关键词")
+    else:
+        print("! 没填 TAVILY_API_KEY：只能打开 X 的推文（别的网站只看 Discord 的预览），也不能上网找图（表情包库照常能用）")
+    from .memes import MemeLibrary
+
+    memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)
+    shared = memes.names(0) if os.path.isdir(cfg.bot.meme_dir) else []
+    print(f"✓ 通用表情包库 {cfg.bot.meme_dir}/：{len(shared)} 张" if shared else f"· 通用表情包库 {cfg.bot.meme_dir}/ 还是空的（可选）")
 
     store = Store(":memory:")
     bot = DSBot(
@@ -141,11 +151,104 @@ def test_search(config_path: str, query: str) -> int:
     return 0
 
 
+def test_link(config_path: str, url: str) -> int:
+    """真的打开一个链接（推文走 FxTwitter，网页用掉一点 Tavily 额度），确认读链接能用。"""
+    import asyncio
+
+    from .links import LinkReader, openable
+    from .net import HttpClient
+    from .tavily import Tavily
+
+    cfg = load_config(config_path)
+    secrets = load_secrets()
+    if not openable(url):
+        print("✗ 这个网址不会被打开（图片、视频、Discord 自己的链接、内网地址之类）")
+        return 1
+
+    async def run():  # type: ignore[no-untyped-def]
+        http = HttpClient()
+        try:
+            tavily = Tavily(http, secrets.tavily_api_key) if secrets.tavily_api_key else None
+            reader = LinkReader(http, tavily, tz=cfg.bot.timezone)
+            if not reader.readable(url):
+                return None
+            return await reader.read(url, max_chars=cfg.engine.link_max_chars, image_side=cfg.engine.image_max_side)
+        finally:
+            await http.close()
+
+    print(f"打开 {url} ……")
+    got = asyncio.run(run())
+    if got is None:
+        print("✗ 没填 TAVILY_API_KEY：只能打开 X 的推文")
+        return 1
+    if got.result.error:
+        print(f"✗ {got.result.error}")
+        return 1
+    print(f"✓ {got.result.kind}「{got.title}」（{got.result.detail}）\n{got.result.text[:1500]}")
+    if got.result.images:
+        print(f"（附了 {len(got.result.images)} 张图）")
+    return 0
+
+
+def test_image(config_path: str, query: str) -> int:
+    """真的找一次图（用掉 1 次 Tavily 额度），把候选图存到 data/找图测试/ 看看。"""
+    import asyncio
+    from pathlib import Path
+
+    from .net import HttpClient
+    from .pictures import PictureFinder
+    from .tavily import Tavily, TavilyError
+
+    cfg = load_config(config_path)
+    secrets = load_secrets()
+    if not secrets.tavily_api_key:
+        print("✗ 上网找图要在 .env 里填 TAVILY_API_KEY")
+        return 1
+
+    async def run():  # type: ignore[no-untyped-def]
+        http = HttpClient()
+        try:
+            finder = PictureFinder(
+                http, Tavily(http, secrets.tavily_api_key), keep=cfg.engine.image_candidates, max_bytes=cfg.engine.image_max_bytes
+            )
+            return await finder.find(query)
+        finally:
+            await http.close()
+
+    print(f"找「{query}」的图……")
+    try:
+        found = asyncio.run(run())
+    except TavilyError as exc:
+        print(f"✗ {exc}")
+        return 1
+    if not found:
+        print("✗ 没找到能用的图")
+        return 1
+    out = Path("data") / "找图测试"
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(out, 0o777)  # 测试用的图：NAS 上的账号看完能直接删
+    except OSError:
+        pass
+    for i, picture in enumerate(found, 1):
+        path = out / f"图{i}-{picture.filename}"
+        path.write_bytes(picture.data)
+        try:
+            os.chmod(path, 0o666)
+        except OSError:
+            pass
+        print(f"  图{i}：{picture.description or '（没有说明）'}（{picture.host}，{len(picture.data) // 1024} KB）→ {path}")
+    print("✓ 找到了。真正聊天时，它会先看这几张、觉得合适才发。")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek 群友 Discord bot")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="只做离线自检，不启动")
     parser.add_argument("--test-search", metavar="关键词", help="真的搜一次，确认联网搜索能用（花一点点钱）")
+    parser.add_argument("--test-link", metavar="网址", help="真的打开一个链接，确认读链接能用（网页会用掉一点 Tavily 额度）")
+    parser.add_argument("--test-image", metavar="关键词", help="真的找一次图，候选图存到 data/找图测试/（用掉 1 次 Tavily 额度）")
     args = parser.parse_args()
     _load_dotenv()
 
@@ -153,6 +256,10 @@ def main() -> int:
         return check(args.config)
     if args.test_search:
         return test_search(args.config, args.test_search)
+    if args.test_link:
+        return test_link(args.config, args.test_link)
+    if args.test_image:
+        return test_image(args.config, args.test_image)
 
     cfg = load_config(args.config)
     logging.basicConfig(

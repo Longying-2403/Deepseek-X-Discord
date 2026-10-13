@@ -18,6 +18,8 @@ database = "data/dsbot.sqlite3"
 sync_commands_on_start = true     # 启动时注册斜杠命令
 log_level = "INFO"
 tick_seconds = 5                  # 多久检查一次各频道要不要主动判断
+meme_dir = "data/表情包"           # 通用表情包库：在 NAS 上自己建这个文件夹、放图，文件名就是名字（所有服务器都能用）
+server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的（bot 自己管）
 
 [pricing]
 # 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
@@ -41,6 +43,7 @@ mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
 aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
 persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
 share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
+images = true                     # 让它自己发表情包库里的图、上网找图（找到的图它会先看一遍再决定发不发）
 
 # —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
@@ -53,13 +56,15 @@ vision = true                     # 是否把群里的图片发给模型
 files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
 web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 自带的搜索）
 daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
+links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页要填 TAVILY_API_KEY）
+daily_image_limit = 10            # 每个服务器每天最多上网找几次图（要 TAVILY_API_KEY；0 = 不找，表情包库照常能用）
 
 [engine]
 # 一般不用动
 max_batch_messages = 40           # 一轮最多带多少条新消息
 max_pending_messages = 120        # 没轮到时最多缓存多少条
 pending_max_age_seconds = 21600   # 缓存里超过 6 小时的旧消息直接丢掉
-max_chars_per_message = 1200      # 单条消息进上下文前截断
+max_chars_per_message = 1800      # 单条消息进上下文前截断（角色卡之类更长的，做成 .txt 发出来再叫它）
 max_images_per_round = 4
 image_max_side = 1024             # 叫到它的那条消息里的图片
 low_detail_max_side = 512         # 其他图片（模型那边也只按 512×512 看）
@@ -82,3 +87,12 @@ search_max_chars = 2000           # 一次搜索的结果最多多少字
 share_recent_hours = 6            # 同一个人这么久之内在别的频道跟它聊过，就把那几句带过来
 recall_max_chars = 3000           # 翻别的频道的记录，一次最多多少字
 share_list_limit = 30             # 告诉它可以翻哪些频道，最多列多少个
+emoji_list_limit = 100            # 告诉它服务器里有哪些表情，最多列多少个
+sticker_list_limit = 30           # 告诉它服务器里有哪些贴图，最多列多少个
+link_max_chars = 4000             # 打开一个链接，最多读多少字
+max_links_per_round = 3           # 一轮最多打开几个链接
+daily_link_limit = 100            # 每个服务器每天最多打开多少个链接（Tavily 每打开 5 个网页算 1 次额度）
+image_cooldown_seconds = 600      # 同一个频道两次上网找图至少隔 10 分钟
+image_candidates = 4              # 上网找图时给它看几张候选
+image_max_bytes = 8000000         # 发出去的图最大 8 MB（Discord 默认上传上限 10 MB）
+meme_list_limit = 80              # 告诉它表情包库里有哪些图，最多列多少个
