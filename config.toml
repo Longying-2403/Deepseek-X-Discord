@@ -18,6 +18,8 @@ database = "data/dsbot.sqlite3"
 sync_commands_on_start = true     # register the slash commands on startup
 log_level = "INFO"
 tick_seconds = 5                  # how often to check whether any channel should run a proactive check
+meme_dir = "data/memes"           # shared meme library: create this folder on the NAS yourself and put pictures in it; the file name is the meme's name (usable on every server)
+server_meme_dir = "data/server-memes"  # what each server uploads with /ds meme (managed by the bot)
 
 [pricing]
 # USD per million tokens, at peak prices; off-peak is multiplied by offpeak_factor automatically.
@@ -41,6 +43,7 @@ mention_rate_limit = 3            # each person can call it at most 3 times per 
 aliases = ""                      # aliases, comma-separated; they also count as calling it when they appear in a message, e.g. "DS,Dee"
 persona = ""                      # empty = default persona; best changed in Discord with /ds persona
 share_memory = false              # cross-channel memory, off by default; turn it on with /ds share-memory (private channels must turn it on themselves to share out)
+images = true                     # let it send pictures from the meme library on its own and find pictures online (it looks at what it finds before deciding whether to send one)
 
 # —— Only you can change these (here, or with /dsowner in the CONTROL_GUILD_ID server) ——
 min_eval_interval = 60            # at least 60 seconds between two proactive checks
@@ -53,13 +56,15 @@ vision = true                     # send images from the chat to the model
 files = true                      # read files people upload (text, code, PDF, Word, Excel, PowerPoint)
 web_search = true                 # when it's called and needs current information, search the web (DeepSeek's built-in search)
 daily_search_limit = 30           # max searches per server per day (0 = no searching)
+links = true                      # when it's called, open the links in the message (posts on X go through FxTwitter; other web pages need TAVILY_API_KEY)
+daily_image_limit = 10            # max online image searches per server per day (needs TAVILY_API_KEY; 0 = none, the meme library still works)
 
 [engine]
 # Usually no need to touch these
 max_batch_messages = 40           # max new messages per round
 max_pending_messages = 120        # max messages buffered while waiting for a round
 pending_max_age_seconds = 21600   # buffered messages older than 6 hours are dropped
-max_chars_per_message = 1200      # each message is cut to this many characters before it goes into the context
+max_chars_per_message = 1800      # each message is cut to this many characters before it goes into the context (for longer things like character cards, post them as a .txt and then call it)
 max_images_per_round = 4
 image_max_side = 1024             # images in the message that calls it
 low_detail_max_side = 512         # other images (the model only looks at them at 512×512 anyway)
@@ -82,3 +87,12 @@ search_max_chars = 2000           # max characters of one search result
 share_recent_hours = 6            # if the same person talked with it in another channel within this many hours, bring those lines along
 recall_max_chars = 3000           # max characters when looking through another channel's history
 share_list_limit = 30             # max channels listed when telling it which channels it can look through
+emoji_list_limit = 100            # max server emoji listed when telling it which ones there are
+sticker_list_limit = 30           # max server stickers listed when telling it which ones there are
+link_max_chars = 4000             # max characters read from one opened link
+max_links_per_round = 3           # max links opened in one round
+daily_link_limit = 100            # max links opened per server per day (Tavily counts every 5 web pages opened as 1 credit)
+image_cooldown_seconds = 600      # at least 10 minutes between two online image searches in the same channel
+image_candidates = 4              # how many candidate pictures it's shown when finding images online
+image_max_bytes = 8000000         # max size of a picture it sends: 8 MB (Discord's default upload limit is 10 MB)
+meme_list_limit = 80              # max memes listed when telling it what's in the meme library

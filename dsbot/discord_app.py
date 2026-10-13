@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import signal
 from collections import deque
@@ -12,14 +13,28 @@ import discord
 from discord import app_commands
 
 from .config import AppConfig, Secrets
-from .convert import convert_message, parse_aliases, safe_category_id
+from .convert import (
+    convert_message,
+    emoji_lookup,
+    parse_aliases,
+    resolve_reaction,
+    safe_category_id,
+    usable_emojis,
+    usable_stickers,
+)
 from .engine import Engine
 from .ledger import Ledger
+from .links import LinkReader
 from .llm import DeepSeekClient
+from .memes import MemeLibrary
 from .models import ChannelInfo, ChannelPlace, IncomingMessage
+from .net import HttpClient
+from .pictures import PictureFinder
 from .search import WebSearch
 from .settings import Settings
 from .store import Store
+from .tavily import Tavily
+from .textutil import DISCORD_LIMIT, render_custom_emoji
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +48,7 @@ BOT_PERMISSIONS = discord.Permissions(
     read_message_history=True,
     add_reactions=True,
     embed_links=True,
+    attach_files=True,  # for sending memes and pictures found online
 )
 
 
@@ -92,6 +108,9 @@ class DiscordTransport:
             guild_name=guild.name if guild is not None else "unknown server",
             channel_name=getattr(channel, "name", None) or str(channel_id),
             bot_name=bot_name,
+            # sorted: both lists go into the system prompt, and if the order shifted the cache would miss
+            emojis=sorted({e.name for e in usable_emojis(guild)}),
+            stickers=sorted({st.name for st in usable_stickers(guild)}),
         )
 
     def locate(self, channel_id: int) -> ChannelPlace | None:
@@ -127,19 +146,61 @@ class DiscordTransport:
                 return None
         return channel
 
-    async def send(self, channel_id: int, text: str, *, reply_to: int | None, ping: bool) -> int | None:
-        channel = await self._resolve(channel_id)
-        if channel is None:
-            return None
+    @staticmethod
+    def _base_kwargs(channel_id: int, reply_to: int | None, ping: bool) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             # only "notify the person being replied to" is allowed; @everyone / @someone / @role in the model's output never actually pings
             "allowed_mentions": discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=ping),
-            "suppress_embeds": True,  # source links in answers don't expand into previews, so they don't flood the channel
         }
         if reply_to is not None:
             kwargs["reference"] = discord.MessageReference(
                 message_id=reply_to, channel_id=channel_id, fail_if_not_exists=False
             )
+        return kwargs
+
+    async def send_sticker(self, channel_id: int, name: str, *, reply_to: int | None, ping: bool) -> int | None:
+        """Send one of this server's own stickers (name is the sticker's name, already checked by the engine)."""
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        sticker = next((st for st in usable_stickers(getattr(channel, "guild", None)) if st.name == name), None)
+        if sticker is None:
+            log.info('Channel %s: can\'t find the sticker "%s" (maybe it was just deleted)', channel_id, name)
+            return None
+        try:
+            sent = await channel.send(stickers=[sticker], **self._base_kwargs(channel_id, reply_to, ping))
+        except Exception as exc:  # no permission, the sticker can't be used, and the like
+            log.warning("Sending a sticker failed (channel %s): %r", channel_id, exc)
+            return None
+        self.remember_sent(sent.id)
+        return sent.id
+
+    async def send_file(
+        self, channel_id: int, data: bytes, filename: str, *, reply_to: int | None, ping: bool
+    ) -> int | None:
+        """Send a picture (a meme, or a picture found online), uploaded as an attachment."""
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        try:
+            sent = await channel.send(
+                file=discord.File(io.BytesIO(data), filename=filename), **self._base_kwargs(channel_id, reply_to, ping)
+            )
+        except Exception as exc:  # no "Attach Files" permission, the picture is too big, and the like
+            log.warning("Sending a picture failed (channel %s): %r", channel_id, exc)
+            return None
+        self.remember_sent(sent.id)
+        return sent.id
+
+    async def send(self, channel_id: int, text: str, *, reply_to: int | None, ping: bool) -> int | None:
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        converted = render_custom_emoji(text, emoji_lookup(getattr(channel, "guild", None)))  # :name: → the server's emoji
+        if len(converted) <= DISCORD_LIMIT:  # <:name:id> is longer; if that goes over the limit, send it as is rather than not at all
+            text = converted
+        kwargs = self._base_kwargs(channel_id, reply_to, ping)
+        kwargs["suppress_embeds"] = True  # source links in answers don't expand into previews, so they don't flood the channel
         try:
             sent = await channel.send(text, **kwargs)
         except Exception as exc:  # HTTPException, plus OSError / aiohttp errors when the network drops
@@ -153,7 +214,7 @@ class DiscordTransport:
         if channel is None or not hasattr(channel, "get_partial_message"):
             return False
         try:
-            await channel.get_partial_message(message_id).add_reaction(emoji)
+            await channel.get_partial_message(message_id).add_reaction(resolve_reaction(emoji, getattr(channel, "guild", None)))
             return True
         except Exception as exc:
             log.info("Adding reaction %s failed: %r", emoji, exc)
@@ -196,7 +257,36 @@ class DSBot(discord.Client):
             max_uses=cfg.deepseek.search_max_uses,
             tavily_key=secrets.tavily_api_key,
         )
-        self.engine = Engine(cfg, settings, store, llm, ledger, self.transport, searcher=self.searcher)
+        # reading links and finding images: posts on X go through FxTwitter (no key needed); web pages and image searches need Tavily.
+        # Careful not to call it self.http: that's the client discord.py itself uses to talk to Discord, and overwriting it breaks logging in
+        self.web = HttpClient()
+        tavily = Tavily(self.web, secrets.tavily_api_key) if secrets.tavily_api_key else None
+        self.links = LinkReader(self.web, tavily, tz=cfg.bot.timezone)
+        self.pictures = (
+            PictureFinder(
+                self.web,
+                tavily,
+                keep=cfg.engine.image_candidates,
+                max_bytes=cfg.engine.image_max_bytes,
+                view_side=cfg.engine.low_detail_max_side,
+            )
+            if tavily is not None
+            else None
+        )
+        self.memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)
+        self.engine = Engine(
+            cfg,
+            settings,
+            store,
+            llm,
+            ledger,
+            self.transport,
+            searcher=self.searcher,
+            owner_id=secrets.owner_id,
+            link_reader=self.links,
+            pictures=self.pictures,
+            memes=self.memes,
+        )
         self._ticker: asyncio.Task[None] | None = None
 
         from .commands import register_commands
@@ -249,6 +339,7 @@ class DSBot(discord.Client):
             log.warning("Some rounds were still running at shutdown; exiting anyway")
         await self.llm.close()
         await self.searcher.close()
+        await self.web.close()
         await super().close()
 
     # ---------------------------------------------------------------- events

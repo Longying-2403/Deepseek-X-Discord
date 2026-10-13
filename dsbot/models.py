@@ -58,11 +58,46 @@ class FileText:
 
 @dataclass
 class DocBlock:
-    """One file content block to put into the chat log."""
+    """One content block to put into the chat log: a file, or an opened link."""
 
     label: str  # the message the file is in, e.g. "#12"; "an earlier message" when its number isn't known
-    filename: str
+    filename: str  # the file name; for a link, its title
     result: FileText
+    source: str = "file"  # "file" / "link"
+
+
+@dataclass
+class LinkRef:
+    """A link in a message. title / site come from the preview Discord generates (there may be none)."""
+
+    url: str
+    title: str | None = None
+    site: str | None = None
+    preview_image: bool = False  # the preview already has an image (it goes through image viewing), so opening the link doesn't need to attach images again
+
+
+@dataclass
+class LinkResult:
+    """The result of opening a link. A non-empty result.error means it wasn't opened."""
+
+    title: str
+    result: FileText
+
+
+@dataclass
+class Picture:
+    """One candidate picture found online."""
+
+    data: bytes = field(repr=False)
+    mime: str  # image/png / image/jpeg / image/gif / image/webp
+    uri: str = field(repr=False)  # the downsized version shown to the model (data URI)
+    description: str = ""
+    host: str = ""  # the site the picture is on
+
+    @property
+    def filename(self) -> str:
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}.get(self.mime, "png")
+        return f"image.{ext}"
 
 
 @dataclass
@@ -82,9 +117,11 @@ class IncomingMessage:
     images: list[ImageAttachment] = field(default_factory=list)
     files: list[FileAttachment] = field(default_factory=list)
     stickers: list[str] = field(default_factory=list)
+    links: list[LinkRef] = field(default_factory=list)  # web links that can be opened (images, GIFs and Discord's own links don't count)
     received_at: float = 0.0
     trigger: bool = False  # set by the engine: this mention passed the rate limit and needs a response right away
     awaiting_embeds: bool = False  # has a link, but the preview hasn't arrived yet (Discord adds it a bit later)
+    from_owner: bool = False  # set by the engine: the speaker is OWNER_ID (dsowner) in person
 
     @property
     def addressed(self) -> bool:
@@ -94,14 +131,45 @@ class IncomingMessage:
 
 @dataclass
 class Action:
-    kind: str  # "reply" | "react" | "read" | "search" | "recall"
+    # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
+    kind: str
     to: int | None = None  # message number (the number after #)
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
-    query: str | None = None  # search: what to search for; recall: keywords to look for (optional)
+    query: str | None = None  # search / image: what to look for; recall: keywords to look for (optional)
     channel: str | None = None  # recall: which channel
+    name: str | None = None  # sticker: the sticker's name; meme: the meme's name
+    text: str | None = None  # persona: the complete persona after the change ("" = back to default; None = not given)
+    scope: str | None = None  # persona: None = the one currently used here; "server" = whole server; "channel" = this channel
+    undo: bool = False  # persona: undo the last change
+    image: int | None = None  # pick: which of the found pictures to send (starting from 1)
 
     def to_json(self) -> dict[str, Any]:
+        if self.kind in ("sticker", "meme"):
+            d: dict[str, Any] = {"type": self.kind}
+            if self.to is not None:
+                d["to"] = self.to
+            d["name"] = self.name
+            return d
+        if self.kind == "pick":
+            d = {"type": "pick"}
+            if self.to is not None:
+                d["to"] = self.to
+            d["image"] = self.image
+            return d
+        if self.kind == "image":
+            return {"type": "image", "query": self.query}
+        if self.kind == "persona":
+            d = {"type": "persona"}
+            if self.to is not None:
+                d["to"] = self.to
+            if self.scope:
+                d["scope"] = self.scope
+            if self.undo:
+                d["undo"] = True
+            if self.text is not None:
+                d["text"] = self.text
+            return d
         if self.kind == "read":
             return {"type": "read", "to": self.to}
         if self.kind == "search":
@@ -146,6 +214,8 @@ class ChannelInfo:
     guild_name: str
     channel_name: str
     bot_name: str
+    emojis: list[str] = field(default_factory=list)  # names of the custom emoji the bot can use on this server (sorted)
+    stickers: list[str] = field(default_factory=list)  # names of the stickers it can send on this server (sorted)
 
 
 @dataclass

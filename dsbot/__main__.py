@@ -75,6 +75,21 @@ def check(config_path: str) -> int:
     print(f"✓ Web search: DeepSeek's built-in search ({cfg.deepseek.anthropic_url})"
           + (", falling back to Tavily if it fails" if secrets.tavily_api_key else "")
           + '. To try a real search: python -m dsbot --test-search "keywords"')
+    if secrets.tavily_api_key:
+        print("✓ Reading links: posts on X via FxTwitter, web pages via Tavily; finding images online: Tavily. "
+              'To try them: python -m dsbot --test-link URL / --test-image "keywords"')
+    else:
+        print("! TAVILY_API_KEY isn't set: only posts on X can be opened (other sites only get Discord's preview), "
+              "and it can't find images online (the meme library still works)")
+    from .memes import MemeLibrary
+
+    memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)
+    shared = memes.names(0) if os.path.isdir(cfg.bot.meme_dir) else []
+    print(
+        f"✓ Shared meme library {cfg.bot.meme_dir}/: {len(shared)} meme{'s' if len(shared) != 1 else ''}"
+        if shared
+        else f"· Shared meme library {cfg.bot.meme_dir}/ is still empty (optional)"
+    )
 
     store = Store(":memory:")
     bot = DSBot(
@@ -141,11 +156,104 @@ def test_search(config_path: str, query: str) -> int:
     return 0
 
 
+def test_link(config_path: str, url: str) -> int:
+    """Really open one link (posts on X go through FxTwitter; a web page uses up a little Tavily quota) to confirm reading links works."""
+    import asyncio
+
+    from .links import LinkReader, openable
+    from .net import HttpClient
+    from .tavily import Tavily
+
+    cfg = load_config(config_path)
+    secrets = load_secrets()
+    if not openable(url):
+        print("✗ This URL wouldn't be opened (images, videos, Discord's own links, private-network addresses and the like)")
+        return 1
+
+    async def run():  # type: ignore[no-untyped-def]
+        http = HttpClient()
+        try:
+            tavily = Tavily(http, secrets.tavily_api_key) if secrets.tavily_api_key else None
+            reader = LinkReader(http, tavily, tz=cfg.bot.timezone)
+            if not reader.readable(url):
+                return None
+            return await reader.read(url, max_chars=cfg.engine.link_max_chars, image_side=cfg.engine.image_max_side)
+        finally:
+            await http.close()
+
+    print(f"Opening {url} …")
+    got = asyncio.run(run())
+    if got is None:
+        print("✗ TAVILY_API_KEY isn't set: only posts on X can be opened")
+        return 1
+    if got.result.error:
+        print(f"✗ {got.result.error}")
+        return 1
+    print(f'✓ {got.result.kind} "{got.title}" ({got.result.detail})\n{got.result.text[:1500]}')
+    if got.result.images:
+        print(f"({len(got.result.images)} image{'s' if len(got.result.images) != 1 else ''} attached)")
+    return 0
+
+
+def test_image(config_path: str, query: str) -> int:
+    """Really search for images once (uses 1 Tavily credit) and save the candidates to data/image-test/ to look at."""
+    import asyncio
+    from pathlib import Path
+
+    from .net import HttpClient
+    from .pictures import PictureFinder
+    from .tavily import Tavily, TavilyError
+
+    cfg = load_config(config_path)
+    secrets = load_secrets()
+    if not secrets.tavily_api_key:
+        print("✗ Finding images online needs TAVILY_API_KEY in .env")
+        return 1
+
+    async def run():  # type: ignore[no-untyped-def]
+        http = HttpClient()
+        try:
+            finder = PictureFinder(
+                http, Tavily(http, secrets.tavily_api_key), keep=cfg.engine.image_candidates, max_bytes=cfg.engine.image_max_bytes
+            )
+            return await finder.find(query)
+        finally:
+            await http.close()
+
+    print(f'Looking for images of "{query}"…')
+    try:
+        found = asyncio.run(run())
+    except TavilyError as exc:
+        print(f"✗ {exc}")
+        return 1
+    if not found:
+        print("✗ No usable images found")
+        return 1
+    out = Path("data") / "image-test"
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(out, 0o777)  # test pictures: accounts on the NAS can delete them right after looking
+    except OSError:
+        pass
+    for i, picture in enumerate(found, 1):
+        path = out / f"candidate{i}-{picture.filename}"
+        path.write_bytes(picture.data)
+        try:
+            os.chmod(path, 0o666)
+        except OSError:
+            pass
+        print(f"  Image {i}: {picture.description or '(no description)'} ({picture.host}, {len(picture.data) // 1024} KB) → {path}")
+    print("✓ Found some. In a real chat, it looks at these first and only sends one if it fits.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek Buddy Discord bot")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="only run the offline self-check; don't start the bot")
     parser.add_argument("--test-search", metavar="KEYWORDS", help="run one real search to confirm web search works (costs a tiny bit)")
+    parser.add_argument("--test-link", metavar="URL", help="really open one link to confirm reading links works (a web page uses up a little Tavily quota)")
+    parser.add_argument("--test-image", metavar="KEYWORDS", help="really search for images once and save the candidates to data/image-test/ (uses 1 Tavily credit)")
     args = parser.parse_args()
     _load_dotenv()
 
@@ -153,6 +261,10 @@ def main() -> int:
         return check(args.config)
     if args.test_search:
         return test_search(args.config, args.test_search)
+    if args.test_link:
+        return test_link(args.config, args.test_link)
+    if args.test_image:
+        return test_image(args.config, args.test_image)
 
     cfg = load_config(args.config)
     logging.basicConfig(

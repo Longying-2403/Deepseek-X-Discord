@@ -44,6 +44,7 @@ _SPEC_LIST = [
     Spec("aliases", "Aliases", str, "admin", "Names that also count as calling it when they appear in a message, comma-separated, e.g. DS,Dee"),
     Spec("persona", "Persona", str, "admin", "Persona description; leave empty for the default persona"),
     Spec("share_memory", "Memory sharing", bool, "admin", "Share memory with other channels that also have sharing on (private channels must turn it on themselves to share out)"),
+    Spec("images", "Send pictures", bool, "admin", "Let it send pictures from the meme library on its own, or find pictures online (it looks at what it finds before deciding whether to send one)"),
     # —— owner ——
     Spec("min_eval_interval", "Min seconds between checks", int, "owner", "Minimum seconds between two proactive checks (mainly controls cost)", 10, 86400),
     Spec("proactive_thinking", "Thinking for proactive checks", str, "owner", "Thinking level for proactive checks", choices=("off", "low", "high")),
@@ -55,6 +56,8 @@ _SPEC_LIST = [
     Spec("files", "Read files", bool, "owner", "Whether files people upload are read (text, code, PDF, Word, Excel, PowerPoint)"),
     Spec("web_search", "Web search", bool, "owner", "When it's called and needs current information, search the web (with DeepSeek's built-in search)"),
     Spec("daily_search_limit", "Daily search limit", int, "owner", "Most searches per server per day (0 = no searching)", 0, 1000),
+    Spec("links", "Read links", bool, "owner", "When it's called, open the links in the message (posts on X go through FxTwitter; other web pages need Tavily)"),
+    Spec("daily_image_limit", "Daily image search limit", int, "owner", "Most online image searches per server per day (0 = none; the meme library still works)", 0, 1000),
 ]
 
 SPECS: dict[str, Spec] = {s.key: s for s in _SPEC_LIST}
@@ -73,6 +76,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "aliases": "",
     "persona": "",
     "share_memory": False,
+    "images": True,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -83,6 +87,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "files": True,
     "web_search": True,
     "daily_search_limit": 30,
+    "links": True,
+    "daily_image_limit": 10,
 }
 
 # One-click presets: they only touch the three settings that control how much it talks
@@ -178,6 +184,8 @@ class BotConfig:
     sync_commands_on_start: bool = True
     log_level: str = "INFO"
     tick_seconds: float = 5.0
+    meme_dir: str = "data/memes"  # the shared meme library: create this folder on the NAS yourself and put pictures in it
+    server_meme_dir: str = "data/server-memes"  # what each server uploads with /ds meme
 
 
 @dataclass
@@ -185,7 +193,7 @@ class EngineConfig:
     max_batch_messages: int = 40  # max new messages per round (older ones are only counted)
     max_pending_messages: int = 120  # buffer cap, so it can't grow forever when nobody calls it for a long time
     pending_max_age_seconds: float = 21600  # messages older than 6 hours are dropped from the buffer
-    max_chars_per_message: int = 1200  # each message is cut to this many characters before going into the context
+    max_chars_per_message: int = 1800  # each message is cut to this many characters before going into the context (for longer things like character cards, send a .txt and then call it)
     max_images_per_round: int = 4
     image_max_side: int = 1024  # images in the message that calls it: longest side in pixels
     low_detail_max_side: int = 512  # other images (detail=low; the model only looks at 512×512 anyway)
@@ -208,6 +216,15 @@ class EngineConfig:
     share_recent_hours: float = 6.0  # if the same person talked with it in another channel within this many hours, carry those lines over
     recall_max_chars: int = 3000  # max characters when looking through another channel's history
     share_list_limit: int = 30  # max channels listed when telling it which channels it can look through
+    emoji_list_limit: int = 100  # max server emoji listed when telling it which ones there are
+    sticker_list_limit: int = 30  # max server stickers listed when telling it which ones there are
+    link_max_chars: int = 4000  # max characters read from one opened link
+    max_links_per_round: int = 3  # max links opened in one round
+    daily_link_limit: int = 100  # max links opened per server per day (Tavily counts every 5 web pages opened as 1 credit)
+    image_cooldown_seconds: float = 600  # minimum time between two online image searches in the same channel
+    image_candidates: int = 4  # how many candidate pictures it's shown when finding images online
+    image_max_bytes: int = 8_000_000  # max size of a picture it sends (Discord's default upload limit is 10 MB)
+    meme_list_limit: int = 80  # max memes listed when telling it what's in the meme library
 
 
 @dataclass
@@ -269,7 +286,7 @@ class Secrets:
     owner_id: int
     control_guild_id: int | None = None
     discord_proxy: str | None = None
-    tavily_api_key: str | None = None  # optional: use Tavily when DeepSeek's built-in search doesn't work
+    tavily_api_key: str | None = None  # optional: opening web pages and finding images online both rely on it; web search also switches to it when DeepSeek's built-in search doesn't work
 
 
 def load_secrets(env: dict[str, str] | None = None) -> Secrets:

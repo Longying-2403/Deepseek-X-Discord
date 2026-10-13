@@ -1,14 +1,16 @@
 """Slash commands.
 
-/ds …       Server admins (need the "Manage Server" permission by default): areas, how much it talks, presets, persona, status.
+/ds …       Server admins (need the "Manage Server" permission by default): areas, how much it talks, presets, persona, meme library, status.
 /dsowner …  Registered only in the CONTROL_GUILD_ID server, and only accepts OWNER_ID: budget, thinking level, web search, etc.
             Like /ds, by default only people with "Manage Server" can see it (if the bot is in a friend's server where you're a moderator, you'll see it too).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -17,7 +19,7 @@ from discord.app_commands import Choice
 
 from .config import ADMIN_KEYS, OWNER_KEYS, PRESETS, RESET_WORDS, SPECS, format_value
 from .convert import safe_category_id
-from .prompts import DEFAULT_PERSONA
+from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
 
 if TYPE_CHECKING:
     from .discord_app import DSBot
@@ -39,6 +41,16 @@ SHARE_ACTIONS = [
     Choice(name="Off", value="off"),
     Choice(name="Inherit", value="inherit"),
 ]
+MEME_ACTIONS = [
+    Choice(name="Upload", value="add"),
+    Choice(name="Remove", value="remove"),
+    Choice(name="List", value="list"),
+]
+LINK_MODES = {
+    "all": "Reading links: on (posts on X via FxTwitter, web pages via Tavily)",
+    "x": "Reading links: posts on X only (TAVILY_API_KEY isn't set, so other sites only get Discord's preview)",
+    "off": "Reading links: off",
+}
 NO_CATEGORY = 'This channel isn\'t in any category, so pick "This channel" or "Whole server" as the scope.'
 SCOPE_HELP = "This channel, this category, or the whole server (default: this channel)"
 SCOPE_DEFAULT_HELP = "This channel, this category, or the server-wide default (default: this channel)"
@@ -122,9 +134,9 @@ class PersonaModal(discord.ui.Modal):
         self.inherited = inherited  # the persona used when this scope has no setting of its own
         self.text = discord.ui.TextInput(
             style=discord.TextStyle.long,
-            default=current[:4000] or None,
+            default=current[:PERSONA_MAX_CHARS] or None,
             required=False,
-            max_length=4000,
+            max_length=PERSONA_MAX_CHARS,
             placeholder="Leave empty to use the persona from the level above",
         )
         self.add_item(
@@ -137,13 +149,27 @@ class PersonaModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         value = self.text.value.strip()
+        old = self.bot.settings.overrides(self.scope, self.scope_id).get("persona")
         if not value or value == self.inherited.strip():
             # unchanged (same as the level above): don't store it separately, so later changes to the level above apply here too
             self.bot.settings.unset(self.scope, self.scope_id, "persona")
+            new = None
             done = "back to the default persona" if self.scope == "guild" else "now uses the persona from the level above"
         else:
             self.bot.settings.set(self.scope, self.scope_id, "persona", value)
+            new = value
             done = "persona updated"
+        if new != old:
+            # recorded in the persona history, so dsowner saying "change it back" in chat can undo it
+            self.bot.store.add_persona_change(
+                ts=time.time(),
+                scope=self.scope,
+                scope_id=self.scope_id,
+                old=old,
+                new=new,
+                by_user=interaction.user.id,
+                via="command",
+            )
         await _reply(
             interaction,
             f"{self.where}: {done}. It takes effect from the next round.\n"
@@ -202,6 +228,25 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append(f"Web search: on · searches on this server today: {st['searches']} / {view.daily_search_limit}")
     else:
         lines.append("Web search: off")
+    link_line = LINK_MODES.get(st["links_mode"], LINK_MODES["off"])
+    if st["links_mode"] != "off":
+        link_line += f" · links opened on this server today: {st['links_opened']}"
+    lines.append(link_line)
+    if st["memes_on"]:
+        own, shared = st["meme_counts"]
+        if st["can_find_images"]:
+            found = f"image searches on this server today: {st['images_found']} / {view.daily_image_limit}"
+        else:
+            found = "finding images online: off (TAVILY_API_KEY isn't set, or the daily image search limit is 0)"
+        lines.append(f"Sending pictures: on · meme library: {own + shared} ({own} from this server, {shared} shared) · {found}")
+    else:
+        lines.append(f"Sending pictures: off (from {view.source('images')})")
+    if st["memes_on"] and st["media_blocked_for"] > 0:
+        minutes = max(1, round(st["media_blocked_for"] / 60))
+        lines.append(
+            '⚠️ Pictures have kept failing to send here lately (most likely the bot lacks the "Attach Files" permission), '
+            f"so no pictures for about {minutes} min; it will try again automatically after that"
+        )
     if st["last_decision"]:
         lines.append(f"Last round: {st['last_decision']}")
     lines.append(
@@ -222,6 +267,18 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
             "⚠️ It couldn't send messages here for the last few rounds (check the bot's permission to send messages), "
             "so proactive chat is paused for 30 minutes"
         )
+    return "\n".join(lines)
+
+
+def meme_list_text(bot: "DSBot", guild_id: int) -> str:
+    entries = bot.memes.entries(guild_id)
+    own = sorted(name for name, meme in entries.items() if not meme.shared)
+    shared = sorted(name for name, meme in entries.items() if meme.shared)
+    lines = [f"**Meme library** ({len(own)} from this server · {len(shared)} shared)"]
+    lines.append("This server's: " + (", ".join(own) if own else "none yet (add some with `/ds meme action:Upload`)"))
+    lines.append("Shared: " + (", ".join(shared) if shared else f"none (the bot's owner can put pictures in `{bot.cfg.bot.meme_dir}/` on the NAS)"))
+    if not bot.settings.get("images", guild_id=guild_id):
+        lines.append("⚠️ Sending pictures is turned off on this server: turn it on with `/ds set setting:Send pictures value:on scope:Whole server`")
     return "\n".join(lines)
 
 
@@ -309,6 +366,63 @@ def register_commands(bot: "DSBot") -> None:
         if action.value == "on" and scope_name != "channel":
             lines.append("(Private channels in this scope still don't share their content out unless it's turned on in that channel itself.)")
         await _reply(interaction, "\n".join(lines))
+
+    @admin.command(name="meme", description="Manage this server's meme library: upload, remove, list (it picks which one to send by name)")
+    @app_commands.describe(
+        action="Upload / Remove / List",
+        name='Name it by what it means, e.g. "facepalm-cat" (it picks by name); empty on upload = the file name',
+        image="The picture to upload: PNG, JPG, GIF or WebP, up to 8 MB",
+    )
+    @app_commands.choices(action=MEME_ACTIONS)
+    async def meme_cmd(
+        interaction: discord.Interaction,
+        action: Choice[str],
+        name: Optional[str] = None,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        guild_id = interaction.guild_id
+        library = bot.memes
+        if action.value == "list":
+            await _reply(interaction, meme_list_text(bot, guild_id))
+            return
+        if action.value == "remove":
+            if not name or not name.strip():
+                await _reply(interaction, 'Which one? Put the meme\'s name in "name" (`/ds meme action:List` shows them all).')
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)  # may have to wait for an upload in progress to finish writing
+            result = await asyncio.to_thread(library.remove, guild_id, name)
+            if result == "removed":
+                await _reply(interaction, f'Removed the meme "{name.strip()}".')
+            elif result == "shared":
+                await _reply(interaction, f'"{name.strip()}" is in the shared library; delete it from the `{bot.cfg.bot.meme_dir}/` folder on the NAS.')
+            else:
+                await _reply(interaction, f'This server has no meme called "{name.strip()}".')
+            return
+        if image is None:
+            await _reply(interaction, 'To upload, attach a picture in "image".')
+            return
+        if image.size > library.max_bytes:
+            await _reply(interaction, f"The picture is too big (the limit is {library.max_bytes // 1_000_000} MB).")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)  # downloading the picture takes a moment
+        try:
+            data = await image.read()
+        except discord.HTTPException as exc:
+            await _reply(interaction, f"Downloading the picture failed: {exc}")
+            return
+        try:
+            meme = await asyncio.to_thread(library.add, guild_id, name or PurePath(image.filename).stem, data)
+        except ValueError as exc:
+            await _reply(interaction, f"Couldn't save it: {exc}")
+            return
+        except OSError as exc:
+            log.exception("Saving the meme failed")
+            await _reply(interaction, f"Couldn't save it (error writing the file): {exc}")
+            return
+        text = f'Added to this server\'s meme library: "{meme.name}". It decides when to send a meme by its name, so a name that clearly says what it means works best.'
+        if not bot.settings.view(*_ids(interaction)).images:
+            text += "\n⚠️ But sending pictures is turned off here, so it won't send it: `/ds set setting:Send pictures value:on`"
+        await _reply(interaction, text)
 
     @admin.command(name="area-list", description="See where on this server it responds")
     async def area_list_cmd(interaction: discord.Interaction) -> None:

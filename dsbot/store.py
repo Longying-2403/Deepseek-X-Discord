@@ -57,6 +57,18 @@ CREATE TABLE IF NOT EXISTS usage (
     cost REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_usage_day ON usage (day, guild_id, channel_id);
+CREATE TABLE IF NOT EXISTS persona_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    scope TEXT NOT NULL,          -- guild / category / channel
+    scope_id INTEGER NOT NULL,
+    old TEXT,                     -- this level's own persona before the change; NULL = none of its own (inherited from the level above)
+    new TEXT,                     -- after the change; NULL = no longer set at this level
+    by_user INTEGER NOT NULL,     -- who changed it (user ID)
+    via TEXT NOT NULL,            -- chat (asked in chat) / command (/ds persona) / undo
+    request TEXT,                 -- the request at the time, for looking things up later
+    reverted INTEGER NOT NULL DEFAULT 0  -- this change has since been undone
+);
 """
 
 MSGMAP_KEEP = 3000  # how many recent message-number mappings to keep per channel
@@ -222,6 +234,45 @@ class Store:
                 (time.time(), channel_id),
             )
 
+    # ---- persona change history ----
+    def add_persona_change(
+        self,
+        *,
+        ts: float,
+        scope: str,
+        scope_id: int,
+        old: str | None,
+        new: str | None,
+        by_user: int,
+        via: str,
+        request: str = "",
+    ) -> int:
+        with self.db:
+            cur = self.db.execute(
+                "INSERT INTO persona_history (ts, scope, scope_id, old, new, by_user, via, request) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, scope, scope_id, old, new, by_user, via, request),
+            )
+        return int(cur.lastrowid)
+
+    def last_persona_change(self, scopes: Iterable[tuple[str, int]]) -> dict[str, Any] | None:
+        """The most recent persona change in these scopes that hasn't been undone yet (used for undo; an undo doesn't count as a change itself, so undoing repeatedly steps further and further back)."""
+        keys = list(scopes)
+        if not keys:
+            return None
+        where = " OR ".join("(scope = ? AND scope_id = ?)" for _ in keys)
+        params = [x for key in keys for x in key]
+        row = self.db.execute(
+            f"SELECT id, ts, scope, scope_id, old, new, by_user, via FROM persona_history WHERE ({where}) "
+            "AND via != 'undo' AND reverted = 0 ORDER BY id DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_persona_reverted(self, row_id: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE persona_history SET reverted = 1 WHERE id = ?", (row_id,))
+
     # ---- usage ----
     def record_usage(
         self,
@@ -277,6 +328,8 @@ class Store:
         if channel_id is not None:
             where.append("channel_id = ?")
             args.append(channel_id)
+        # opening links and finding images online are only recorded to count them (they aren't DeepSeek calls), so they're left out of the call counts and outcome stats
+        where.append("kind NOT IN ('link', 'image')")
         clause = " AND ".join(where)
         totals = self.db.execute(
             f"SELECT COUNT(*) AS n, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",

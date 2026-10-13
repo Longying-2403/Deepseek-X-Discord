@@ -8,6 +8,11 @@ import re
 DISCORD_LIMIT = 2000
 _CUSTOM_EMOJI = re.compile(r"<a?:(\w{1,64}):\d{5,25}>")
 _FENCE = re.compile(r"^\s*```(\S*)")
+# :name: as the model writes it (Discord emoji names are only ASCII letters, digits and underscores). Only names that really exist
+# on the server get replaced, so anything may come right before or after ("lol:doge:", ":doge:!!!", "hhh:doge:"); it just must
+# not touch an already-written <:name:id> / <a:name:id>
+_EMOJI_SHORTCODE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):")
+_CODE_SPAN = re.compile(r"```.*?```|`[^`\n]*`", re.S)
 
 
 def clean_text(text: str) -> str:
@@ -22,6 +27,31 @@ def clean_text(text: str) -> str:
 def clean_custom_emoji(text: str) -> str:
     """<:pepe:123> -> :pepe:"""
     return _CUSTOM_EMOJI.sub(r":\1:", text)
+
+
+def render_custom_emoji(text: str, lookup: dict[str, str]) -> str:
+    """Turn the :name: the model writes into Discord's custom emoji <:name:id>. lookup: emoji name -> how it's written when sent.
+
+    Names are matched exactly first, then ignoring case; unknown names are left as they are. Nothing inside code blocks or inline code is touched.
+    """
+    if not lookup or ":" not in text:
+        return text
+    folded = {}
+    for name, code in lookup.items():
+        folded.setdefault(name.casefold(), code)
+
+    def swap(m: re.Match[str]) -> str:
+        name = m.group(1)
+        return lookup.get(name) or folded.get(name.casefold()) or m.group(0)
+
+    out: list[str] = []
+    last = 0
+    for code in _CODE_SPAN.finditer(text):
+        out.append(_EMOJI_SHORTCODE.sub(swap, text[last : code.start()]))
+        out.append(code.group(0))
+        last = code.end()
+    out.append(_EMOJI_SHORTCODE.sub(swap, text[last:]))
+    return "".join(out)
 
 
 def one_line(text: str, limit: int = 32) -> str:

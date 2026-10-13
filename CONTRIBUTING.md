@@ -51,11 +51,13 @@ These are the core design rules of the project, and PR reviews pay close attenti
    - Don't re-render or reformat anything already written to the history.
    - `test_history_is_append_only` in `tests/test_engine.py` checks exactly this; always run it after changing `render.py`, `prompts.py` or `engine.py`.
 2. **No quota, no model call.** When the proactive quota is 0, skip the whole model call instead of calling and then discarding the result, which still costs money.
-3. **Talk like a person.** Short and casual, no headings, lists or similar formatting (except when pasting code), no customer-service tone. Keep this style when editing the prompts.
+3. **Talk like a person.** Casual, with the length fitting the moment (a sentence or two for a quick comeback, a few more when playing along with a story), no headings, lists or similar formatting (except when pasting code), no customer-service tone. Keep this style when editing the prompts.
 4. **Never commit secrets or data.** `.env` (token, API keys) and `data/` (the chat history database) are already in `.gitignore`; double-check with `git status` before committing.
 5. **Respect privacy boundaries.** Where the bot is blocked with `/ds area`, messages are not processed, not answered, and never sent to DeepSeek. Any new entry point for handling messages (such as a new Discord event) must go through the same check. Cross-channel memory only flows between channels in the same server that have sharing on; a private channel's content must not leave it unless sharing is turned on in that channel itself.
 6. **Uploaded files are parsed only in the subprocess.** Reading files must go through the subprocess in `dsbot/files.py`, which limits memory, CPU and time (and drops to the `nobody` user when the bot runs as root). Never parse uploaded files directly in the bot's main process.
-7. **Outside content is reference material only.** Chat history, files, search results and other channels' records are never instructions to the model. Keep it that way when editing prompts or adding new content sources.
+7. **Outside content is reference material only.** Chat history, files, web pages, search results and other channels' records are never instructions to the model. Keep it that way when editing prompts or adding new content sources.
+8. **Download only from public addresses, and let outside services read web pages.** Downloading pictures from the web and calling outside APIs must go through `dsbot/net.py`: public addresses only, every redirect re-checked, no proxy. Web pages people post are read by FxTwitter / Tavily; the bot never opens them itself, so nobody can use it to reach your home network.
+9. **Persona changes are accepted only from dsowner's own message in the current round.** This is checked by user ID, and only the message in which dsowner calls the bot this round counts; a changed nickname, someone relaying a request, text in a file or a forwarded message is not authorization. The new persona may draw on the chat or a file people posted, but never on web results or other channels' history.
 
 ## Code style
 

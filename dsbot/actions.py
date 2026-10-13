@@ -12,6 +12,21 @@ MAX_ACTIONS = 6
 MAX_MESSAGES_PER_REPLY = 3
 MAX_MESSAGE_CHARS = 1900
 MAX_QUERY_CHARS = 200
+MAX_PERSONA_PARSE_CHARS = 8000  # keep this much when parsing; anything over the persona limit (4000 characters) is rejected by the engine, which tells the model
+# Chinese spellings are still accepted too: the model sometimes answers in the chat's language
+_SERVER_SCOPE = {
+    "server", "guild", "whole server", "all", "entire server", "server-wide", "this server",
+    "服务器", "全服务器", "整个服务器", "全服", "本服务器",
+}  # fmt: skip
+_TRUE_WORDS = {"true", "yes", "1", "是", "对"}
+
+
+def _persona_scope(raw: Any) -> str | None:
+    """Not given = the one currently used here; only an explicit whole-server value counts as server; anything else (channel, thread, category…) is treated as the narrowest, "this channel"."""
+    text = str(raw or "").strip().lower()
+    if not text or text in ("auto", "default", "here", "默认", "这里"):
+        return None
+    return "server" if text in _SERVER_SCOPE else "channel"
 
 _FENCED = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S | re.I)
 _OBJECT = re.compile(r"\{.*\}", re.S)
@@ -30,6 +45,13 @@ def _coerce_id(value: Any) -> int | None:
         if _ASCII_DIGITS.fullmatch(digits):  # str.isdigit() lets "①", "²" and the like through, but int() can't convert them
             return int(digits)
     return None
+
+
+def _coerce_index(value: Any) -> int | None:
+    """The number of a found picture: 2, "2", "Image 2", "#2", and the Chinese "图2" and "第2张" are all accepted."""
+    if isinstance(value, str):
+        value = value.strip().lower().removeprefix("image").removeprefix("图").removeprefix("第").removesuffix("张").strip()
+    return _coerce_id(value)
 
 
 def _text_field(item: dict[str, Any], *keys: str) -> str | None:
@@ -112,6 +134,29 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
             if isinstance(emoji, str) and 0 < len(emoji.strip()) <= 64 and to not in reacted:
                 reacted.add(to)
                 actions.append(Action("react", to, emoji=emoji.strip()))
+        elif kind in ("sticker", "send_sticker"):
+            name = _text_field(item, "name", "sticker", "text")
+            if name and not any(a.kind == "sticker" for a in actions):  # at most one sticker per round
+                actions.append(Action("sticker", to, name=name))
+        elif kind in ("meme", "send_meme", "表情包"):
+            name = _text_field(item, "name", "meme", "text")
+            if name and not any(a.kind == "meme" for a in actions):  # at most one meme per round
+                actions.append(Action("meme", to, name=name))
+        elif kind in ("image", "find_image", "image_search", "search_image", "picture") and _text_field(item, "query", "q", "keywords", "text"):
+            query = _text_field(item, "query", "q", "keywords", "text")
+            if not any(a.kind == "image" for a in actions):  # only one image search per round
+                actions.append(Action("image", query=query))
+        elif kind in ("pick", "send_image", "choose", "choose_image", "image"):
+            # a mixed-up {"type": "image", "image": 2} also counts as sending a picture
+            index = _coerce_index(item.get("image", item.get("pick", item.get("index", item.get("n")))))
+            if index is not None and not any(a.kind == "pick" for a in actions):
+                actions.append(Action("pick", to, image=index))
+        elif kind in ("persona", "set_persona", "change_persona"):
+            raw = item.get("text", item.get("persona", item.get("content")))
+            text = raw.strip()[:MAX_PERSONA_PARSE_CHARS] if isinstance(raw, str) else None  # None: no new persona given
+            undo = item.get("undo") is True or str(item.get("undo", "")).strip().lower() in _TRUE_WORDS
+            if not any(a.kind == "persona" for a in actions):
+                actions.append(Action("persona", to, text=text, scope=_persona_scope(item.get("scope")), undo=undo))
         elif kind in ("read", "read_file", "open", "look"):
             if to is not None and not any(a.kind == "read" and a.to == to for a in actions):
                 actions.append(Action("read", to))

@@ -62,6 +62,16 @@ class Settings:
                 return values[key]
         return self.defaults[key]
 
+    def origin(
+        self, key: str, *, guild_id=None, channel_id=None, parent_id=None, category_id=None
+    ) -> tuple[str, int] | None:
+        """Which level this value actually comes from: (scope, id); None when it's the config.toml default."""
+        for _, scope_key in self._chain(guild_id, channel_id, parent_id, category_id):
+            values = self._overrides.get(scope_key)
+            if values is not None and key in values:
+                return scope_key
+        return None
+
     def source(self, key: str, *, guild_id=None, channel_id=None, parent_id=None, category_id=None) -> str:
         for label, scope_key in self._chain(guild_id, channel_id, parent_id, category_id):
             values = self._overrides.get(scope_key)

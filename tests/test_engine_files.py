@@ -156,7 +156,7 @@ class ReadAction(unittest.IsolatedAsyncioTestCase):
         engine, llm, transport, clock, reader = setup(lambda c: outputs[len(llm.calls) - 1])
         await engine.handle_message(msg(501, "@Dee look at that file", mentions_bot=True))
         await engine.drain()
-        self.assertIn("(#99 has no readable file, or the file is too old to get anymore)", user_text(llm.calls[1]))
+        self.assertIn("(#99 has no readable file or link, or it's too old to get anymore)", user_text(llm.calls[1]))
         self.assertEqual(reader.calls, [])
 
     async def test_files_off_gets_a_note(self):
@@ -277,7 +277,7 @@ class Paste(unittest.IsolatedAsyncioTestCase):
         clock.advance(31)
         await engine.tick()
         await engine.drain()
-        self.assertEqual(reader.calls, [("message.txt", 1200)])  # like an ordinary long message, only the beginning is shown
+        self.assertEqual(reader.calls, [("message.txt", 1800)])  # like an ordinary long message, only the beginning is shown (max_chars_per_message)
         self.assertIn('【File "message.txt" from #1', user_text(llm.calls[0]))
         self.assertEqual(len(engine.states[CHANNEL].recent_files[501].unread()), 1)  # only the beginning was shown, so it can still be read in full when someone calls it
 

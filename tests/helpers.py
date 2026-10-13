@@ -21,6 +21,7 @@ from dsbot.store import Store  # noqa: E402
 T0 = 1_791_374_400.0
 GUILD = 1
 CHANNEL = 100
+OWNER = 7  # the OWNER_ID (dsowner) in the tests
 
 
 class FakeClock:
@@ -77,6 +78,10 @@ class FakeTransport:
     def __init__(self):
         self.sent: list[tuple[int, str, int | None, bool]] = []
         self.reactions: list[tuple[int, int, str]] = []
+        self.stickers_sent: list[tuple[int, str, int | None, bool]] = []
+        self.files_sent: list[tuple[int, bytes, str, int | None, bool]] = []  # pictures sent (memes, found pictures)
+        self.emojis: list[str] = []  # names of the emoji usable on the server
+        self.stickers: list[str] = []  # names of the stickers that can be sent on the server
         self.typing_calls = 0
         self.can_send = True
         self._next_id = 90_000
@@ -85,7 +90,13 @@ class FakeTransport:
         self.names = {CHANNEL: "chat"}
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
-        return ChannelInfo(guild_name="Test Server", channel_name=self.names.get(channel_id, f"channel{channel_id}"), bot_name="Dee")
+        return ChannelInfo(
+            guild_name="Test Server",
+            channel_name=self.names.get(channel_id, f"channel{channel_id}"),
+            bot_name="Dee",
+            emojis=list(self.emojis),
+            stickers=list(self.stickers),
+        )
 
     def locate(self, channel_id: int) -> ChannelPlace | None:
         if channel_id in self.places:
@@ -97,6 +108,20 @@ class FakeTransport:
             return None
         self._next_id += 1
         self.sent.append((channel_id, text, reply_to, ping))
+        return self._next_id
+
+    async def send_sticker(self, channel_id, name, *, reply_to, ping):
+        if not self.can_send:
+            return None
+        self._next_id += 1
+        self.stickers_sent.append((channel_id, name, reply_to, ping))
+        return self._next_id
+
+    async def send_file(self, channel_id, data, filename, *, reply_to, ping):
+        if not self.can_send:
+            return None
+        self._next_id += 1
+        self.files_sent.append((channel_id, data, filename, reply_to, ping))
         return self._next_id
 
     async def react(self, channel_id, message_id, emoji):
@@ -130,7 +155,17 @@ class FakeSearcher:
         return out
 
 
-def make_engine(responder=None, *, image_loader=None, defaults: dict[str, Any] | None = None, searcher=None):
+def make_engine(
+    responder=None,
+    *,
+    image_loader=None,
+    defaults: dict[str, Any] | None = None,
+    searcher=None,
+    owner_id=OWNER,
+    link_reader=None,
+    pictures=None,
+    memes=None,
+):
     cfg = AppConfig()
     if defaults:
         cfg.defaults.update(defaults)
@@ -160,6 +195,10 @@ def make_engine(responder=None, *, image_loader=None, defaults: dict[str, Any] |
         rng=random.Random(0),
         image_loader=image_loader or no_images,
         searcher=searcher,
+        owner_id=owner_id,
+        link_reader=link_reader,
+        pictures=pictures,
+        memes=memes,
     )
     engine.test_sleeps = sleeps  # type: ignore[attr-defined]
     return engine, llm, transport, clock

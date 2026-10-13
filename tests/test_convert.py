@@ -157,8 +157,8 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
         m = self.conv(fake_message(
             clean_content="look https://x.com/a.png and https://x.com/b.gif",
             embeds=[
-                embed("image", url="https://x.com/a.png", thumb="https://x.com/a.png"),
-                embed("image", url="https://x.com/b.gif", thumb="https://x.com/b.gif"),
+                embed("image", url="https://x.com/a.png", thumb="https://x.com/a.png", proxy="https://images-ext-1.discordapp.net/external/1/https/x.com/a.png"),
+                embed("image", url="https://x.com/b.gif", thumb="https://x.com/b.gif", proxy="https://images-ext-1.discordapp.net/external/2/https/x.com/b.gif"),
             ],
         ))
         self.assertEqual([i.kind for i in m.images], ["image", "gif"])
@@ -167,10 +167,12 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
     async def test_article_preview_becomes_text(self):
         m = self.conv(fake_message(
             clean_content="https://youtu.be/abc",
-            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", title="cat compilation", provider="YouTube")],
+            embeds=[embed("video", url="https://youtu.be/abc", thumb="https://i.ytimg.com/t.jpg", proxy="https://images-ext-2.discordapp.net/external/t.jpg", title="cat compilation", provider="YouTube")],
         ))
-        self.assertEqual(m.images, [])
+        # since 1.4.0 the preview image is looked at too (after the images people posted), and the link is noted so it can be opened when it's called
+        self.assertEqual([i.kind for i in m.images], ["preview"])
         self.assertEqual(m.text, "https://youtu.be/abc [link preview: YouTube - cat compilation]")
+        self.assertEqual([(link.url, link.title, link.site, link.preview_image) for link in m.links], [("https://youtu.be/abc", "cat compilation", "YouTube", True)])
 
     async def test_stickers(self):
         stickers = [
@@ -184,6 +186,20 @@ class Embeds(unittest.IsolatedAsyncioTestCase):
     async def test_awaiting_embeds_flag(self):
         self.assertTrue(self.conv(fake_message(clean_content="https://tenor.com/view/x")).awaiting_embeds)
         self.assertFalse(self.conv(fake_message(clean_content="no links here")).awaiting_embeds)
+
+    async def test_only_discord_media_is_downloaded(self):
+        """The original URL in a preview was written by whoever posted the link: the bot only downloads from Discord's image proxy / CDN, never connecting directly."""
+        m = self.conv(fake_message(
+            clean_content="https://example.com/page",
+            embeds=[
+                embed("image", url="http://192.168.1.1/cam.jpg", thumb="http://192.168.1.1/cam.jpg"),
+                embed("rich", url="https://example.com/page", thumb="https://evil.example/x.png", proxy="http://images-ext-1.discordapp.net/x.png", title="a page"),
+                embed("rich", url="https://example.com/other", thumb="https://cdn.discordapp.com/attachments/1/2/a.png", title="another one"),
+            ],
+        ))
+        self.assertEqual([i.kind for i in m.images], ["preview"])
+        await m.images[0].fetch()
+        self.assertEqual(self.fetched, ["https://cdn.discordapp.com/attachments/1/2/a.png"])
 
     async def test_without_fetcher_no_link_images(self):
         m = convert_message(

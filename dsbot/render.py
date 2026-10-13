@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .models import DocBlock, IncomingMessage
-from .prompts import HINT_MENTION, HINT_PROACTIVE
+from .prompts import GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE
 from .textutil import one_line, truncate
 
 
@@ -26,11 +27,39 @@ def _attachments(m: IncomingMessage) -> str:
     return " ".join(bits)
 
 
-_MARKERS = str.maketrans({"〔": "[", "〕": "]", "【": "[", "】": "]", "↪": "->"})
+_MARKERS = str.maketrans(
+    {
+        "〔": "[",
+        "〕": "]",
+        "【": "[",
+        "】": "]",
+        "↪": "->",
+        # lookalike brackets get replaced too, so they can't be used to fake markers like "〔dsowner〕"
+        "﹝": "[",
+        "﹞": "]",
+        "〘": "[",
+        "〙": "]",
+        "〖": "[",
+        "〗": "]",
+        "⦗": "[",
+        "⦘": "]",
+        "︹": "[",
+        "︺": "]",
+        "︻": "[",
+        "︼": "]",
+        "❲": "[",
+        "❳": "]",
+        "⟬": "[",
+        "⟭": "]",
+    }
+)
+# Other kinds of line breaks become \n: that way every continuation line gets indented, and nobody can forge a new message starting with #number
+_LINE_BREAKS = re.compile("\r\n?|[\u2028\u2029\x85\x0b\x0c]")
 
 
 def neutralize(text: str) -> str:
     """Our marker symbols must never appear in what people say or in files, or they could forge markers like "〔@you〕" or file blocks."""
+    text = _LINE_BREAKS.sub("\n", text)
     return text.translate(_MARKERS).replace("<<<", "‹‹‹").replace(">>>", "›››")
 
 
@@ -41,6 +70,8 @@ def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_ch
     head = f"#{sid} {_neutralize(one_line(m.author_name or 'someone'))}"
     if m.is_bot:
         head += " 〔bot〕"
+    elif m.from_owner:
+        head += " 〔dsowner〕"  # set from OWNER_ID, so nobody can fake it by changing their nickname (〔〕 get neutralized in both messages and names)
     if m.reply_to_bot:
         head += " ↪you"
     elif m.reply_to_id is not None:
@@ -71,11 +102,13 @@ def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str) -> 
 
 
 def render_doc(block: DocBlock) -> tuple[list[str], list[str]]:
-    """One file content block → (text lines, image data URIs). The content goes between <<< and >>>."""
+    """One file (or opened link) content block → (text lines, image data URIs). The content goes between <<< and >>>."""
     result = block.result
-    head = f'【File "{_neutralize(one_line(block.filename, 60))}" from {block.label}'
+    source = "Link" if block.source == "link" else "File"
+    head = f'【{source} "{_neutralize(one_line(block.filename, 60))}" from {block.label}'
     if result.error:
-        return [f"{head} · couldn't read: {_neutralize(one_line(result.error, 200))}】"], []
+        verb = "couldn't open" if source == "Link" else "couldn't read"
+        return [f"{head} · {verb}: {_neutralize(one_line(result.error, 200))}】"], []
     info = _neutralize(one_line(result.kind + (f", {result.detail}" if result.detail else ""), 300))
     lines = [f"{head} · {info}】" if info else f"{head}】"]
     if result.text:
@@ -103,7 +136,19 @@ class _Builder:
             text_lines, uris = render_doc(block)
             self.lines += text_lines
             name = _neutralize(one_line(block.filename, 60))
-            self.images([(u, "auto") for u in uris], after=f'(Above: pages of the file "{name}" from {block.label})')
+            if block.source == "link":
+                after = f'(Above: images in the link "{name}" from {block.label})'
+            else:
+                after = f'(Above: pages of the file "{name}" from {block.label})'
+            self.images([(u, "auto") for u in uris], after=after)
+
+    def gallery(self, gallery: "Gallery") -> None:
+        """Candidate pictures found online: each one gets an "Image N: description" line before it, and the whole set sits between <<< and >>> (it's dropped as a whole when memory is compacted)."""
+        self.lines += [GALLERY_HEAD.format(query=neutralize(one_line(gallery.query, 60)), count=len(gallery.items)), "<<<"]
+        for i, (caption, uri) in enumerate(gallery.items, 1):
+            self.lines.append(f"Image {i}: {neutralize(one_line(caption, 160)) or '(no description)'}")
+            self.images([(uri, "low")])
+        self.lines += [">>>", GALLERY_FOOT]
 
     def finish(self) -> str | list[dict[str, Any]]:
         if not self.parts:
@@ -129,7 +174,7 @@ def render_round(
     omitted: int = 0,
     images: dict[int, list[tuple[str, str]]] | None = None,
     docs: dict[int, list[DocBlock]] | None = None,
-    max_chars: int = 1200,
+    max_chars: int = 1800,
     context: list[str] | None = None,
 ) -> str | list[dict[str, Any]]:
     """messages: [(number, message)]; images: message_id -> [(data_uri, detail)]; docs: message_id -> file blocks placed after that message.
@@ -156,6 +201,14 @@ def render_read_result(blocks: list[DocBlock], notes: list[str], *, targets: lis
     return render_tool_result(blocks, notes, [], [], targets=targets)
 
 
+@dataclass
+class Gallery:
+    """Candidate pictures from an online image search: [(description, downsized data URI)]."""
+
+    query: str
+    items: list[tuple[str, str]]
+
+
 def render_tool_result(
     blocks: list[DocBlock],
     file_notes: list[str],
@@ -164,14 +217,21 @@ def render_tool_result(
     *,
     targets: list[int],
     files: bool = True,
+    header: str | None = None,
+    gallery: Gallery | None = None,
+    kind: str = "mention",
 ) -> str | list[dict[str, Any]]:
-    """After reading files, searching or looking through other channels, hand the results to the model. files=False means no files were requested this time."""
-    out = _Builder("(The files you asked to read:)" if files else None)
+    """After reading files, opening links, searching, finding images or looking through other channels, hand the results to the model.
+
+    files=False means no files were requested this time; header can replace the opening line (e.g. when it's links being opened this time)."""
+    out = _Builder(header if header is not None else ("(The files you asked to read:)" if files else None))
     out.docs(blocks)
     out.lines += file_notes
     out.lines += sections
+    if gallery is not None and gallery.items:
+        out.gallery(gallery)
     out.lines += notes
-    out.lines.append(_hint("mention", targets))
+    out.lines.append(_hint(kind, targets))
     return out.finish()
 
 
@@ -196,7 +256,8 @@ def render_recall(channel: str, summary: str | None, lines: list[str], about: st
 
 LIST_HEAD = "(Other channels whose history you can look through:"
 LIST_EMPTY = "(No other channels whose history you can look through right now)"
-_FILE_HEAD = re.compile(r'^【File "')
+_FILE_HEAD = re.compile(r'^【(?:File|Link) "')
+_GALLERY_START = GALLERY_HEAD.split('"', 1)[0]  # "(You looked for images of "
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
@@ -230,7 +291,9 @@ def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
 
 
 def own_text(content: Any) -> str:
-    """For memory compaction: this channel's own content. Drops recent talk carried over from other channels, channel lists, looked-up history and search results.
+    """For memory compaction: this channel's own content. Drops recent talk carried over from other channels, channel lists, looked-up history, search results and candidate pictures from image searches.
+
+    Files people posted and the contents of opened links count as this channel's own, so they're kept.
 
     A line starting with "(" at column 0 is always added by the bot itself (people's messages start with #number, their extra lines are indented, and file contents sit inside <<< >>>).
     """
@@ -264,10 +327,10 @@ def own_text(content: Any) -> str:
         after_search = after_file = False
         if line.startswith("(") and (line.endswith(" ago:") or line == LIST_HEAD):  # "(Alex chatted with you in #x 5 minutes ago:"
             skipping_block = True
-        elif line.startswith(("(You looked through the history of ", "(You searched for ")):
+        elif line.startswith(("(You looked through the history of ", "(You searched for ", _GALLERY_START)):
             skipping_fence = True
             after_search = line.startswith("(You searched for ")
-        elif line != LIST_EMPTY:
+        elif line != LIST_EMPTY and line != GALLERY_FOOT:
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
     return "\n".join(out)
@@ -289,7 +352,16 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
     for role, content in turns:
         if role != "user":
             raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-            said = [m for a in parse_actions(raw)[0] if a.kind == "reply" for m in a.messages]
+            said = []
+            for a in parse_actions(raw)[0]:
+                if a.kind == "reply":
+                    said += a.messages
+                elif a.kind == "sticker" and a.name:
+                    said.append(f"[sticker: {a.name}]")
+                elif a.kind == "meme" and a.name:
+                    said.append(f"[meme: {a.name}]")
+                elif a.kind == "pick":
+                    said.append("[image]")
             if said:
                 out.append(f"{bot_name}: " + " / ".join(one_line(m, 300) for m in said))
             continue
@@ -306,7 +378,7 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
                 out.append(_STAMP_LINE.match(line).group(0))
                 continuing = False
             elif _MSG_LINE.match(line):
-                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@you〕", "")
+                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@you〕", "").replace(" 〔dsowner〕", "", 1)
                 out.append(text)
                 continuing = True
             elif continuing and line.startswith("  "):
@@ -371,5 +443,15 @@ def assistant_text(content: str, name: str) -> str:
         elif a.get("type") == "react":
             out.append(f"{name} reacted to #{to} with {a.get('emoji', '')}")
         elif a.get("type") == "read":
-            out.append(f"{name} opened the file(s) in #{to}")
+            out.append(f"{name} opened the files or links in #{to}")
+        elif a.get("type") == "sticker":
+            out.append(f'{name}{prefix} sent the sticker "{a.get("name", "")}"')
+        elif a.get("type") == "meme":
+            out.append(f'{name}{prefix} sent the meme "{a.get("name", "")}"')
+        elif a.get("type") == "pick":
+            out.append(f"{name}{prefix} sent a picture found online")
+        elif a.get("type") == "image":
+            out.append(f'{name} looked online for images of "{a.get("query", "")}"')
+        elif a.get("type") == "persona":
+            out.append(f"{name} set out to change its persona as #{to} asked")
     return "\n".join(out)
