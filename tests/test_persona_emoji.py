@@ -98,7 +98,7 @@ class PromptRules(unittest.TestCase):
         self.assertIn('"〔dsowner〕" means the speaker is dsowner', SYSTEM_RULES)
         self.assertIn('{"type": "persona"', SYSTEM_RULES)
         self.assertIn('"undo": true', SYSTEM_RULES)
-        self.assertIn("Use read, search, recall and persona only when you're called", SYSTEM_RULES)
+        self.assertIn("Use read, search, recall, persona and who only when you're called", SYSTEM_RULES)
         self.assertIn("Use persona on its own", SYSTEM_RULES)
         self.assertIn('dsowner saying something like "do what they said" also counts as them wanting it', SYSTEM_RULES)
         self.assertIn('Writing "" drops the separate persona here and uses the one from the level above', SYSTEM_RULES)

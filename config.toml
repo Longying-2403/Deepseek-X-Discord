@@ -20,6 +20,8 @@ log_level = "INFO"
 tick_seconds = 5                  # how often to check whether any channel should run a proactive check
 meme_dir = "data/memes"           # shared meme library: create this folder on the NAS yourself and put pictures in it; the file name is the meme's name (usable on every server)
 server_meme_dir = "data/server-memes"  # what each server uploads with /ds meme (managed by the bot)
+cards_database = "data/cards.sqlite3"     # profile cards (stored apart from the chat history: to back them up or move them, just copy this file)
+memory_database = "data/memory.sqlite3"   # long-term memory
 
 [pricing]
 # USD per million tokens, at peak prices; off-peak is multiplied by offpeak_factor automatically.
@@ -44,6 +46,8 @@ aliases = ""                      # aliases, comma-separated; they also count as
 persona = ""                      # empty = default persona; best changed in Discord with /ds persona
 share_memory = false              # cross-channel memory, off by default; turn it on with /ds share-memory (private channels must turn it on themselves to share out)
 images = true                     # let it send pictures from the meme library on its own and find pictures online (it looks at what it finds before deciding whether to send one)
+cards = true                      # profile cards: remember what members say about themselves, like what to call them, their character, likes (members manage their own card with /ds-rp; admins can't see them)
+long_memory = true                # long-term memory: remember this server's agreements, big events, long-running jokes and storylines (manage it with /ds long-memory)
 
 # —— Only you can change these (here, or with /dsowner in the CONTROL_GUILD_ID server) ——
 min_eval_interval = 60            # at least 60 seconds between two proactive checks
@@ -96,3 +100,11 @@ image_cooldown_seconds = 600      # at least 10 minutes between two online image
 image_candidates = 4              # how many candidate pictures it's shown when finding images online
 image_max_bytes = 8000000         # max size of a picture it sends: 8 MB (Discord's default upload limit is 10 MB)
 meme_list_limit = 80              # max memes listed when telling it what's in the meme library
+card_max_chars = 1600             # max characters in one profile card
+cards_per_round = 6               # max people whose profile cards are attached in one round
+card_list_limit = 100             # max names listed when telling it who has a profile card
+memory_max_entries = 50           # max long-term memory entries per server
+memory_entry_chars = 200          # max characters per long-term memory entry
+review_idle_seconds = 600         # once a channel has been quiet for 10 minutes and a few new rounds of chat have built up, memory gets reviewed
+review_min_rounds = 3             # review only once at least this many new rounds of chat have built up
+review_max_chars = 16000          # how many characters of chat it's shown per review call (longer stretches are split up)

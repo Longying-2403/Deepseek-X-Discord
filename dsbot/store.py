@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     guild_id INTEGER NOT NULL,
     summary TEXT,
     next_short_id INTEGER NOT NULL DEFAULT 1,
-    updated_at REAL
+    updated_at REAL,
+    reviewed_upto INTEGER NOT NULL DEFAULT 0  -- how far the memory review (profile cards, long-term memory) has got in the history
 );
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +41,8 @@ CREATE TABLE IF NOT EXISTS msgmap (
     channel_id INTEGER NOT NULL,
     short_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
+    author_id INTEGER,            -- who sent this message (so a memory review knows who said #12); NULL for the bot's own
+    author_name TEXT,
     PRIMARY KEY (channel_id, short_id)
 );
 CREATE TABLE IF NOT EXISTS usage (
@@ -72,6 +75,37 @@ CREATE TABLE IF NOT EXISTS persona_history (
 """
 
 MSGMAP_KEEP = 3000  # how many recent message-number mappings to keep per channel
+# columns that databases from older versions lack: added automatically on startup, existing data stays as it is
+_MIGRATIONS = (
+    ("msgmap", "author_id", "INTEGER"),
+    ("msgmap", "author_name", "TEXT"),
+    ("conversations", "reviewed_upto", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def open_private_db(path: str, schema: str) -> sqlite3.Connection:
+    """Open (or create) an SQLite database only the bot itself can read or write: chat history, profile cards and long-term memory are all stored this way."""
+    if path != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    if path != ":memory:":
+        db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.executescript(schema)
+    db.commit()
+    if path != ":memory:":
+        make_private(path)
+    return db
+
+
+def make_private(path: str) -> None:
+    """Only the bot itself may read/write it (other accounts on a NAS can't see it). Best effort."""
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except OSError:
+            pass
 
 
 @dataclass
@@ -79,6 +113,7 @@ class Turn:
     id: int
     role: str
     content: Any  # str or list[dict]
+    created_at: float = 0.0
 
 
 @dataclass
@@ -88,6 +123,7 @@ class Conversation:
     summary: str | None = None
     next_short_id: int = 1
     turns: list[Turn] = field(default_factory=list)
+    reviewed_upto: int = 0  # how far the memory review has got (a turn id)
 
 
 def _dump(value: Any) -> str:
@@ -97,27 +133,27 @@ def _dump(value: Any) -> str:
 class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
-        self.db.row_factory = sqlite3.Row
-        if self.path != ":memory:":
-            self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=NORMAL")
-        self.db.executescript(SCHEMA)
+        # chat history and the contents of files it read live in the database: only the bot itself may read/write it
+        self.db = open_private_db(self.path, "")
+        self.db.executescript(SCHEMA)  # missing tables are created in the new format; tables that already exist get their missing columns added below
+        self._migrate()
         # calls left halfway by the last run (power loss, forced shutdown) will never get a result
         self.db.execute("UPDATE usage SET outcome = 'error' WHERE outcome = 'pending'")
         self.db.commit()
-        if self.path != ":memory:":
-            self._make_private()
 
-    def _make_private(self) -> None:
-        """Chat history and the contents of files it read live in the database: only the bot itself may read/write it (other accounts on a NAS can't see it). Best effort."""
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                os.chmod(self.path + suffix, 0o600)
-            except OSError:
-                pass
+    def _migrate(self) -> None:
+        """Tables created by older versions lack a few columns: add them (newly created tables are built from SCHEMA and already have them)."""
+        for table, column, decl in _MIGRATIONS:
+            cols = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if cols and column not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                if column == "reviewed_upto":
+                    # chat from before the upgrade isn't reviewed retroactively (back then nobody recorded who said what, and reviewing a big backlog at once costs money too): reviewing starts from now
+                    self.db.execute(
+                        "UPDATE conversations SET reviewed_upto = "
+                        "(SELECT COALESCE(MAX(id), 0) FROM turns WHERE turns.channel_id = conversations.channel_id)"
+                    )
+        self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -142,16 +178,17 @@ class Store:
     # ---- conversations ----
     def load_conversation(self, channel_id: int, guild_id: int) -> Conversation:
         row = self.db.execute(
-            "SELECT guild_id, summary, next_short_id FROM conversations WHERE channel_id = ?", (channel_id,)
+            "SELECT guild_id, summary, next_short_id, reviewed_upto FROM conversations WHERE channel_id = ?", (channel_id,)
         ).fetchone()
         conv = Conversation(channel_id=channel_id, guild_id=guild_id)
         if row is not None:
             conv.summary = row["summary"]
             conv.next_short_id = row["next_short_id"]
+            conv.reviewed_upto = row["reviewed_upto"] or 0
         for r in self.db.execute(
-            "SELECT id, role, content FROM turns WHERE channel_id = ? ORDER BY id", (channel_id,)
+            "SELECT id, role, content, created_at FROM turns WHERE channel_id = ? ORDER BY id", (channel_id,)
         ):
-            conv.turns.append(Turn(r["id"], r["role"], json.loads(r["content"])))
+            conv.turns.append(Turn(r["id"], r["role"], json.loads(r["content"]), r["created_at"] or 0.0))
         return conv
 
     def load_msgmap(self, channel_id: int) -> dict[int, int]:
@@ -162,15 +199,43 @@ class Store:
         ).fetchall()
         return {r["short_id"]: r["message_id"] for r in rows}
 
+    def load_authors(self, channel_id: int, short_ids: Iterable[int]) -> dict[int, tuple[int, str]]:
+        """Message number -> (sender, their name at the time). The bot's own messages, and ones recorded by older versions (without an author), aren't included."""
+        ids = sorted(set(short_ids))
+        out: dict[int, tuple[int, str]] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            marks = ",".join("?" for _ in chunk)
+            for r in self.db.execute(
+                f"SELECT short_id, author_id, author_name FROM msgmap WHERE channel_id = ? AND short_id IN ({marks}) "
+                "AND author_id IS NOT NULL",
+                (channel_id, *chunk),
+            ):
+                out[r["short_id"]] = (r["author_id"], r["author_name"] or "")
+        return out
+
+    def set_reviewed(self, conv: Conversation, turn_id: int) -> None:
+        """How far the memory review has got (it only moves forward, never back)."""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at, reviewed_upto) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (channel_id) DO UPDATE SET "
+                "reviewed_upto = MAX(conversations.reviewed_upto, excluded.reviewed_upto)",
+                (conv.channel_id, conv.guild_id, conv.summary, conv.next_short_id, time.time(), turn_id),
+            )
+        conv.reviewed_upto = max(conv.reviewed_upto, turn_id)
+
     def append_round(
         self,
         conv: Conversation,
         user_content: Any,
         assistant_content: str,
-        assigned: Iterable[tuple[int, int]],
+        assigned: Iterable[tuple[Any, ...]],
         now: float | None = None,
     ) -> None:
-        """Append one round (user + assistant). conv.turns and conv.next_short_id are updated to match."""
+        """Append one round (user + assistant). conv.turns and conv.next_short_id are updated to match.
+
+        assigned: the numbers handed out this round, as (number, message id) or (number, message id, sender, name) (sender is None for bots)."""
         now = time.time() if now is None else now
         with self.db:
             cur = self.db.execute(
@@ -183,9 +248,14 @@ class Store:
                 (conv.channel_id, _dump(assistant_content), now),
             )
             assistant_id = cur.lastrowid
+            rows = []
+            for item in assigned:
+                sid, mid, *who = item
+                author, name = (who + [None, None])[:2]
+                rows.append((conv.channel_id, sid, mid, author, name))
             self.db.executemany(
-                "INSERT OR REPLACE INTO msgmap (channel_id, short_id, message_id) VALUES (?, ?, ?)",
-                [(conv.channel_id, sid, mid) for sid, mid in assigned],
+                "INSERT OR REPLACE INTO msgmap (channel_id, short_id, message_id, author_id, author_name) VALUES (?, ?, ?, ?, ?)",
+                rows,
             )
             self.db.execute(
                 "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at) "
@@ -198,8 +268,8 @@ class Store:
                 (conv.channel_id, conv.next_short_id - MSGMAP_KEEP),
             )
         # round-trip through JSON so what's in memory is exactly what will be read back from the database later
-        conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content))))
-        conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content))))
+        conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content)), now))
+        conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content)), now))
 
     def compact(self, conv: Conversation, summary: str, remove_count: int) -> None:
         """Replace the oldest remove_count turns with a summary."""

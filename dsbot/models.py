@@ -132,19 +132,32 @@ class IncomingMessage:
 @dataclass
 class Action:
     # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
+    # | "card" | "memory" | "who"
     kind: str
     to: int | None = None  # message number (the number after #)
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
     query: str | None = None  # search / image: what to look for; recall: keywords to look for (optional)
     channel: str | None = None  # recall: which channel
-    name: str | None = None  # sticker: the sticker's name; meme: the meme's name
-    text: str | None = None  # persona: the complete persona after the change ("" = back to default; None = not given)
+    name: str | None = None  # sticker: the sticker's name; meme: the meme's name; who: whose profile card to look up
+    text: str | None = None  # persona: the complete persona after the change ("" = back to default; None = not given); card: the complete new profile card; memory: the content
     scope: str | None = None  # persona: None = the one currently used here; "server" = whole server; "channel" = this channel
     undo: bool = False  # persona: undo the last change
     image: int | None = None  # pick: which of the found pictures to send (starting from 1)
+    op: str | None = None  # memory: add / edit / delete
+    index: int | None = None  # memory: which entry to edit or delete (its long-term memory number)
 
     def to_json(self) -> dict[str, Any]:
+        if self.kind == "card":
+            return {"type": "card", "to": self.to, "text": self.text or ""}
+        if self.kind == "memory":
+            if self.op == "add":
+                return {"type": "memory", "add": self.text}
+            if self.op == "edit":
+                return {"type": "memory", "edit": self.index, "text": self.text}
+            return {"type": "memory", "delete": self.index}
+        if self.kind == "who":
+            return {"type": "who", "name": self.name}
         if self.kind in ("sticker", "meme"):
             d: dict[str, Any] = {"type": self.kind}
             if self.to is not None:

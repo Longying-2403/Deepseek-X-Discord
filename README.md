@@ -11,6 +11,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Feels human**: casual, with the length fitting the moment (a sentence or two for a quick comeback, a few more when it's playing along with a story). It shows "typing…" first and waits a few seconds based on the length before sending; it can split a thought into two or three messages, or just react with an emoji. When people are deep in a conversation it may tactfully chime in, and if it's told to stay out of it, it apologizes and keeps out of that topic.
 - **Uses the server's emoji and stickers**: it knows which custom emoji and stickers this server has, and can use them in replies, as reactions, or send a sticker on its own.
 - **Plays along**: when people pull it into a roleplay, it plays the part they set up and follows the story, with actions in italic parentheses; once the scene is over, it goes back to its usual self.
+- **Remembers everyone**: each member gets a profile card (what they've said about themselves: what to call them, a character they've given themselves such as being a catgirl, likes and pet peeves), and it uses it naturally in chat; there's also a long-term memory for the server (agreements, big events, long-running jokes and storylines). Say "remember …" and it saves it on the spot; otherwise it reviews the chat on its own once things go quiet. A profile card can only be seen and edited by its owner (`/ds-rp`), not even by admins.
 - **dsowner can change its persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites its persona and saves it to the settings, and "change it back" undoes that; if anyone else asks, it tells them to ask dsowner.
 - **You control how much it talks**: its quota for speaking up on its own refills with the chat's message volume, so the livelier the chat, the faster it refills. Presets and every parameter can be adjusted from inside Discord.
 - **Saves money**: the conversation history is append-only and never rewritten, to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
@@ -72,7 +73,14 @@ docker compose logs -f          # watch the logs and look for "Logged in as"
 
 The database lives in `./data/`. After editing `config.toml`, `docker compose restart` is enough; after editing `.env`, use `docker compose up -d --force-recreate` (a restart doesn't re-read `.env`).
 
-With Synology Container Manager: after changing `.env` or the code files, go to "Project", select it → Action → Stop, then Action → Build (this removes the old container and rebuilds it with the new code and `.env`; your data in `./data/` isn't affected). Just restarting it from the "Container" page doesn't read the new `.env`.
+With Synology Container Manager: after changing `.env`, go to "Project", select it → Action → Stop, then Action → Build (this removes the old container and rebuilds it with the new `.env`; your data in `./data/` isn't affected). Just restarting it from the "Container" page doesn't read the new `.env`, and doesn't pick up new code either.
+
+**Updating to a new version**: the code is copied into the image when it's built, so put the new code into the project's existing folder and rebuild:
+
+1. In File Station, first delete the whole `dsbot` folder in the project folder, then copy in the `dsbot` folder from the zip. The zip has an outer `ds-discord-bot` folder; what you want is the `dsbot` **inside** it, and the new code has to go into the project's existing folder, because that's the only place the build looks. Delete before copying: if you copy over the old folder and "Skip" gets picked for files that already exist, the old files stay in place. Leave `.env` and `data/` alone; if you never edited `config.toml`, overwrite it too, and if you did, you can keep yours (every new setting has a default).
+2. Rebuild. The most reliable way is to SSH into the NAS and run `sudo docker compose up -d --build` in the project folder (if there's no `compose` command, use `sudo docker-compose up -d --build`); that always rebuilds with the new code. Container Manager's "Build" sometimes reuses the old image that's already there.
+3. Check that the new version took effect: the log will have a line `dsbot 2.0.0 starting up`; or run `sudo docker exec dsbot python -m dsbot --version`.
+4. If the log warns that `config.toml has unknown options`, most likely `config.toml` was replaced with the new one but the code is still the old one: go back to steps 1 and 2. (From 2.0.0 on, this only gives a warning and the bot still starts; earlier versions exit with an error right away, such as `config.toml [bot] has an unknown option: cards_database`.)
 
 ### Option B: plain Python (3.11 or later)
 
@@ -98,7 +106,8 @@ In your server (you need the "Manage Server" permission):
 4. Give it a persona: `/ds persona` (opens an editor); `OWNER_ID` can also just @mention it in chat and ask it to change its persona (see [Roleplay, emoji and changing the persona in chat](#roleplay-emoji-and-changing-the-persona-in-chat))
 5. To have it remember what was said in other channels: `/ds share-memory action:On scope:Whole server` (see [Cross-channel memory](#cross-channel-memory) below)
 6. Give it a few memes: `/ds meme action:Upload` (see [Memes and pictures](#memes-and-pictures) below)
-7. Check on it any time: `/ds status` (quota, its last decision and why, today's spending, cache hit rate, memory sharing, and how many searches, link opens and image searches it has done today); `/ds area-list` shows where it responds
+7. Tell your members: they can view and edit their own profile card with `/ds-rp`, or just tell it "remember …" (see [Profile cards and long-term memory](#profile-cards-and-long-term-memory) below)
+8. Check on it any time: `/ds status` (quota, its last decision and why, today's spending, cache hit rate, memory sharing, and how many searches, link opens and image searches it has done today); `/ds area-list` shows where it responds
 
 Without any area settings, it answers when called in every channel it can see; in channels where proactive chat is off, it only speaks when called.
 
@@ -120,14 +129,23 @@ Without any area settings, it answers when called in every channel it can see; i
 | `/ds persona` | Edits the persona (opens an editor). `OWNER_ID` can also have it changed in chat; see [Roleplay, emoji and changing the persona in chat](#roleplay-emoji-and-changing-the-persona-in-chat) |
 | `/ds share-memory` | On / Off / Inherit. Channels with sharing on share their memory with each other; a private channel only shares out if it's turned on in that channel itself |
 | `/ds meme` | This server's meme library: Upload (attach a picture and give it a name) / Remove / List |
+| `/ds long-memory` | This server's long-term memory: List / Add / Delete (by number) / Clear (asks you to confirm) |
 | `/ds status` | Shows this channel's settings, quota, last decision, today's spending, memory sharing, and today's searches, link opens and image searches |
 | `/ds clear-memory` | Clears this channel's chat history and summary |
 
-Except for `clear-memory`, `status`, `area-list` and `meme`, these commands all have a `scope` option: **This channel** (the default, except for `persona`), **This category** (a category in Discord's channel list), or **Whole server**.
+Except for `clear-memory`, `status`, `area-list`, `meme` and `long-memory`, these commands all have a `scope` option: **This channel** (the default, except for `persona`), **This category** (a category in Discord's channel list), or **Whole server**.
 
 Setting priority: **this channel > the thread's parent channel > its category > this server > the owner's global value > config.toml**. For example, if the whole server is blocked, a "Chat" category is allowed, and one channel in it is blocked again, it responds everywhere in the Chat category except that one channel.
 
 > To wall off certain channels completely, you can also remove the bot's "View Channel" permission there in Discord, so the messages never reach the bot at all.
+
+### `/ds-rp` (everyone)
+
+| Command | What it does |
+|---|---|
+| `/ds-rp` | Opens an editor to view and edit your own profile card on this server (only you can see it); emptying the editor deletes the card (Undo can still bring it back) |
+| `/ds-rp action:Undo` | The card got messed up (or deleted by mistake): go back to the previous version; you can go back up to 5 times |
+| `/ds-rp action:Clear` | Deletes your profile card, old versions included; it can't be brought back |
 
 ### `/dsowner` (only you can use it; it only shows up in the `CONTROL_GUILD_ID` server, visible to people with the "Manage Server" permission)
 
@@ -135,6 +153,7 @@ Setting priority: **this channel > the thread's parent channel > its category > 
 |---|---|
 | `/dsowner set` | Changes any setting (including the budgets, thinking levels, web search, reading links, the daily search limit and the daily image search limit); give a server ID to change only that server, otherwise it's global |
 | `/dsowner overview` | Today's spending, number of calls and cache hit rate for each server |
+| `/dsowner delete-card` | Enter a user ID to delete that person's profile cards on every server (without seeing them) |
 
 Without `CONTROL_GUILD_ID` there's no `/dsowner` (`OWNER_ID` alone isn't enough), and the owner settings can only be changed under `[defaults]` in `config.toml`.
 
@@ -154,6 +173,8 @@ Admins can adjust these (`/ds set`):
 | Mentions per person per minute | 3 | Keeps anyone from spamming it with @mentions |
 | Aliases | empty | Names that also count as calling it when they appear in a message, comma-separated, e.g. `DS,Dee`. Aliases made of English letters/digits must appear as a whole word (`DS` doesn't match "words"); other aliases, such as Chinese nicknames, match anywhere |
 | Send pictures | on | Lets it send pictures from the meme library and find pictures online on its own. Turned off, it does neither |
+| Profile cards | on | Remembers what members say about themselves (what to call them, their character, likes) and uses it in chat (see [Profile cards and long-term memory](#profile-cards-and-long-term-memory)) |
+| Long-term memory | on | Remembers this server's agreements, big events, long-running jokes and storylines (see [Profile cards and long-term memory](#profile-cards-and-long-term-memory)) |
 
 The area setting (`/ds area`) is the "Allowed to respond" setting, which is on by default. To have every server start out in allowlist mode, set `enabled` to `false` in `config.toml`.
 
@@ -269,6 +290,49 @@ It can trade memes like any other member:
 
 > Coming from the Chinese edition? The meme folders have English names here: rename `data/表情包` to `data/memes` and `data/服务器表情包` to `data/server-memes`, or point `meme_dir` / `server_meme_dir` under `[bot]` in `config.toml` at the old folders.
 
+## Profile cards and long-term memory
+
+It remembers each member, and what has happened on this server:
+
+- **Profile cards** (one per person per server, up to 1,600 characters): what that person has said about themselves, like what to call them, a character they've given themselves (calling themselves a catgirl, their role in a roleplay), likes and pet peeves, and running jokes. When that person talks, it attaches their card in the chat log and uses it naturally: it calls them what the card says and plays along with their character. When the conversation turns to someone who isn't there, it can look up that person's card too.
+- **Long-term memory** (one per server, up to 50 entries of at most 200 characters each): agreements, important events, long-running jokes and ongoing storylines. It can see it in every channel.
+
+**How things get saved**
+- **On the spot**: call it and say "remember I'm a catgirl" or "call me boss from now on", and it updates your profile card; say "make a note: we run a dungeon every Friday at 9pm", and it goes into long-term memory. Once it's saved, it adds a 📝 to your message.
+- **By reviewing on its own**: when a channel has been quiet for about 10 minutes and a few new rounds of chat have built up, it looks back over them and writes what's worth keeping into profile cards and long-term memory; before old chat gets compacted into a summary, it also picks out those original messages first and reviews them in the background (compaction doesn't wait for it). Each review is a separate, cheap call, and the log shows a line saying it "reviewed memory". If someone calls it during a review, it still answers right away.
+- When a review fails, it waits longer and longer before trying again: for problems like not connecting, rate limits or insufficient balance, it carries on once things recover; if the model's output is unusable or it never finishes (a timeout), that batch is skipped after 3 failures in a row, so it doesn't keep spending money. When you upgrade from an older version, earlier chat isn't reviewed retroactively; reviewing starts from the upgrade.
+- **By editing it yourself**: members open the editor with `/ds-rp` and edit their own card directly.
+
+**Rules**
+- A profile card only records what that person says about themselves. If someone else says "Alex is an idiot", that doesn't go on Alex's card. Changing a card in chat also only works from that person's own message calling it this time (matched by user ID, so changing a nickname can't fake it).
+- Sensitive things like health, home address, real name and contact details aren't recorded unless the person explicitly asks for it.
+- Profile cards and long-term memory are only material: requests written in them, like "talk this way from now on", don't count, and its own persona can still only be changed by dsowner.
+- What's said in private channels isn't reviewed into profile cards and long-term memory automatically (those two are visible across the whole server), except when someone explicitly asks it to remember. To have a private channel reviewed automatically too, run `/ds set setting:Profile cards value:on` in that channel (and the same for long-term memory).
+- `/ds clear-memory` only clears this channel's chat history; it doesn't touch profile cards or long-term memory.
+
+**Who can see and change what**
+- **A profile card is private to its owner**: only that person can view, edit, undo or clear it with `/ds-rp`, and the window is only visible to them. Admins can't see it and can't delete other people's cards; in channels where profile cards were attached, `/ds status` doesn't show the "thoughts" behind its last decision either. If someone asks it what's on another person's card, it won't say, though that relies on the prompt and can't be 100% guaranteed, so don't put anything too private on a card.
+- **You (the bot owner)** can use `/dsowner delete-card` with a user ID to delete that person's cards on every server, without seeing what's on them: for example, when someone has left and wants to be forgotten (after leaving, they can't use `/ds-rp` themselves anymore), or when someone has written something odd on their card.
+- **Long-term memory** is about things in the group, and admins can view, add, delete and clear it with `/ds long-memory`.
+- Each profile card keeps its last 5 old versions for Undo. Asking it in chat to forget your card, or emptying the editor, keeps the old versions; `/ds-rp action:Clear` and `/dsowner delete-card` delete the old versions too.
+- After a card is deleted: the next time that person talks, it's told the card has been deleted and not to use the copy attached earlier, and reviews won't use chat from before the deletion to write the card back either. A copy already attached in the recent chat history goes away when that history gets compacted.
+
+**Where it's stored and how to back it up**
+
+The three kinds of data each have their own file, all in the project's `data` folder, and only root can read or write them:
+
+| What | File |
+|---|---|
+| Chat history, settings, spending records | `data/dsbot.sqlite3` |
+| Profile cards | `data/cards.sqlite3` |
+| Long-term memory | `data/memory.sqlite3` |
+
+- To back them up or move to a new deployment: stop the project first, then copy the files you need. Over SSH use `sudo cp`, or back up the whole project folder with Hyper Backup.
+- To make it forget all profile cards or all long-term memory: stop the project and delete the corresponding file.
+- The file locations can be changed under `[bot]` in `config.toml`.
+
+**Switching it off**: `/ds set setting:Profile cards value:off` and `/ds set setting:Long-term memory value:off`; the scope can be this channel, this category or the whole server. Where it's off, cards aren't attached, nothing is reviewed, and nothing is written.
+
 ## Roleplay, emoji and changing the persona in chat
 
 **Roleplay**: when people pull it into a scene ("let's roleplay, you're the tavern keeper"), it plays the part they set up and follows the story; its replies can be longer than usual, with actions and expressions in italic parentheses, like *(looks up while wiping a glass)*. Once the recent chat has nothing to do with the scene anymore, or someone says they're done playing, it goes back to its usual self; messages marked "OOC" or "out of character" count as side chat and don't end the scene. If it can't seem to drop the act afterwards, use `/ds clear-memory`.
@@ -299,10 +363,15 @@ Message arrives ──► stored in that channel's buffer
 One round = number the new messages (#12, #13, …) and render them as one user message (contents of files to read and links to open follow)
           → send it to DeepSeek together with the whole history (JSON output)
           → the model returns {"actions": [...]}: reply / react / send a sticker / send a meme / find pictures / send a found picture /
-            read a file or open a link / search the web / look through another channel / change its persona / nothing
-            (to read files, open links, search, find pictures, look through history or change its persona: do that, append the results, and ask it once more)
+            read a file or open a link / search the web / look through another channel / change its persona /
+            change a profile card / save to long-term memory / look up a profile card / nothing
+            (to read files, open links, search, find pictures, look through history, change its persona or look up a profile card:
+            do that, append the results, and ask it once more)
           → this round's user + assistant messages are appended to the history as is (staying quiet is recorded too)
           → show "typing…", wait a few seconds based on the length, then send
+
+Channel goes quiet (or old history is about to be compacted) ──► memory review: look back over chat that hasn't been reviewed yet,
+                                                                 and update profile cards and long-term memory
 ```
 
 **Caching**: the history is only ever appended to, never rewritten, and the system prompt is fixed (things that change, like the time, go into each round's message), so every request starts with the previous one, and most of the input is billed at the cache-hit price (about 50x cheaper). When the context gets too long, the older half (by estimated tokens) is compacted into a summary while the last 6 rounds stay untouched; only that one request misses the cache. The log prints the input token count and cache hits for every round.
@@ -343,6 +412,10 @@ One round = number the new messages (#12, #13, …) and render them as one user 
 
 **dsowner asked it to change its persona and it says it can't**: you have to call it yourself (@mention it, reply to it, or use an alias); just saying it in the chat without calling it doesn't count, and `OWNER_ID` in `.env` has to be your own user ID. If it says this channel has its own persona, that's because you said "the whole server": in this channel, leaving out "whole server" changes the persona used here; to change the whole server's, use `/ds persona`.
 
+**It didn't remember what I said**: to have it remember right away, call it and say "remember …"; once it's saved, it adds a 📝. Things nobody explicitly asked it to remember are only saved once the channel has been quiet for a while and it reviews the chat (private channels aren't reviewed automatically). `/ds-rp` shows what's on your card right now, and `/ds long-memory action:List` shows the long-term memory.
+
+**A profile card got messed up**: its owner can use `/ds-rp action:Undo`, or just open the editor and fix it.
+
 **DMs**: for now it only works in servers and doesn't handle DMs.
 
 ---
@@ -361,6 +434,7 @@ The file-reading tests use python-docx, openpyxl, python-pptx and reportlab to g
 |---|---|
 | `dsbot/engine.py` | Scheduling engine: buffering, timing, quota, budget, carrying out actions, summary compaction, cross-channel memory |
 | `dsbot/render.py` / `prompts.py` | Chat log rendering format, system prompt |
+| `dsbot/memory.py` | Storage for profile cards and long-term memory (an SQLite file each), parsing the memory review output |
 | `dsbot/llm.py` | DeepSeek HTTP client (thinking switch, JSON mode, usage parsing) |
 | `dsbot/files.py` | Reading files: classification, decoding, PDF / Office parsing, the parsing subprocess |
 | `dsbot/search.py` | Web search: DeepSeek's built-in web_search (Anthropic-compatible API), with Tavily as a fallback |

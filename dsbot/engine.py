@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -26,6 +27,7 @@ from .images import MAX_RAW_BYTES, filename_for, to_data_uri, upload_ready
 from .ledger import Ledger
 from .links import site_name
 from .llm import LLMError
+from .memory import CardStore, MemoryStore, clean_card, clean_memory, parse_review
 from .models import (
     Action,
     ChannelInfo,
@@ -63,6 +65,9 @@ from .prompts import (
     PERSONA_UNCHANGED,
     PERSONA_UNDONE,
     SUMMARY_SYSTEM,
+    WHO_NONE,
+    WHO_OFF,
+    build_review_prompt,
     build_system_prompt,
     clean_persona,
 )
@@ -75,12 +80,18 @@ from .render import (
     history_lines,
     last_listed,
     neutralize,
+    neutralize_record,
     own_text,
+    render_cards,
     render_channel_list,
     render_recall,
+    render_review_input,
     render_round,
     render_search,
     render_tool_result,
+    render_who,
+    review_bot_lines,
+    review_text,
 )
 from .settings import Settings, View
 from .store import Conversation, Store
@@ -108,7 +119,16 @@ KEEP_RECENT_TURNS = 12  # when compacting memory, the last 6 rounds (12 turns) s
 DOWNLOAD_TIMEOUT = 60.0  # max wait for downloading one attachment
 FORCE_COMPACT_TOKENS = 100_000  # if the context is over twice the budget and over this too, compact without waiting for enough old history
 # actions after which the model is asked again. read / search / recall / persona are only allowed when it's called; image also works in proactive chat
-TOOL_KINDS = ("read", "search", "recall", "persona", "image")
+TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who")
+MEMORY_KINDS = ("card", "memory")  # changing profile cards and long-term memory: these go together with a reply, no need to ask the model again
+MAX_WHO = 2
+MAX_REVIEW_CHUNKS = 4  # max pieces one review asks the model about (when the chat history is long)
+MAX_REVIEW_CARDS = 3  # max profile cards one review changes (each is rewritten in full, so too many make the output very long)
+MAX_REVIEW_MEMORY_OPS = 10
+MAX_REVIEW_FAILURES = 3  # give up on a batch of chat after this many failed reviews in a row
+REVIEW_TIMEOUT_SCALE = 2.0  # memory reviews run in the background with nobody waiting: wait up to twice timeout_seconds
+REVIEW_MAX_TOKENS = 6000
+_SID_LINE = re.compile(r"^#(\d{1,9}) ")
 SEND_KINDS = ("sticker", "meme", "pick")  # what's sent is a picture: it counts as "speaking up", just like talking
 RECENT_LINKS_KEEP = 30  # how many recent messages with links each channel remembers (the model can ask to open them with read)
 MAX_RECALLS = 2
@@ -220,6 +240,46 @@ class _LinkPlan:
     entry: LinkEntry
     link: LinkRef
     partial: bool = False  # not enough characters left this round to read all of it (or some images were left out): can be opened in full later
+
+
+@dataclass
+class _ReviewChunk:
+    """A stretch of chat to review."""
+
+    lines: list[str]  # the chat history shown to the model
+    sids: list[int]  # the numbers of members' messages in this stretch (taken only from members' messages)
+    last_turn: int  # the id of the last turn in this stretch (once it's reviewed, progress is saved up to here)
+    start: float  # the time of the earliest turn in this stretch (to tell whether a profile card was deleted after it)
+
+
+@dataclass
+class _ReviewPlan:
+    chunks: list[_ReviewChunk]
+    cards_ok: bool
+    memory_ok: bool
+    last_id: int
+
+
+_SAME_NAME_SUFFIX = re.compile(r"\s*[（(]\s*same\s*name\s*[,，]?\s*(?:no\.?\s*)?(\d+)\s*[)）]\s*$", re.IGNORECASE)
+
+
+def _same_name(given: str, author: str, number: int | None = None) -> bool:
+    """Whether the name the model wrote during a memory review is the same as the message author's. Names in the prompt were neutralized and may have been shortened (ending in "…"),
+    and people who share a name got " (same name, N)" added: number is which one the author is, and if the model wrote a number, it has to match."""
+    def norm(x: str) -> str:
+        return neutralize(" ".join(x.split())).strip("「」\"' ").casefold()
+
+    given = given.strip()
+    suffix = _SAME_NAME_SUFFIX.search(given)
+    if suffix is not None:
+        if number is not None and int(suffix.group(1)) != number:
+            return False  # it names the other person with the same name
+        given = given[: suffix.start()]
+    wanted = norm(given)
+    real = norm(author)
+    if wanted == real or wanted == norm(one_line(author, 32)):
+        return True
+    return wanted.endswith("…") and len(wanted) > 1 and real.startswith(wanted[:-1])
 
 
 @dataclass
@@ -372,6 +432,12 @@ class ChannelState:
     digest_seen: dict[int, int] = field(default_factory=dict)  # person -> seq of their latest talk elsewhere that was already carried into this channel
     listed: tuple[str, ...] | None = None  # the "channels you can look through" list already written into this channel's log
     last_decision: str = ""
+    cards_shown: dict[int, tuple[int, float]] = field(default_factory=dict)  # person -> (the turn their card was attached in, the card's version)
+    unreviewed_rounds: int = 0  # rounds of chat since the last memory review
+    reviewing: bool = False
+    last_review_at: float = 0.0
+    review_failures: int = 0  # failed reviews in a row (the more failures, the longer it waits)
+    review_bad: int = 0  # how many of those were unusable model output (after a few in a row, that batch of chat is given up on)
 
 
 class Engine:
@@ -394,8 +460,12 @@ class Engine:
         link_reader: LinkOpener | None = None,
         pictures: PictureSource | None = None,
         memes: MemeStore | None = None,
+        cards: CardStore | None = None,
+        memory: MemoryStore | None = None,
     ):
         self.cfg = cfg
+        self.cards = cards  # profile cards (data/cards.sqlite3)
+        self.memory = memory  # long-term memory (data/memory.sqlite3)
         self.link_reader = link_reader  # opens links (posts on X through FxTwitter, web pages through Tavily)
         self.pictures = pictures  # finds images online (needs Tavily)
         self.memes = memes  # the meme library
@@ -547,6 +617,9 @@ class Engine:
         """Called from outside every few seconds; checks which channels should run a round."""
         now = self.clock()
         for st in list(self.states.values()):
+            if self._review_due(st, now):
+                self._kick_review(st)  # it's been quiet for a while: review memory
+                continue
             if st.scheduled or st.lock.locked() or not st.pending:
                 continue
             if st.mention_due or self._proactive_ready(st, now):
@@ -717,6 +790,7 @@ class Engine:
         info = self.transport.channel_info(st.channel_id)
         system = self._system_prompt(st, view, conv, info)
         context, digest_marks, listed = self._shared_context(st, view, triggers, now) if kind == "mention" else ([], {}, None)
+        card_lines, card_marks = self._card_context(st, view, conv, numbered, triggers)
 
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
             content = render_round(
@@ -731,6 +805,7 @@ class Engine:
                 docs=docs if with_images else _without_images(docs),
                 max_chars=self.ec.max_chars_per_message,
                 context=context,
+                cards=card_lines,
             )
             return content, self._messages(system, conv, content)
 
@@ -752,18 +827,23 @@ class Engine:
         # finding images online also works in proactive chat (posting pictures is everyday group-chat stuff); the other look-it-up actions are only for when it's called.
         # When it can't search in proactive chat (cooling down, no searches left), treat it as not having asked, and don't ask the model again for it
         extra = ("image",) if kind == "proactive" and self._image_ready(st, view, now) else ()
-        actions, stored = self._interpret(st, completion, kind, targets, allow_tools=kind == "mention", extra_tools=extra)
+        actions, stored = self._interpret(
+            st, completion, kind, targets, allow_tools=kind == "mention", extra_tools=extra, cards_here=bool(card_lines)
+        )
         if st.generation != generation:
             log.info("Channel %s: memory was cleared during this round; discarding the result", st.channel_id)
             self.store.set_outcome(row, "discarded")
             self._consume(st, batch, now)
             return
 
-        # write this round into the history first (append-only), then consume the buffer
-        self.store.append_round(conv, user_content, stored, [(sid, m.message_id) for sid, m in numbered], now=now)
+        # write this round into the history first (append-only), then consume the buffer. Message numbers are saved together with who sent them (a memory review needs to know who said what)
+        assigned = [(sid, m.message_id, None if m.is_bot else m.author_id, m.author_name) for sid, m in numbered]
+        self.store.append_round(conv, user_content, stored, assigned, now=now)
         self._consume(st, batch, now)
         self._mark_read(conv, planned)
         self._mark_links(conv, opened)
+        self._mark_cards(st, conv, card_marks)
+        st.unreviewed_rounds += 1
         st.digest_seen.update(digest_marks)
         if listed is not None:
             st.listed = listed
@@ -792,6 +872,8 @@ class Engine:
                     return
                 completion, cost, row, actions = step
 
+        # changing profile cards and saving long-term memory: done first (they're just database writes), then the messages are sent
+        actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind)
         actions, dropped = self._check_stickers(st, actions, info)
         actions, dropped_media = self._check_media(st, view, actions)
         if (dropped or dropped_media) and kind == "mention" and targets and not any(
@@ -818,7 +900,8 @@ class Engine:
                 elif decided_react:
                     st.bucket.spend(self.ec.react_cost)
             self.store.set_outcome(row, outcome)
-            st.last_decision = self._describe(kind, outcome, actions, completion)
+            # while profile cards are attached in the conversation, admins don't get to see the model's "thoughts" (they might quote someone's card)
+            st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=bool(st.cards_shown or card_lines))
         decided_text = any(a.kind == "reply" and a.messages for a in actions)
         uploads = {"meme", "pick"}  # the two kinds that need the "Attach Files" permission
         self._note_media(st, bool(failed_media & uploads), any(a.kind in uploads for a in actions))
@@ -847,7 +930,7 @@ class Engine:
             u.hit,
             u.output,
             cost,
-            one_line(completion.reasoning or "", 160),
+            "(profile cards attached, thoughts omitted)" if st.cards_shown or card_lines else one_line(completion.reasoning or "", 160),
         )
         if u.prompt_tokens > view.context_budget_tokens and st.generation == generation:
             # Normally it waits until old history makes up half before compacting (fewer cache misses). If it's really too long
@@ -894,11 +977,14 @@ class Engine:
         *,
         allow_tools: bool,
         extra_tools: tuple[str, ...] = (),
+        cards_here: bool = False,
     ) -> tuple[list[Action], str]:
-        """Parse the model output; returns (actions, content to write into the history)."""
+        """Parse the model output; returns (actions, content to write into the history). cards_here: profile cards were newly attached in this request (not in cards_shown yet)."""
         actions, ok = parse_actions(completion.content)
         if not ok:
-            log.warning("Channel %s: model output isn't valid JSON: %s", st.channel_id, one_line(completion.content, 200))
+            # while there are profile cards in the conversation, the output isn't written to the log (it might copy someone's card)
+            shown = "(profile cards attached, content omitted)" if st.cards_shown or cards_here else one_line(completion.content, 200)
+            log.warning("Channel %s: model output isn't valid JSON: %s", st.channel_id, shown)
             text = completion.content.strip()
             if kind == "mention" and text and not text.startswith(("{", "[")):
                 actions = [Action("reply", targets[-1] if targets else None, [text[:1800]])]
@@ -914,6 +1000,7 @@ class Engine:
                 [a for a in tools if a.kind == "read"][:MAX_READ_TARGETS]
                 + [a for a in tools if a.kind == "search"][: max(1, self.ec.max_searches_per_round)]
                 + [a for a in tools if a.kind == "recall"][:MAX_RECALLS]
+                + [a for a in tools if a.kind == "who"][:MAX_WHO]
                 + [a for a in tools if a.kind == "image"][:1]
             )
             if not picked:
@@ -946,6 +1033,7 @@ class Engine:
         plan, link_plan, file_notes, wanted = self._plan_reads(st, view, reads)
         sections: list[str] = []
         gallery: Gallery | None = None
+        who_marks: list[tuple[int, float]] = []  # the profile cards it looked up: once written into the history, they count as "already shown to it"
 
         async def work() -> tuple[list[tuple[int, DocBlock, _Planned, FileText]], list[tuple[_LinkPlan, DocBlock, FileText]]]:
             nonlocal gallery
@@ -958,6 +1046,8 @@ class Engine:
                     sections.append(self._recall_section(st, view, action, info))
                 elif action.kind == "persona":
                     sections.append(await self._persona_section(st, action, numbered, targets))
+                elif action.kind == "who":
+                    sections.append(self._who_section(st, view, action, who_marks))
                 elif action.kind == "image":
                     note, found = await self._image_section(st, view, action, now)
                     if found:
@@ -1012,13 +1102,16 @@ class Engine:
             await self._on_error(st, kind, exc, now, [], targets, conv, info)
             return None
         extra = ("persona",) if allow_persona else ()
-        actions, stored = self._interpret(st, completion, kind, targets, allow_tools=False, extra_tools=extra)
+        actions, stored = self._interpret(
+            st, completion, kind, targets, allow_tools=False, extra_tools=extra, cards_here=bool(who_marks)
+        )
         if st.generation != generation:
             self.store.set_outcome(row, "discarded")
             return None
         self.store.append_round(conv, content, stored, [], now=now)
         self._mark_read(conv, [(item, result) for _, _, item, result in results])
         self._mark_links(conv, opened)
+        self._mark_cards(st, conv, who_marks)
         return completion, cost, row, actions
 
     def _plan_reads(
@@ -1437,6 +1530,484 @@ class Engine:
             log.exception("Channel %s: error sending a picture", st.channel_id)
         return None
 
+    # ------------------------------------------------------------------ profile cards and long-term memory
+
+    def _cards_on(self, view: View) -> bool:
+        return bool(view.cards) and self.cards is not None
+
+    def _memory_on(self, view: View) -> bool:
+        return bool(view.long_memory) and self.memory is not None
+
+    def implicit_ok(self, channel_id: int, key: str) -> bool:
+        """Whether a memory review may record this channel's chat into profile cards (key = cards) / long-term memory (long_memory).
+
+        Profile cards and long-term memory are visible across the whole server: public channels are fine; a private channel needs the setting turned on
+        in that channel itself, so things said in a private channel don't pop up in public ones. Explicit requests to remember aren't limited by this (the person asked for it themselves)."""
+        place = self.transport.locate(channel_id)
+        if place is None:
+            return False
+        if place.public:
+            return True
+        explicit = self.settings.overrides("channel", channel_id).get(key)
+        if explicit is None and place.parent_id is not None and not place.private_thread:
+            explicit = self.settings.overrides("channel", place.parent_id).get(key)
+        return explicit is True
+
+    def _card_context(
+        self,
+        st: ChannelState,
+        view: View,
+        conv: Conversation,
+        numbered: list[tuple[int, IncomingMessage]],
+        triggers: list[IncomingMessage],
+    ) -> tuple[list[str], list[tuple[int, float | None]]]:
+        """The profile cards of the people talking this round. Cards already given in this conversation and unchanged since aren't given again. Returns (text lines, [(person, card version)])."""
+        if not numbered or not self._cards_on(view):
+            return [], []
+        assert self.cards is not None
+        oldest = conv.turns[0].id if conv.turns else None
+        people: dict[int, str] = {}
+        for m in triggers:  # the people calling it come first
+            if not m.is_bot:
+                people.setdefault(m.author_id, m.author_name)
+        for _, m in reversed(numbered):  # then by who spoke most recently
+            if not m.is_bot:
+                people.setdefault(m.author_id, m.author_name)
+        shown: list[tuple[str, str | None]] = []
+        marks: list[tuple[int, float | None]] = []
+        for uid, name in people.items():
+            if len(shown) >= max(0, self.ec.cards_per_round):
+                break
+            card = self.cards.get(st.guild_id, uid)
+            if card is None:
+                seen = st.cards_shown.get(uid)
+                if seen is not None:
+                    if oldest is not None and seen[0] >= oldest:
+                        shown.append((name, None))  # the deleted card is still attached in the conversation: tell it not to use it anymore
+                    marks.append((uid, None))  # once this round is written into the history, there's no need to say it again
+                continue
+            if name and card.name != name:
+                self.cards.touch_name(st.guild_id, uid, name)  # they changed their nickname: the card can be found by the new name too
+            seen = st.cards_shown.get(uid)
+            if seen is not None and seen[1] == card.updated_at and oldest is not None and seen[0] >= oldest:
+                continue
+            shown.append((name or card.name, card.text))
+            marks.append((uid, card.updated_at))
+        return render_cards(shown), marks
+
+    def _mark_cards(self, st: ChannelState, conv: Conversation, marks: list[tuple[int, float | None]]) -> None:
+        """Record the profile cards that were attached as "already in the conversation" (noting which turn; if compaction removes that turn, or the card changes, it's attached again).
+        A version of None: it's been told the card was deleted, so there's nothing left to track. Recorded only once this round is written into the history (if that fails, it waits for the next round)."""
+        if not marks or not conv.turns:
+            return
+        turn_id = conv.turns[-2].id if len(conv.turns) >= 2 else conv.turns[-1].id
+        for uid, version in marks:
+            if version is None:
+                st.cards_shown.pop(uid, None)
+            else:
+                st.cards_shown[uid] = (turn_id, version)
+
+    def _who_section(self, st: ChannelState, view: View, action: Action, marks: list[tuple[int, float]]) -> str:
+        """who: look up profile cards by name (when the conversation is about someone who isn't here)."""
+        name = action.name or ""
+        if not self._cards_on(view):
+            return WHO_OFF
+        assert self.cards is not None
+        found = self.cards.find(st.guild_id, name)
+        if not found:
+            return WHO_NONE.format(name=neutralize(one_line(name, 32)))
+        for card in found:
+            marks.append((card.user_id, card.updated_at))
+        log.info('Channel %s: looked up profile cards for "%s" (%d found)', st.channel_id, one_line(name, 32), len(found))
+        return render_who(name, [(card.name, card.text) for card in found])
+
+    async def _apply_memory_actions(
+        self,
+        st: ChannelState,
+        view: View,
+        actions: list[Action],
+        numbered: list[tuple[int, IncomingMessage]],
+        targets: list[int],
+        kind: str,
+    ) -> list[Action]:
+        """Change profile cards and long-term memory (just database writes). When a change goes through, 📝 is added to the message that asked for it. Returns the actions still left to carry out."""
+        mine = [a for a in actions if a.kind in MEMORY_KINDS]
+        if not mine:
+            return actions
+        by_sid = dict(numbered)
+        now = self.clock()
+        marked: set[int] = set()
+        for action in mine:
+            if action.kind == "card":
+                mid = self._apply_card(st, view, action, by_sid, now)
+            else:
+                mid = self._apply_memory(st, view, action, targets, kind, now)
+            if mid is not None and mid not in marked:
+                marked.add(mid)
+                await self._safe_react(st, mid, "📝")  # so people can see at a glance that it really was saved
+        return [a for a in actions if a.kind not in MEMORY_KINDS]
+
+    def _apply_card(
+        self, st: ChannelState, view: View, action: Action, by_sid: dict[int, IncomingMessage], now: float
+    ) -> int | None:
+        """Change a profile card: only the message in which that person called it this round counts, and the card belongs to that message's author. Returns the message to add 📝 to."""
+        if not self._cards_on(view):
+            log.info("Channel %s: profile cards aren't on here; not changed", st.channel_id)
+            return None
+        assert self.cards is not None
+        m = by_sid.get(action.to) if action.to is not None else None
+        if m is None or m.is_bot or not m.addressed:
+            log.info("Channel %s: #%s isn't a message in which its author called it this round; profile card not changed", st.channel_id, action.to)
+            return None
+        text = clean_card(action.text or "")
+        if len(text) > self.ec.card_max_chars:
+            log.info("Channel %s: %s's new profile card is too long (%d characters, max %d); not changed", st.channel_id, m.author_name, len(text), self.ec.card_max_chars)
+            return None
+        # it edited the copy attached in the conversation: if that person changed or deleted it in the meantime (/ds-rp, or the bot owner deleting cards), don't write
+        seen = st.cards_shown.get(m.author_id)
+        expect = seen[1] if seen is not None else None
+        current = self.cards.get(st.guild_id, m.author_id)
+        if (current.updated_at if current is not None else None) != expect:
+            log.info("Channel %s: %s's profile card was just changed or deleted; not changed this time", st.channel_id, m.author_name)
+            return None
+        if not self.cards.put(st.guild_id, m.author_id, m.author_name, text, via="chat", now=now, expect=expect):
+            return None  # nothing changed
+        # only log whose card changed, not what's on it: the card belongs to that person
+        log.info("Channel %s: %s's profile card %s", st.channel_id, m.author_name, "cleared" if not text else f"updated ({len(text)} characters)")
+        return m.message_id
+
+    def _apply_memory(
+        self, st: ChannelState, view: View, action: Action, targets: list[int], kind: str, now: float
+    ) -> int | None:
+        """Change long-term memory: only in a round where it was called (someone asked it to remember). Returns the message to add 📝 to."""
+        if not self._memory_on(view) or kind != "mention" or not targets:
+            log.info("Channel %s: nobody called it to remember anything, or long-term memory isn't on here; not changed", st.channel_id)
+            return None
+        if not self._memory_op(st.guild_id, action.op or "", action.index, action.text, via="chat", now=now):
+            log.info("Channel %s: long-term memory not changed (%s %s)", st.channel_id, action.op, action.index or "")
+            return None
+        log.info("Channel %s: long-term memory %s %s", st.channel_id, action.op, one_line(action.text or str(action.index or ""), 80))
+        return st.msg_by_sid.get(targets[-1])
+
+    def _memory_op(self, guild_id: int, op: str, no: int | None, text: str | None, *, via: str, now: float) -> bool:
+        """Add, edit or delete one long-term memory entry. Over the entry or length limit, or with a number that doesn't exist, nothing changes and it returns False."""
+        assert self.memory is not None
+        if op in ("add", "edit"):
+            text = clean_memory(text or "")
+            if not text or len(text) > self.ec.memory_entry_chars:
+                return False
+        if op == "add":
+            entries = self.memory.entries(guild_id)
+            if len(entries) >= self.ec.memory_max_entries or any(e.text == text for e in entries):
+                return False
+            self.memory.add(guild_id, text or "", via=via, now=now)
+            return True
+        if op == "edit" and no is not None:
+            current = self.memory.get(guild_id, no)
+            return current is not None and current.text != text and self.memory.edit(guild_id, no, text or "", via=via, now=now)
+        if op == "delete" and no is not None:
+            return self.memory.delete(guild_id, no)
+        return False
+
+    # ------------------------------------------------------------------ memory review
+
+    def _review_due(self, st: ChannelState, now: float) -> bool:
+        """The channel has been quiet for a while and a few new rounds of chat have built up: time to review memory. After failures in a row, it waits longer and longer."""
+        if self.cards is None and self.memory is None:
+            return False
+        # the buffer may always hold messages that didn't call it (channels without proactive chat): those wait until someone actually talks to it, and don't hold up reviewing what's already been said
+        if st.reviewing or st.scheduled or st.lock.locked():
+            return False
+        if st.unreviewed_rounds < max(1, self.ec.review_min_rounds) or now < self.paused_until:
+            return False  # not enough built up yet; or DeepSeek is paused (insufficient balance, wrong key)
+        wait = self.ec.review_idle_seconds * (2 ** min(st.review_failures, 5))
+        if now - st.last_review_at < wait:
+            return False  # it was just reviewed (or just failed)
+        return now - max(st.last_activity_at, st.last_eval_at) >= self.ec.review_idle_seconds
+
+    def _kick_review(self, st: ChannelState) -> None:
+        st.reviewing = True
+        task = asyncio.get_running_loop().create_task(self._review_task(st))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _review_task(self, st: ChannelState) -> None:
+        """Review memory while it's quiet. It holds the channel only while picking the chat to review, not while asking the model, so anyone calling it still gets an answer right away."""
+        try:
+            async with st.lock:
+                conv = self._conversation(st)
+                info = self.transport.channel_info(st.channel_id)
+                generation = st.generation
+                plan = self._review_plan(st, conv, info)
+            if plan is not None:
+                await self._run_review(st, conv, info, plan, generation, before_compact=False)
+        except Exception:
+            log.exception("Channel %s: error while reviewing memory", st.channel_id)
+        finally:
+            st.reviewing = False
+
+    async def _compact_review(
+        self, st: ChannelState, conv: Conversation, info: ChannelInfo, plan: _ReviewPlan, generation: int
+    ) -> None:
+        """The chat picked out before old history gets compacted: review it in the background."""
+        try:
+            await self._run_review(st, conv, info, plan, generation, before_compact=True)
+        except Exception:
+            log.exception("Channel %s: error while reviewing memory before compaction", st.channel_id)
+        finally:
+            st.reviewing = False
+
+    def _set_reviewed(self, st: ChannelState, conv: Conversation, turn_id: int) -> None:
+        self.store.set_reviewed(conv, turn_id)
+        if st.conversation is not None and st.conversation is not conv:
+            st.conversation.reviewed_upto = max(st.conversation.reviewed_upto, turn_id)  # it was reloaded in the meantime
+
+    def _review_plan(
+        self, st: ChannelState, conv: Conversation, info: ChannelInfo, upto: int | None = None
+    ) -> _ReviewPlan | None:
+        """Pick out the chat that hasn't been reviewed yet, split into pieces. When there's nothing to review (turned off, private channel, nobody talked), progress moves to the end and it returns None.
+
+        upto: only pick up to this turn (before old history is compacted: that part is about to become a summary, and its original words will be gone)."""
+        now = self.clock()
+        view = self.view(st)
+        turns = [t for t in conv.turns if t.id > conv.reviewed_upto and (upto is None or t.id <= upto)]
+        if not turns:
+            if upto is None:
+                st.unreviewed_rounds = 0
+            return None
+        last_id = turns[-1].id
+        cards_ok = self._cards_on(view) and self.implicit_ok(st.channel_id, "cards")
+        memory_ok = self._memory_on(view) and self.implicit_ok(st.channel_id, "long_memory")
+        if view.enabled and (cards_ok or memory_ok) and self._over_budget(st, view, now)[0]:
+            if upto is not None:
+                self._set_reviewed(st, conv, last_id)  # this part is about to be compacted, so it can't be reviewed later either
+            st.last_review_at = now  # today's budget is used up: check again after a while (the budget is per day)
+            return None
+        chunks = self._review_chunks(turns, info.bot_name) if view.enabled and (cards_ok or memory_ok) else []
+        if not any(chunk.sids for chunk in chunks):
+            # no review here (turned off, or a private channel), or no member talked in this stretch: these old ones won't be reviewed later, even if it's turned on
+            self._set_reviewed(st, conv, last_id)
+            if upto is None:
+                st.unreviewed_rounds = 0
+            return None
+        return _ReviewPlan(chunks, cards_ok, memory_ok, last_id)
+
+    def _review_chunks(self, turns: list[Any], bot_name: str) -> list[_ReviewChunk]:
+        """Split the turns to review into pieces by length, noting each piece's last turn (progress is saved piece by piece)."""
+        limit = max(2000, self.ec.review_max_chars)
+        chunks: list[_ReviewChunk] = []
+        lines: list[str] = []
+        sids: list[int] = []
+        size = 0
+        start = 0.0
+        for t in turns:
+            if t.role == "user":
+                turn_lines = review_text(t.content)
+                # message numbers are taken only from members' messages (what it said itself fits on one line and can't pass for one)
+                turn_sids = [int(m.group(1)) for line in turn_lines if (m := _SID_LINE.match(line))]
+            else:
+                turn_lines, turn_sids = review_bot_lines(t.content, bot_name), []
+            kept: list[str] = []
+            used = 0
+            for line in turn_lines:
+                line = line if len(line) <= limit // 4 else line[: limit // 4] + "…"
+                if used + len(line) + 1 > limit:
+                    kept.append("(rest omitted)")
+                    break
+                kept.append(line)
+                used += len(line) + 1
+            if lines and size + used > limit:
+                chunks.append(_ReviewChunk(lines, sids, prev_id, start))
+                lines, sids, size = [], [], 0
+            if not lines:
+                start = t.created_at
+            lines += kept
+            sids += [sid for sid in turn_sids if sid not in sids]
+            size += used
+            prev_id = t.id
+        if lines:
+            chunks.append(_ReviewChunk(lines, sids, prev_id, start))
+        return chunks
+
+    async def _run_review(
+        self,
+        st: ChannelState,
+        conv: Conversation,
+        info: ChannelInfo,
+        plan: _ReviewPlan,
+        generation: int,
+        *,
+        before_compact: bool,
+    ) -> None:
+        """Ask the model piece by piece and apply the changes, saving progress after each piece. After a few failures in a row, this batch is given up on (so it doesn't keep spending money)."""
+        st.last_review_at = self.clock()
+        for chunk in plan.chunks[:MAX_REVIEW_CHUNKS]:
+            if chunk.sids:
+                result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation)
+                if st.generation != generation:
+                    return  # this channel's memory was cleared during the review
+                if result != "ok":
+                    st.review_failures += 1  # the more failures, the longer it waits
+                    # temporary problems like not connecting, rate limits or insufficient balance: review again once it recovers, without giving up on this batch of chat;
+                    # problems on the model's side (output cut off, refused, or taking too long to finish) mean giving up after a few in a row, so it doesn't keep spending money
+                    if result == "failed":
+                        st.review_bad += 1
+                    if before_compact or st.review_bad >= MAX_REVIEW_FAILURES:
+                        log.warning("Channel %s: memory review didn't work; skipping this batch of chat", st.channel_id)
+                        self._set_reviewed(st, conv, plan.last_id)
+                        st.review_failures = st.review_bad = 0
+                        if not before_compact:
+                            st.unreviewed_rounds = 0
+                    return
+                st.review_failures = st.review_bad = 0
+            self._set_reviewed(st, conv, chunk.last_turn)
+        if len(plan.chunks) > MAX_REVIEW_CHUNKS:
+            if before_compact:
+                self._set_reviewed(st, conv, plan.last_id)  # the rest is about to be compacted anyway
+            return  # the rest gets reviewed next time
+        if not before_compact:
+            st.unreviewed_rounds = 0
+
+    async def _review_chunk(
+        self, st: ChannelState, info: ChannelInfo, chunk: _ReviewChunk, cards_ok: bool, memory_ok: bool, generation: int
+    ) -> str:
+        """Ask the model what in this stretch of chat is worth remembering for the long term, and apply the changes.
+
+        Returns "ok"; "retry" (couldn't connect, rate limited, insufficient balance: try again later); "failed" (the model's output was unusable, or it took too long to finish)."""
+        authors = self.store.load_authors(st.channel_id, chunk.sids)  # number -> (person, name); the bot and old records aren't in it
+        guild = st.guild_id
+        people: dict[int, tuple[str, list[int]]] = {}
+        if cards_ok:
+            assert self.cards is not None
+            for sid in chunk.sids:
+                who = authors.get(sid)
+                if who is None:
+                    continue
+                deleted = self.cards.deleted_at(guild, who[0])
+                if deleted is not None and deleted >= chunk.start:
+                    continue  # their card was deleted after this stretch of chat: don't rewrite it from these old messages
+                entry = people.setdefault(who[0], (who[1], []))
+                if sid not in entry[1]:
+                    entry[1].append(sid)
+        do_cards = cards_ok and bool(people)
+        if not do_cards and not memory_ok:
+            return "ok"
+        listed: list[tuple[str, list[int], str | None]] | None = None
+        versions: dict[int, float | None] = {}  # which version the model is shown: it's only written if that still matches (not if the person changed or deleted it in the meantime)
+        numbers: dict[int, int] = {}  # people who share a name: which one each is
+        if do_cards:
+            assert self.cards is not None
+            listed = []
+            names = [name for name, _ in people.values()]
+            seen_names: dict[str, int] = {}
+            for uid, (name, own) in people.items():
+                card = self.cards.get(guild, uid)
+                versions[uid] = card.updated_at if card is not None else None
+                shown = one_line(name or (card.name if card else ""), 32)
+                if names.count(name) > 1:  # two people with the same name: told apart by message numbers (a long name is shortened first, so the suffix isn't cut off)
+                    seen_names[name] = numbers[uid] = seen_names.get(name, 0) + 1
+                    shown += f" (same name, {numbers[uid]})"
+                listed.append((shown, own, card.text if card else None))
+        memories = None
+        if memory_ok:
+            assert self.memory is not None
+            memories = [(m.no, m.text) for m in self.memory.entries(guild)]
+        system = build_review_prompt(
+            name=neutralize(one_line(info.bot_name, 40)),
+            cards=do_cards,
+            memory=memory_ok,
+            card_max=self.ec.card_max_chars,
+            entry_max=self.ec.memory_entry_chars,
+            count=len(memories or []),
+            max_entries=self.ec.memory_max_entries,
+        )
+        prompt = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": render_review_input(listed, memories, chunk.lines)},
+        ]
+        now = self.clock()
+        try:
+            completion = await self.llm.complete(
+                prompt,
+                thinking="off",
+                json_mode=True,
+                max_tokens=REVIEW_MAX_TOKENS,
+                user_id=f"guild-{guild}",
+                timeout_scale=REVIEW_TIMEOUT_SCALE,
+            )
+        except LLMError as exc:
+            log.warning("Channel %s: memory review failed: %s", st.channel_id, exc)
+            self.store.record_usage(
+                ts=now, day=self.ledger.day(now), guild_id=guild, channel_id=st.channel_id, kind="review", outcome="error"
+            )
+            if exc.timeout:
+                return "failed"  # waited a long time and it still didn't finish: most likely this stretch has too much to write, and trying again would likely go the same way (and may still be billed)
+            transient = exc.status is None or exc.status in (401, 402, 408, 429) or exc.status >= 500
+            return "retry" if transient else "failed"
+        now = self.clock()
+        cost = self.pricing.cost(completion.usage, now)
+        self.ledger.add(guild, cost, now)
+        u = completion.usage
+        self.store.record_usage(
+            ts=now,
+            day=self.ledger.day(now),
+            guild_id=guild,
+            channel_id=st.channel_id,
+            kind="review",
+            outcome="review",
+            hit=u.hit,
+            miss=u.miss,
+            output=u.output,
+            reasoning=u.reasoning,
+            cost=cost,
+        )
+        if st.generation != generation:
+            return "retry"
+        parsed = parse_review(completion.content)
+        if parsed is None and completion.finish_reason == "length":
+            log.warning("Channel %s: the memory review output was too long and got cut off, so nothing was reviewed this time", st.channel_id)
+            return "failed"
+        if parsed is None:
+            log.warning("Channel %s: the memory review output isn't valid JSON", st.channel_id)
+            return "ok"  # treated as nothing to remember; not retried (so it doesn't keep spending money)
+        updates, ops = parsed
+        cards_changed = 0
+        if do_cards:
+            assert self.cards is not None
+            done: set[int] = set()
+            for to, text, name in updates:
+                who = authors.get(to) if to in chunk.sids else None
+                if who is None or who[0] not in people or who[0] in done:
+                    continue  # only the people who spoke in this stretch, and only their own cards
+                if name is not None and not _same_name(name, people[who[0]][0], numbers.get(who[0])):
+                    log.info('Channel %s: during the memory review, #%s didn\'t match the name "%s"; not changed', st.channel_id, to, one_line(name, 32))
+                    continue
+                text = clean_card(text)
+                if not text or len(text) > self.ec.card_max_chars:
+                    continue
+                deleted = self.cards.deleted_at(guild, who[0])
+                if deleted is not None and deleted >= chunk.start:
+                    continue  # it was deleted while the model was being asked
+                done.add(who[0])
+                if self.cards.put(guild, who[0], who[1], text, via="review", now=now, expect=versions.get(who[0])):
+                    cards_changed += 1
+                if len(done) >= MAX_REVIEW_CARDS:
+                    break
+        memory_changed = 0
+        if memory_ok:
+            for op in ops[:MAX_REVIEW_MEMORY_OPS]:
+                if self._memory_op(guild, op.op, op.no, op.text, via="review", now=now):
+                    memory_changed += 1
+        log.info(
+            "Channel %s: reviewed memory (%d lines of chat): %d profile cards changed, %d long-term memory changes | $%.5f",
+            st.channel_id,
+            len(chunk.lines),
+            cards_changed,
+            memory_changed,
+            cost,
+        )
+        return "ok"
+
     # ------------------------------------------------------------------ cross-channel memory
 
     def shares_out(self, channel_id: int, place: ChannelPlace) -> bool:
@@ -1508,6 +2079,20 @@ class Engine:
         stickers = [_sticker_label(n) for n in info.stickers[: max(0, self.ec.sticker_list_limit)]]
         meme_names = self.memes.names(st.guild_id) if self._memes_on(view) and self.memes is not None else []
         memes = [_sticker_label(n) for n in meme_names[: max(0, self.ec.meme_list_limit)]]
+        # people with profile cards, and long-term memory: they rarely change, so they go here (sorted, with fixed numbers, so the cache isn't affected unless they change)
+        card_names: list[str] | None = None
+        more_cards = 0
+        if self._cards_on(view):
+            assert self.cards is not None
+            all_names = self.cards.names(st.guild_id)
+            card_names = [_sticker_label(n) for n in all_names[: max(0, self.ec.card_list_limit)]]
+            more_cards = len(all_names) - len(card_names)
+        memories: list[tuple[int, str]] | None = None
+        if self._memory_on(view):
+            assert self.memory is not None
+            memories = [
+                (m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in self.memory.entries(st.guild_id)
+            ]
         return build_system_prompt(
             guild=neutralize(one_line(info.guild_name, 60)),
             channel=neutralize(one_line(info.channel_name, 60)),
@@ -1524,6 +2109,12 @@ class Engine:
             more_memes=len(meme_names) - len(memes),
             images=self._can_find_images(view),
             links=self._links_mode(view),
+            cards=card_names,
+            more_cards=more_cards,
+            memories=memories,
+            memory_max=self.ec.memory_max_entries,
+            card_max=self.ec.card_max_chars,
+            entry_max=self.ec.memory_entry_chars,
         )
 
     def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:
@@ -2118,6 +2709,23 @@ class Engine:
         if remove < 2:
             return
         generation = st.generation
+        if (
+            conv.reviewed_upto < conv.turns[remove - 1].id
+            and (self.cards is not None or self.memory is not None)
+            and not st.reviewing  # a review is already running (it will get to these)
+        ):
+            # the part about to be compacted hasn't been reviewed for memory yet: pick out the original words first and review them in the background (once it's a summary, they're gone).
+            # no waiting for it: compaction goes ahead as usual, and anyone calling it doesn't have to wait longer
+            try:
+                plan = self._review_plan(st, conv, info, upto=conv.turns[remove - 1].id)
+            except Exception:
+                log.exception("Channel %s: error while reviewing memory before compaction", st.channel_id)
+                plan = None
+            if plan is not None:
+                st.reviewing = True
+                task = asyncio.get_running_loop().create_task(self._compact_review(st, conv, info, plan, generation))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
         lines = []
         for t in conv.turns[:remove]:
             if t.role == "user":
@@ -2168,10 +2776,12 @@ class Engine:
             entry.read_turns = {k: v for k, v in entry.read_turns.items() if v > last_removed}
         for link_entry in st.recent_links.values():
             link_entry.read_turns = {k: v for k, v in link_entry.read_turns.items() if v > last_removed}
+        # the turn a profile card was attached in got compacted: it's attached again the next time that person talks
+        st.cards_shown = {uid: v for uid, v in st.cards_shown.items() if v[0] > last_removed}
         log.info("Channel %s: compacted %d old turns into a summary", st.channel_id, remove)
 
     @staticmethod
-    def _describe(kind: str, outcome: str, actions: list[Action], completion: Completion) -> str:
+    def _describe(kind: str, outcome: str, actions: list[Action], completion: Completion, *, hide_reason: bool = False) -> str:
         if outcome == "reply":
             said = next((a.messages[0] for a in actions if a.kind == "reply" and a.messages), "")
             media = next((a for a in actions if a.kind in SEND_KINDS), None)
@@ -2186,7 +2796,7 @@ class Engine:
         else:
             text = "stayed quiet"
         prefix = "called" if kind == "mention" else "proactive check"
-        reason = one_line(completion.reasoning or "", 80)
+        reason = "" if hide_reason else one_line(completion.reasoning or "", 80)
         return f"{prefix}, {text}" + (f" (thoughts: {reason})" if reason else "")
 
     # ------------------------------------------------------------------ for the commands
@@ -2205,6 +2815,8 @@ class Engine:
                 link_entry.failed.clear()
             st.digest_seen.clear()
             st.listed = None
+            st.cards_shown.clear()
+            st.unreviewed_rounds = 0  # cleared history isn't reviewed anymore
         for key, log_ in list(self.interactions.items()):
             # this channel's memory was cleared, so other channels shouldn't "remember" what was said here either
             kept = [item for item in log_ if item.channel_id != channel_id]
@@ -2241,4 +2853,11 @@ class Engine:
             "meme_counts": self.memes.counts(guild_id) if self.memes is not None else (0, 0),
             "links_mode": self._links_mode(view),
             "media_blocked_for": max(0.0, st.media_blocked_until - now) if st else 0.0,
+            "cards_on": self._cards_on(view),
+            "memory_on": self._memory_on(view),
+            "card_count": self.cards.count(guild_id) if self.cards is not None else 0,
+            "memory_count": self.memory.count(guild_id) if self.memory is not None else 0,
+            "memory_max": self.ec.memory_max_entries,
+            "review_here": self.implicit_ok(channel_id, "cards") or self.implicit_ok(channel_id, "long_memory"),
+            "last_review_ago": (now - st.last_review_at) if st and st.last_review_at else None,
         }

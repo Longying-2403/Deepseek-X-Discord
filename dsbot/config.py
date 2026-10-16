@@ -45,6 +45,8 @@ _SPEC_LIST = [
     Spec("persona", "Persona", str, "admin", "Persona description; leave empty for the default persona"),
     Spec("share_memory", "Memory sharing", bool, "admin", "Share memory with other channels that also have sharing on (private channels must turn it on themselves to share out)"),
     Spec("images", "Send pictures", bool, "admin", "Let it send pictures from the meme library on its own, or find pictures online (it looks at what it finds before deciding whether to send one)"),
+    Spec("cards", "Profile cards", bool, "admin", "Remember what members say about themselves (what to call them, their character, likes) and use it when chatting (members manage their own card with /ds-rp; admins can't see the cards)"),
+    Spec("long_memory", "Long-term memory", bool, "admin", "Remember this server's agreements, big events, long-running jokes and storylines (manage it with /ds long-memory)"),
     # —— owner ——
     Spec("min_eval_interval", "Min seconds between checks", int, "owner", "Minimum seconds between two proactive checks (mainly controls cost)", 10, 86400),
     Spec("proactive_thinking", "Thinking for proactive checks", str, "owner", "Thinking level for proactive checks", choices=("off", "low", "high")),
@@ -77,6 +79,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "persona": "",
     "share_memory": False,
     "images": True,
+    "cards": True,
+    "long_memory": True,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -186,6 +190,8 @@ class BotConfig:
     tick_seconds: float = 5.0
     meme_dir: str = "data/memes"  # the shared meme library: create this folder on the NAS yourself and put pictures in it
     server_meme_dir: str = "data/server-memes"  # what each server uploads with /ds meme
+    cards_database: str = "data/cards.sqlite3"  # profile cards (stored apart from the chat history, so they're easy to back up or move)
+    memory_database: str = "data/memory.sqlite3"  # long-term memory
 
 
 @dataclass
@@ -225,6 +231,14 @@ class EngineConfig:
     image_candidates: int = 4  # how many candidate pictures it's shown when finding images online
     image_max_bytes: int = 8_000_000  # max size of a picture it sends (Discord's default upload limit is 10 MB)
     meme_list_limit: int = 80  # max memes listed when telling it what's in the meme library
+    card_max_chars: int = 1600  # max characters in one profile card
+    cards_per_round: int = 6  # max people whose profile cards are attached in one round
+    card_list_limit: int = 100  # max names listed when telling it who has a profile card
+    memory_max_entries: int = 50  # max long-term memory entries per server
+    memory_entry_chars: int = 200  # max characters per long-term memory entry
+    review_idle_seconds: float = 600  # once a channel has been quiet this long and a few new rounds of chat have built up, memory gets reviewed
+    review_min_rounds: int = 3  # review only once at least this many new rounds of chat have built up
+    review_max_chars: int = 16000  # how many characters of chat history it's shown per review call (longer stretches are split up)
 
 
 @dataclass
@@ -234,14 +248,17 @@ class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     defaults: dict[str, Any] = field(default_factory=lambda: dict(BUILTIN_DEFAULTS))
+    # unknown config options (a typo, or a config.toml newer than the code): skipped with a warning in the log, so they don't stop the bot from starting
+    unknown: list[str] = field(default_factory=list)
 
 
-def _fill(cls: type, data: dict[str, Any], section: str) -> Any:
+def _fill(cls: type, data: dict[str, Any], section: str, unknown: list[str]) -> Any:
     known = {f.name: f for f in fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
         if key not in known:
-            raise ValueError(f"config.toml [{section}] has an unknown option: {key}")
+            unknown.append(f"[{section}] {key}")
+            continue
         kwargs[key] = value
     return cls(**kwargs)
 
@@ -253,25 +270,40 @@ def load_config(path: str | Path | None) -> AppConfig:
             data = tomllib.load(fh)
 
     cfg = AppConfig()
+    unknown = cfg.unknown
     if "deepseek" in data:
-        cfg.deepseek = _fill(DeepSeekConfig, data["deepseek"], "deepseek")
+        cfg.deepseek = _fill(DeepSeekConfig, data["deepseek"], "deepseek", unknown)
     if "bot" in data:
-        cfg.bot = _fill(BotConfig, data["bot"], "bot")
+        cfg.bot = _fill(BotConfig, data["bot"], "bot", unknown)
     if "engine" in data:
-        cfg.engine = _fill(EngineConfig, data["engine"], "engine")
+        cfg.engine = _fill(EngineConfig, data["engine"], "engine", unknown)
     if "pricing" in data:
         p = dict(data["pricing"])
         if "peak_hours_utc" in p:
             p["peak_hours_utc"] = tuple(tuple(int(x) for x in pair) for pair in p["peak_hours_utc"])
-        cfg.pricing = _fill(Pricing, p, "pricing")
+        cfg.pricing = _fill(Pricing, p, "pricing", unknown)
 
     defaults = dict(BUILTIN_DEFAULTS)
     for key, raw in (data.get("defaults") or {}).items():
         if key not in SPECS:
-            raise ValueError(f"config.toml [defaults] has an unknown setting: {key}")
-        defaults[key] = parse_value(SPECS[key], raw)
+            unknown.append(f"[defaults] {key}")
+            continue
+        defaults[key] = parse_value(SPECS[key], raw)  # a known setting with a bad value is still an error
     cfg.defaults = defaults
+    for section in data:
+        if section not in ("deepseek", "bot", "engine", "pricing", "defaults"):
+            unknown.append(f"[{section}]")
     return cfg
+
+
+def unknown_note(cfg: AppConfig) -> str | None:
+    """A warning for the log and the self-check."""
+    if not cfg.unknown:
+        return None
+    return (
+        "config.toml has unknown options, skipped: " + ", ".join(cfg.unknown)
+        + " (a typo? Or config.toml is newer than the code: after switching to a new version, rebuild)"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .models import DocBlock, IncomingMessage
-from .prompts import GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE
+from .prompts import CARDS_HEAD, GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE, WHO_HEAD, WHO_NONE, WHO_OFF
 from .textutil import one_line, truncate
 
 
@@ -55,15 +55,31 @@ _MARKERS = str.maketrans(
 )
 # Other kinds of line breaks become \n: that way every continuation line gets indented, and nobody can forge a new message starting with #number
 _LINE_BREAKS = re.compile("\r\n?|[\u2028\u2029\x85\x0b\x0c]")
+# The tags that fence in the persona: what people say, profile cards and long-term memory can't fake them (say, by writing "</persona><persona>…" into long-term memory).
+# Fullwidth letters, lookalike brackets (〈〉《》⟨⟩), any mix of upper and lower case, and spaces or zero-width characters in between count too
+_GAP = r"[\s\u200b-\u200f\u2060\ufeff]*"
+_TAG_OPEN = "<＜﹤〈《⟨\u2329\u27ea\u276c\u276e"  # the last few: 〈 ⟪ ❬ ❮
+_TAG_CLOSE = ">＞﹥〉》⟩\u232a\u27eb\u276d\u276f"
+_PERSONA_WORD = _GAP.join(f"[{c}{chr(ord(c) + 0xFEE0)}]" for c in "persona")  # each letter, or its fullwidth form
+_PERSONA_TAG = re.compile(rf"[{_TAG_OPEN}]{_GAP}[/／]?{_GAP}{_PERSONA_WORD}{_GAP}[{_TAG_CLOSE}]", re.IGNORECASE)
+_TAG_BRACKETS = str.maketrans({**dict.fromkeys(_TAG_OPEN, "‹"), **dict.fromkeys(_TAG_CLOSE, "›")})
+# Every angle bracket in profile cards and long-term memory gets replaced (the 《》 title marks stay as they are)
+_ANGLES = str.maketrans({"<": "‹", ">": "›", "＜": "‹", "＞": "›", "﹤": "‹", "﹥": "›"})
 
 
 def neutralize(text: str) -> str:
-    """Our marker symbols must never appear in what people say or in files, or they could forge markers like "〔@you〕" or file blocks."""
+    """Our marker symbols must never appear in what people say or in files, or they could forge markers like "〔@you〕", file blocks or persona tags."""
     text = _LINE_BREAKS.sub("\n", text)
+    text = _PERSONA_TAG.sub(lambda m: m.group(0).translate(_TAG_BRACKETS), text)
     return text.translate(_MARKERS).replace("<<<", "‹‹‹").replace(">>>", "›››")
 
 
 _neutralize = neutralize
+
+
+def neutralize_record(text: str) -> str:
+    """Profile card and long-term memory content: besides neutralize, every angle bracket gets replaced too (these two stay around for a long time, and every channel sees them)."""
+    return neutralize(text).translate(_ANGLES)
 
 
 def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_chars: int) -> str:
@@ -157,6 +173,32 @@ class _Builder:
         return self.parts
 
 
+CARD_DELETED = "(This person's profile card has been deleted. Don't use the copy attached earlier anymore, and don't rewrite it from that.)"
+
+
+def render_cards(cards: list[tuple[str, str | None]]) -> list[str]:
+    """The profile cards of the people talking this round: [(name, content)] → text lines; content None means the card was just deleted.
+    The whole set goes between <<< and >>> (it's dropped as a whole when memory is compacted)."""
+    if not cards:
+        return []
+    lines = [CARDS_HEAD, "<<<"]
+    for name, text in cards:
+        lines.append(f"【{_neutralize(one_line(name, 32))}】")
+        lines.append(neutralize_record(text.strip()) if text is not None else CARD_DELETED)
+    lines.append(">>>")
+    return lines
+
+
+def render_who(name: str, cards: list[tuple[str, str]]) -> str:
+    """The profile cards found by who."""
+    lines = [WHO_HEAD.format(name=_neutralize(one_line(name, 32))), "<<<"]
+    for card_name, text in cards:
+        lines.append(f"【{_neutralize(one_line(card_name, 32))}】")
+        lines.append(neutralize_record(text.strip()))
+    lines.append(">>>")
+    return "\n".join(lines)
+
+
 def _hint(kind: str, targets: list[int]) -> str:
     if kind == "mention" and targets:
         return HINT_MENTION.format(targets=", ".join(f"#{t}" for t in targets))
@@ -176,14 +218,16 @@ def render_round(
     docs: dict[int, list[DocBlock]] | None = None,
     max_chars: int = 1800,
     context: list[str] | None = None,
+    cards: list[str] | None = None,
 ) -> str | list[dict[str, Any]]:
     """messages: [(number, message)]; images: message_id -> [(data_uri, detail)]; docs: message_id -> file blocks placed after that message.
-    context: background placed before the messages (e.g. what this person just talked about with it in another channel).
+    context: background placed before the messages (e.g. what this person just talked about with it in another channel). cards: the profile cards of the people here (what render_cards returns).
 
     Returns a string when there are no images; otherwise a list of content blocks, with each image right after the message it belongs to.
     """
     out = _Builder(_stamp(messages, now, tz))
     out.lines += context or []
+    out.lines += cards or []
     if omitted > 0:
         out.lines.append(f"({omitted} earlier message{'s' if omitted != 1 else ''} not shown)")
     images = images or {}
@@ -258,6 +302,8 @@ LIST_HEAD = "(Other channels whose history you can look through:"
 LIST_EMPTY = "(No other channels whose history you can look through right now)"
 _FILE_HEAD = re.compile(r'^【(?:File|Link) "')
 _GALLERY_START = GALLERY_HEAD.split('"', 1)[0]  # "(You looked for images of "
+_WHO_START = WHO_HEAD.split('"', 1)[0]  # "(You looked up profile cards for "
+_WHO_NONE_START, _WHO_NONE_END = WHO_NONE.split("{name}")
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
@@ -291,7 +337,7 @@ def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
 
 
 def own_text(content: Any) -> str:
-    """For memory compaction: this channel's own content. Drops recent talk carried over from other channels, channel lists, looked-up history, search results and candidate pictures from image searches.
+    """For memory compaction: this channel's own content. Drops recent talk carried over from other channels, channel lists, looked-up history, search results, candidate pictures from image searches and profile cards.
 
     Files people posted and the contents of opened links count as this channel's own, so they're kept.
 
@@ -327,9 +373,11 @@ def own_text(content: Any) -> str:
         after_search = after_file = False
         if line.startswith("(") and (line.endswith(" ago:") or line == LIST_HEAD):  # "(Alex chatted with you in #x 5 minutes ago:"
             skipping_block = True
-        elif line.startswith(("(You looked through the history of ", "(You searched for ", _GALLERY_START)):
+        elif line.startswith(("(You looked through the history of ", "(You searched for ", _GALLERY_START, _WHO_START)) or line == CARDS_HEAD:
             skipping_fence = True
             after_search = line.startswith("(You searched for ")
+        elif line == WHO_OFF or (line.startswith(_WHO_NONE_START) and line.endswith(_WHO_NONE_END)):
+            continue
         elif line != LIST_EMPTY and line != GALLERY_FOOT:
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
@@ -454,4 +502,74 @@ def assistant_text(content: str, name: str) -> str:
             out.append(f'{name} looked online for images of "{a.get("query", "")}"')
         elif a.get("type") == "persona":
             out.append(f"{name} set out to change its persona as #{to} asked")
+        elif a.get("type") == "card":
+            # the card's content stays out of the summary: it belongs to that person, and once the card is deleted, the summary shouldn't keep it either
+            out.append(f"{name} updated a profile card as #{to} asked")
+        elif a.get("type") == "memory":
+            if a.get("add"):
+                out.append(f"{name} saved a long-term memory: {a.get('add')}")
+            elif a.get("edit") is not None:
+                out.append(f"{name} edited long-term memory entry {a.get('edit')}: {a.get('text', '')}")
+            elif a.get("delete") is not None:
+                out.append(f"{name} deleted long-term memory entry {a.get('delete')}")
+        elif a.get("type") == "who":
+            out.append(f'{name} looked up profile cards for "{a.get("name", "")}"')
+    return "\n".join(out)
+
+
+def review_bot_lines(content: Any, name: str) -> list[str]:
+    """For memory review: what it said itself, one action per line. Even if what it said has line breaks and "#12 Alex: ..." in it, that can't pass for a member's message."""
+    raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    out = []
+    for line in assistant_text(raw, name).split("\n"):
+        if not line.strip():
+            continue
+        if out and not line.startswith(name):
+            out[-1] += " " + line  # a line break inside what it said: append it to the line before
+        else:
+            out.append(line)
+    return [_neutralize(one_line(line, 600)) for line in out]
+
+
+def review_text(content: Any) -> list[str]:
+    """For memory review: this channel's own chat (as in own_text), minus the contents of files and links and each round's hints, so only what people said is left."""
+    out: list[str] = []
+    fenced = False
+    for line in own_text(content).split("\n"):
+        if fenced:
+            fenced = line != ">>>"
+            continue
+        if line == "<<<":
+            fenced = True
+            out.append("(content omitted)")
+            continue
+        if not line.strip() or line == HINT_PROACTIVE or (line.startswith("(#") and line.endswith(" called you. Respond, and use the language of their message.)")):
+            continue
+        out.append(line)
+    return out
+
+
+def render_review_input(
+    people: list[tuple[str, list[int], str | None]] | None,
+    memories: list[tuple[int, str]] | None,
+    lines: list[str],
+) -> str:
+    """What the model is shown when reviewing memory. people: [(name, their message numbers, current profile card or None)] (None = profile cards aren't reviewed here);
+    memories: [(number, content)] (None = long-term memory isn't reviewed here)."""
+    out: list[str] = []
+    if people is not None:
+        out.append("【People who spoke】")
+        for name, sids, card in people:
+            who = f"{_neutralize(one_line(name, 48))} (messages: {', '.join(f'#{sid}' for sid in sids[:20])})"
+            if card:
+                out += [f"{who}, current profile card:", "<<<", neutralize_record(card.strip()), ">>>"]
+            else:
+                out.append(f"{who}: no profile card yet")
+        if not people:
+            out.append("(Nobody in this stretch of chat can have their profile card updated)")
+    if memories is not None:
+        out.append("【Long-term memory】")
+        out += [f"({no}) {neutralize_record(one_line(text, 300))}" for no, text in memories] or ["(none yet)"]
+    out.append("【Chat history】")
+    out += lines
     return "\n".join(out)

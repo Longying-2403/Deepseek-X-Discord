@@ -42,13 +42,14 @@ class FakeLLM:
         self.prompt_tokens = 1000
         self.hook = None  # optional: async def hook(call), to simulate things that happen "while the call is in progress"
 
-    async def complete(self, messages, *, thinking="off", json_mode=False, max_tokens=None, user_id=None):
+    async def complete(self, messages, *, thinking="off", json_mode=False, max_tokens=None, user_id=None, timeout_scale=1.0):
         call = {
             "messages": copy.deepcopy(messages),
             "thinking": thinking,
             "json_mode": json_mode,
             "max_tokens": max_tokens,
             "user_id": user_id,
+            "timeout_scale": timeout_scale,
         }
         self.calls.append(call)
         if self.hook is not None:
@@ -165,8 +166,13 @@ def make_engine(
     link_reader=None,
     pictures=None,
     memes=None,
+    cards=None,
+    memory=None,
+    engine_cfg: dict[str, Any] | None = None,
 ):
     cfg = AppConfig()
+    for key, value in (engine_cfg or {}).items():
+        setattr(cfg.engine, key, value)
     if defaults:
         cfg.defaults.update(defaults)
     store = Store(":memory:")
@@ -199,6 +205,8 @@ def make_engine(
         link_reader=link_reader,
         pictures=pictures,
         memes=memes,
+        cards=cards,
+        memory=memory,
     )
     engine.test_sleeps = sleeps  # type: ignore[attr-defined]
     return engine, llm, transport, clock

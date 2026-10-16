@@ -152,10 +152,18 @@ class ConfigAndSettings(unittest.TestCase):
         self.assertEqual(cfg.deepseek.model, "deepseek-flash")
         self.assertEqual(set(cfg.defaults), set(SPECS))
 
-    def test_unknown_key_rejected(self):
+    def test_unknown_key_is_skipped_with_a_note(self):
+        """A config file newer than the code (or with a typo) shouldn't stop the bot from starting: skip and warn. A known setting with a bad value is still an error."""
+        from dsbot.config import unknown_note
+
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "c.toml"
-            path.write_text("[defaults]\nfoo = 1\n", encoding="utf-8")
+            path.write_text("[defaults]\nfoo = 1\n[bot]\nmeme_dirr = 'x'\n[extra]\na = 1\n", encoding="utf-8")
+            cfg = load_config(path)
+            self.assertEqual(cfg.unknown, ["[bot] meme_dirr", "[defaults] foo", "[extra]"])
+            self.assertIn("meme_dirr", unknown_note(cfg))
+            self.assertIsNone(unknown_note(load_config(ROOT / "config.toml")))
+            path.write_text("[defaults]\nrefill_turns = 0\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_config(path)
 

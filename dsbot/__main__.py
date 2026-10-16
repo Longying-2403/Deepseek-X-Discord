@@ -8,7 +8,8 @@ import logging
 import os
 import sys
 
-from .config import Secrets, load_config, load_secrets
+from . import __version__
+from .config import Secrets, load_config, load_secrets, unknown_note
 
 
 def _load_dotenv() -> None:
@@ -64,7 +65,11 @@ def check(config_path: str) -> int:
     from .store import Store
 
     cfg = load_config(config_path)
+    print(f"dsbot {__version__}")
     print(f"✓ Read config file {config_path}, model: {cfg.deepseek.model}")
+    note = unknown_note(cfg)
+    if note:
+        print(f"! {note}")
     try:
         secrets = load_secrets()
         print(f"✓ .env is filled in (OWNER_ID={secrets.owner_id}, CONTROL_GUILD_ID={secrets.control_guild_id or 'not set'})")
@@ -91,6 +96,11 @@ def check(config_path: str) -> int:
         else f"· Shared meme library {cfg.bot.meme_dir}/ is still empty (optional)"
     )
 
+    from .memory import CardStore, MemoryStore
+
+    for label, path in (("Chat history", cfg.bot.database), ("Profile cards", cfg.bot.cards_database), ("Long-term memory", cfg.bot.memory_database)):
+        state = "already exists" if os.path.exists(path) else "created on first start"
+        print(f"· {label}: {path} ({state})")
     store = Store(":memory:")
     bot = DSBot(
         cfg,
@@ -99,6 +109,8 @@ def check(config_path: str) -> int:
         Settings(cfg.defaults, store),
         Ledger(store, cfg.bot.timezone),
         DeepSeekClient(api_key="x", base_url=cfg.deepseek.base_url, model=cfg.deepseek.model),
+        cards=CardStore(":memory:"),
+        memory=MemoryStore(":memory:"),
     )
     groups = [(None, bot.tree.get_commands())]
     if secrets.control_guild_id:
@@ -249,6 +261,7 @@ def test_image(config_path: str, query: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek Buddy Discord bot")
+    parser.add_argument("--version", action="version", version=f"dsbot {__version__}")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="only run the offline self-check; don't start the bot")
     parser.add_argument("--test-search", metavar="KEYWORDS", help="run one real search to confirm web search works (costs a tiny bit)")
@@ -272,16 +285,23 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("discord").setLevel(logging.WARNING)
+    logging.getLogger("dsbot").info("dsbot %s starting up", __version__)  # after swapping in new code, the log shows whether the new version took effect
+    note = unknown_note(cfg)
+    if note:
+        logging.getLogger("dsbot").warning(note)
     secrets = load_secrets()
 
     from .discord_app import DSBot
     from .ledger import Ledger
     from .llm import DeepSeekClient
+    from .memory import CardStore, MemoryStore
     from .settings import Settings
     from .store import Store
 
     os.umask(0o077)  # the database holds chat history: newly created files are readable and writable by us only
     store = Store(cfg.bot.database)
+    cards = CardStore(cfg.bot.cards_database)  # profile cards and long-term memory get a file each, so they're easy to back up or move
+    memory = MemoryStore(cfg.bot.memory_database)
     bot = DSBot(
         cfg,
         secrets,
@@ -295,6 +315,8 @@ def main() -> int:
             timeout=cfg.deepseek.timeout_seconds,
             max_retries=cfg.deepseek.max_retries,
         ),
+        cards=cards,
+        memory=memory,
     )
     bot.run(secrets.discord_token, log_handler=None)
     return 0

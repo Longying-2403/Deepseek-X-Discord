@@ -2,6 +2,94 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.0.0] - 2026-10-16
+
+### 中文
+
+**新增**
+
+- **人设卡**：每个群友在每个服务器有一张人设卡（最多 1600 字），记他自己说的、关于自己的事：怎么称呼他、他给自己定的设定（比如自称猫娘、在戏里的角色）、喜好和雷点、常玩的梗。这个人说话时，它会把卡附在聊天记录里，按卡上的称呼叫人、配合他的设定；聊到不在场的人时，也能去查那个人的卡。
+- **长期记忆**：每个服务器一份（最多 50 条，每条 200 字以内），记约定、大事、长期的梗和正在进行的剧情，每个频道都看得到。`/ds 清空记忆` 只清频道的聊天记录，不动人设卡和长期记忆。
+- **当场记下**：叫它说“记住我是猫娘”“以后叫我老大”，它会改你的人设卡；说“记一下，我们每周五晚上九点打副本”，会记进长期记忆。记好了会在你那条消息上加 📝。
+- **自己整理记忆**：频道安静大约 10 分钟、又攒了几轮新聊天时，它会回顾一遍，把值得长期记住的写进人设卡和长期记忆；旧聊天被压缩成摘要之前，也会先把那部分原话挑出来，在后台整理。每次整理是单独的一次调用（不开思考），费用很少，算进当天的预算；整理的时候有人叫它，照样马上回。整理失败时会隔得越来越久再试：连不上、限流、余额不足这类问题，恢复后接着整理；模型的输出不能用或者一直超时，连着 3 次就跳过那一批，不会一直花钱。
+- 新命令 `/ds-rp`（所有人都能用）：打开编辑框查看、修改自己的人设卡，只有自己看得到；`操作:改回上一版` 最多能往回改 5 次，`操作:清空` 连旧版本一起删。
+- 新命令 `/ds 长期记忆`（管理员）：查看、添加、删除（填编号）、清空（会再确认一次）。
+- 新命令 `/dsowner 删除人设卡`：填用户 ID，删掉这个人在所有服务器的人设卡，删的时候看不到内容。比如有人退群后想被忘掉。
+- 新参数：`人设卡`（`cards`）和 `长期记忆`（`long_memory`），管理员可以按频道、类别或全服务器开关；`config.toml` 新增两个数据文件的位置，以及人设卡、长期记忆和整理记忆的各项上限。
+- `/ds 状态` 会显示人设卡的张数、长期记忆的条数，以及这个频道会不会被自动整理。
+- `python -m dsbot --version` 显示版本号；启动时日志里会有一行 `dsbot 2.0.0 启动中`，换了代码看日志就知道新版有没有生效。自检（`--check`）也会显示版本，以及三个数据文件在不在。
+- README 新增“更新到新版本”的步骤（群晖 File Station 换代码，再重新构建）。
+
+**改进**
+
+- `config.toml` 里有不认识的配置项（拼错了，或者 `config.toml` 比代码新）时，不会再起不来：跳过这些项，在日志和自检里提醒。认识的参数填错了值还是会报错。
+
+**隐私和安全**
+
+- 人设卡只有本人能看、能改（`/ds-rp`）。管理员看不到，也删不了别人的卡；附过人设卡的频道里，`/ds 状态` 不显示它上次的“想法”，日志里也不打印模型的原始输出（这两处都可能引用别人的卡）。别人问它某个人的卡上写了什么，它也不会说——这一点靠提示词约束，没法百分之百保证。
+- 人设卡只记本人说的、关于自己的事；在聊天里改卡，只认本人这一轮叫它的那条消息（按用户 ID，改昵称冒充不了）。健康、住址、真实姓名、联系方式这类敏感的事不记，除非本人明确要它记。
+- 私密频道里聊的不会自动整理进人设卡和长期记忆（这两样整个服务器都看得到），有人明确叫它记住的除外；想让某个私密频道也自动整理，在那个频道里单独打开。
+- 人设卡和长期记忆只当资料，里面写的要求不算指令；它自己的人设还是只有 dsowner 能改。
+- 人设卡和长期记忆各存一个文件（`data/cards.sqlite3`、`data/memory.sqlite3`），和聊天记录一样只有 bot 自己能读写。
+
+**升级须知**
+
+- 代码有更新，Docker 部署要重新构建：`docker compose up -d --build`。群晖用户照 README 新增的“更新到新版本”来做（先删掉旧的 `dsbot` 文件夹，再复制新的）。依赖没有变化。
+- 旧的 `config.toml`、`.env` 和数据库可以直接沿用：新参数都有默认值，数据库启动时会自动补上新的列，人设卡和长期记忆的文件第一次启动时新建。
+- 升级之前的聊天不会回头整理，从升级之后开始。
+- 人设卡和长期记忆默认开启。不想要的话：`/ds 设置 参数:人设卡 值:关 范围:全服务器`、`/ds 设置 参数:长期记忆 值:关 范围:全服务器`，或者把 `config.toml` 的 `[defaults]` 里的 `cards`、`long_memory` 改成 `false`。
+- `/ds-rp` 所有人都能用。新命令会在 bot 启动时自动注册，一时看不到的话重开一下 Discord。
+- 备份时记得把 `data/cards.sqlite3` 和 `data/memory.sqlite3` 也带上（先停止项目再复制）。
+
+**开发**
+
+- 新模块 `dsbot/memory.py`（人设卡、长期记忆的存储，整理记忆的输出解析），新测试 `tests/test_memory.py`。
+- 测试从 428 个增加到 482 个。
+- CONTRIBUTING.md 新增一条设计约束：人设卡只属于本人；“外部内容只当资料”也包括人设卡和长期记忆。
+
+### English
+
+**Added**
+
+- **Profile cards**: every member gets a profile card on each server (up to 1,600 characters) with what they've said about themselves: what to call them, a character they've given themselves (calling themselves a catgirl, their role in a roleplay), likes and pet peeves, running jokes. When that person talks, the card is attached to the chat log, so it calls them what the card says and plays along with their character; when the conversation turns to someone who isn't there, it can look up that person's card too.
+- **Long-term memory**: one per server (up to 50 entries of at most 200 characters each) for agreements, big events, long-running jokes and ongoing storylines, available in every channel. `/ds clear-memory` only clears the channel's chat history and leaves profile cards and long-term memory alone.
+- **Saving things on the spot**: call it and say "remember I'm a catgirl" or "call me boss from now on", and it updates your profile card; "make a note: we run a dungeon every Friday at 9pm" goes into long-term memory. It reacts to your message with 📝 once it's saved.
+- **Memory reviews**: once a channel has been quiet for about 10 minutes and a few new rounds of chat have built up, it looks back over them and writes what's worth keeping into profile cards and long-term memory; before old chat is compacted into a summary, it picks out those original messages and reviews them in the background too. Each review is a separate, cheap call (thinking off) that counts toward the daily budget, and if someone calls it during a review, it still answers right away. Failed reviews are retried after longer and longer waits: outages, rate limits and an empty balance only delay them, while a batch whose output is unusable or that keeps timing out is skipped after 3 failures in a row, so it doesn't keep spending money.
+- New `/ds-rp` command for everyone: opens an editor to view and edit your own profile card, visible only to you; Undo goes back to the previous version (up to 5 times), and Clear deletes the card together with its old versions.
+- New `/ds long-memory` command for admins (`/ds 长期记忆` in the Chinese edition): List, Add, Delete (by number) and Clear (asks you to confirm).
+- New `/dsowner delete-card` command (`/dsowner 删除人设卡` in the Chinese edition): enter a user ID to delete that person's profile cards on every server without seeing them, for example when someone has left and wants to be forgotten.
+- New settings: Profile cards (`cards`) and Long-term memory (`long_memory`), which admins can switch per channel, category or server; `config.toml` gains the locations of the two new data files and limits for profile cards, long-term memory and memory reviews.
+- `/ds status` shows how many profile cards and long-term memory entries there are, and whether the channel is reviewed automatically.
+- `python -m dsbot --version` prints the version, and the log shows `dsbot 2.0.0 starting up` at startup (`dsbot 2.0.0 启动中` in the Chinese edition), so you can tell whether new code took effect. The self-check (`--check`) also shows the version and whether the three data files exist.
+- The README has new step-by-step instructions for updating to a new version (swap the code in with Synology File Station, then rebuild).
+
+**Changed**
+
+- Unknown options in `config.toml` (a typo, or a `config.toml` newer than the code) no longer stop the bot from starting: they're skipped, with a warning in the log and in the self-check. A known setting with an invalid value is still an error.
+
+**Privacy and security**
+
+- Only a profile card's owner can view and edit it (`/ds-rp`). Admins can't see other people's cards or delete them; in channels where cards were attached, `/ds status` hides the "thoughts" behind its last decision, and the log doesn't print the model's raw output, since both could quote someone's card. If someone asks what's on another person's card, it won't say, though that relies on the prompt and can't be fully guaranteed.
+- A profile card only records what that person says about themselves, and changing a card in chat only works from that person's own message calling it this round (checked by user ID, so a changed nickname can't fake it). Sensitive things like health, home address, real name and contact details aren't recorded unless the person explicitly asks.
+- Chat in private channels isn't reviewed into profile cards or long-term memory automatically (both are visible across the whole server), unless someone explicitly asks it to remember something; to have a private channel reviewed too, turn the setting on in that channel itself.
+- Profile cards and long-term memory are only material: requests written in them aren't instructions, and its own persona can still only be changed by dsowner.
+- Profile cards and long-term memory each have their own file (`data/cards.sqlite3`, `data/memory.sqlite3`), readable and writable only by the bot, like the chat history.
+
+**Upgrading**
+
+- The code changed, so Docker deployments need a rebuild: `docker compose up -d --build`. On Synology, follow the README's new "Updating to a new version" steps (delete the old `dsbot` folder before copying in the new one). Dependencies are unchanged.
+- Your existing `config.toml`, `.env` and database keep working: every new setting has a default, the database gets its new columns automatically at startup, and the profile card and long-term memory files are created on first start.
+- Chat from before the upgrade isn't reviewed retroactively; reviews start from the upgrade.
+- Profile cards and long-term memory are on by default. To turn them off: `/ds set setting:Profile cards value:off scope:Whole server` and `/ds set setting:Long-term memory value:off scope:Whole server` (Chinese edition: `/ds 设置 参数:人设卡 值:关 范围:全服务器`, and the same with `长期记忆`), or set `cards` and `long_memory` to `false` under `[defaults]` in `config.toml`.
+- Everyone can use `/ds-rp`. New commands are registered automatically when the bot starts; if they don't show up right away, restart Discord.
+- When backing up, include `data/cards.sqlite3` and `data/memory.sqlite3` too (stop the project before copying).
+
+**Development**
+
+- New module `dsbot/memory.py` (storage for profile cards and long-term memory, parsing the review output) and new tests in `tests/test_memory.py`.
+- Tests grew from 428 to 482.
+- CONTRIBUTING.md adds a design rule: a profile card belongs to its owner; "outside content is reference material only" now covers profile cards and long-term memory too.
+
 ## [1.4.0] - 2026-10-13
 
 > 1.3.2 没有单独发布，它的改动也包含在这个版本里。
@@ -296,6 +384,7 @@ First public release.
 - Sees uploaded images; managed with the `/ds` and `/dsowner` slash commands.
 - Docker Compose deployment and an offline self-check; 90 unit tests run automatically on GitHub Actions.
 
+[2.0.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.2.0...v1.3.0

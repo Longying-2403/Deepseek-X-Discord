@@ -1,7 +1,8 @@
 """Slash commands.
 
-/ds …       Server admins (need the "Manage Server" permission by default): areas, how much it talks, presets, persona, meme library, status.
-/dsowner …  Registered only in the CONTROL_GUILD_ID server, and only accepts OWNER_ID: budget, thinking level, web search, etc.
+/ds …       Server admins (need the "Manage Server" permission by default): areas, how much it talks, presets, persona, meme library, long-term memory, status.
+/ds-rp      Everyone: view and edit their own profile card on this server (only they can see it; admins can't see other people's cards).
+/dsowner …  Registered only in the CONTROL_GUILD_ID server, and only accepts OWNER_ID: budget, thinking level, web search, deleting profile cards, etc.
             Like /ds, by default only people with "Manage Server" can see it (if the bot is in a friend's server where you're a moderator, you'll see it too).
 """
 
@@ -46,6 +47,17 @@ MEME_ACTIONS = [
     Choice(name="Remove", value="remove"),
     Choice(name="List", value="list"),
 ]
+CARD_ACTIONS = [
+    Choice(name="Edit", value="edit"),
+    Choice(name="Undo", value="undo"),
+    Choice(name="Clear", value="clear"),
+]
+MEMORY_ACTIONS = [
+    Choice(name="List", value="list"),
+    Choice(name="Add", value="add"),
+    Choice(name="Delete", value="delete"),
+    Choice(name="Clear", value="clear"),
+]
 LINK_MODES = {
     "all": "Reading links: on (posts on X via FxTwitter, web pages via Tavily)",
     "x": "Reading links: posts on X only (TAVILY_API_KEY isn't set, so other sites only get Discord's preview)",
@@ -65,6 +77,33 @@ async def _reply(interaction: discord.Interaction, text: str) -> None:
         await interaction.followup.send(text, ephemeral=True)
     else:
         await interaction.response.send_message(text, ephemeral=True)
+
+
+def split_message(text: str, limit: int = 1900) -> list[str]:
+    """Split long text into several messages by line (each at most limit characters)."""
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + 1 + len(line) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        parts.append(current)
+    return parts or [""]
+
+
+async def _reply_long(interaction: discord.Interaction, text: str) -> None:
+    """A reply that may be longer than one message: send it as several (all visible only to the user)."""
+    for part in split_message(text)[:10]:
+        await _reply(interaction, part)
 
 
 def _parent_id(interaction: discord.Interaction) -> int | None:
@@ -181,6 +220,81 @@ class PersonaModal(discord.ui.Modal):
         await _reply(interaction, f"Couldn't save it: {error}")
 
 
+class CardModal(discord.ui.Modal):
+    """/ds-rp: edit your own profile card. The card belongs to whoever fills in the form, so nobody can edit someone else's."""
+
+    def __init__(self, bot: "DSBot", guild_id: int, current: str):
+        super().__init__(title="My profile card", timeout=900)
+        self.bot = bot
+        self.guild_id = guild_id
+        limit = max(1, min(4000, bot.cfg.engine.card_max_chars))
+        self.text = discord.ui.TextInput(
+            style=discord.TextStyle.long,
+            default=current[:limit] or None,
+            required=False,
+            max_length=limit,
+            placeholder="What to call you, your character (e.g. a catgirl), likes, pet peeves… Empty = delete (undoable)",
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Profile card",
+                description="It remembers this and uses it when chatting with you. Only you can see or edit it.",
+                component=self.text,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        assert self.bot.cards is not None
+        value = self.text.value
+        name = getattr(interaction.user, "display_name", None) or interaction.user.name
+        changed = self.bot.cards.put(self.guild_id, interaction.user.id, name, value, via="command")
+        if not value.strip():
+            text = (
+                "Deleted your profile card on this server (to get it back, use `/ds-rp action:Undo`; to delete the old versions too, use `/ds-rp action:Clear`)."
+                if changed
+                else "You don't have a profile card on this server yet."
+            )
+        else:
+            text = "Profile card saved; it'll be used the next time you talk." if changed else "Your profile card didn't change."
+        if value.strip() and not self.bot.settings.view(*_ids(interaction)).cards:
+            text += "\n(Profile cards are turned off here, so it won't be used for now.)"
+        await _reply(interaction, text)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception("Saving the profile card failed", exc_info=error)
+        await _reply(interaction, f"Couldn't save it: {error}")
+
+
+class ConfirmClear(discord.ui.View):
+    """Confirm once more before clearing long-term memory."""
+
+    def __init__(self, bot: "DSBot", guild_id: int, user_id: int):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Yes, clear it", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.user_id:
+            await _reply(interaction, "Only the person who started this can confirm.")
+            return
+        assert self.bot.memory is not None
+        n = self.bot.memory.clear(self.guild_id)
+        self.stop()
+        await interaction.response.edit_message(content=f"Cleared this server's long-term memory ({_n(n, 'entry', 'entries')}).", view=None)
+
+
+def memory_list_text(bot: "DSBot", guild_id: int) -> str:
+    assert bot.memory is not None
+    entries = bot.memory.entries(guild_id)
+    lines = [f"**Long-term memory** ({len(entries)} / {bot.cfg.engine.memory_max_entries} entries)"]
+    lines += [f"({m.no}) {m.text}" for m in entries] or ["None yet. When someone in the chat asks it to remember something about the group, or it finds something worth keeping while reviewing the chat, it's saved here."]
+    if not bot.settings.get("long_memory", guild_id=guild_id):
+        lines.append("⚠️ Long-term memory is turned off on this server: turn it on with `/ds set setting:Long-term memory value:on scope:Whole server`")
+    return "\n".join(lines)
+
+
 def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     """This channel's memory sharing: whether it can see other channels, whether its own content is shared out, and which channels it's connected with now."""
     guild_id, channel_id, parent_id, category_id = _ids(interaction)
@@ -241,6 +355,16 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append(f"Sending pictures: on · meme library: {own + shared} ({own} from this server, {shared} shared) · {found}")
     else:
         lines.append(f"Sending pictures: off (from {view.source('images')})")
+    if st["cards_on"]:
+        lines.append(f"Profile cards: on · {_n(st['card_count'], 'card')} on this server (members manage their own with /ds-rp)")
+    else:
+        lines.append(f"Profile cards: off (from {view.source('cards')})")
+    if st["memory_on"]:
+        lines.append(f"Long-term memory: on · {st['memory_count']} / {st['memory_max']} entries (see them with /ds long-memory)")
+    else:
+        lines.append(f"Long-term memory: off (from {view.source('long_memory')})")
+    if (st["cards_on"] or st["memory_on"]) and not st["review_here"]:
+        lines.append("🔒 Private channel: what's said here isn't reviewed into profile cards or long-term memory automatically (unless someone explicitly asks it to remember)")
     if st["memes_on"] and st["media_blocked_for"] > 0:
         minutes = max(1, round(st["media_blocked_for"] / 60))
         lines.append(
@@ -424,6 +548,56 @@ def register_commands(bot: "DSBot") -> None:
             text += "\n⚠️ But sending pictures is turned off here, so it won't send it: `/ds set setting:Send pictures value:on`"
         await _reply(interaction, text)
 
+    @admin.command(name="long-memory", description="View, add or delete this server's long-term memory (agreements, big events, jokes, storylines)")
+    @app_commands.describe(
+        action="List / Add / Delete / Clear",
+        text="When adding: what to remember (one thing per entry)",
+        number="When deleting: the entry's number (the number in parentheses in the list)",
+    )
+    @app_commands.choices(action=MEMORY_ACTIONS)
+    async def memory_cmd(
+        interaction: discord.Interaction,
+        action: Choice[str],
+        text: Optional[str] = None,
+        number: Optional[int] = None,
+    ) -> None:
+        guild_id = interaction.guild_id
+        memory = bot.memory
+        if memory is None:
+            await _reply(interaction, "Long-term memory isn't enabled.")
+            return
+        ec = bot.cfg.engine
+        if action.value == "list":
+            await _reply_long(interaction, memory_list_text(bot, guild_id))
+        elif action.value == "add":
+            entry = " ".join((text or "").split())
+            if not entry:
+                await _reply(interaction, 'What should it remember? Put it in "text".')
+            elif len(entry) > ec.memory_entry_chars:
+                await _reply(interaction, f"That's too long ({len(entry)} characters); an entry can be at most {ec.memory_entry_chars}.")
+            elif memory.count(guild_id) >= ec.memory_max_entries:
+                await _reply(interaction, f"It's already full ({ec.memory_max_entries} entries), so delete a few first.")
+            else:
+                no = memory.add(guild_id, entry, via="command")
+                await _reply(interaction, f"Saved as entry {no}: {entry}")
+        elif action.value == "delete":
+            if number is None:
+                await _reply(interaction, 'Which one? Put its number in "number" (`/ds long-memory action:List` shows the numbers).')
+            elif memory.delete(guild_id, number):
+                await _reply(interaction, f"Deleted entry {number}.")
+            else:
+                await _reply(interaction, f"There's no entry {number}.")
+        else:
+            n = memory.count(guild_id)
+            if not n:
+                await _reply(interaction, "Long-term memory is already empty.")
+                return
+            await interaction.response.send_message(
+                f"Really clear this server's long-term memory ({_n(n, 'entry', 'entries')})? Once cleared, it can't be brought back.",
+                view=ConfirmClear(bot, guild_id, interaction.user.id),
+                ephemeral=True,
+            )
+
     @admin.command(name="area-list", description="See where on this server it responds")
     async def area_list_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, area_list_text(bot, interaction.guild))
@@ -521,6 +695,34 @@ def register_commands(bot: "DSBot") -> None:
 
     bot.tree.add_command(admin)
 
+    # anyone can use it (no default_permissions): people can only manage their own card
+    @bot.tree.command(name="ds-rp", description="View or edit your profile card on this server (only you can see it)")
+    @app_commands.guild_only()
+    @app_commands.describe(action="Edit (the default) / Undo / Clear")
+    @app_commands.choices(action=CARD_ACTIONS)
+    async def rp_cmd(interaction: discord.Interaction, action: Optional[Choice[str]] = None) -> None:
+        cards = bot.cards
+        if cards is None:
+            await _reply(interaction, "Profile cards aren't enabled.")
+            return
+        guild_id, user_id = interaction.guild_id, interaction.user.id
+        value = action.value if action is not None else "edit"
+        if value == "undo":
+            name = getattr(interaction.user, "display_name", None) or interaction.user.name
+            restored = cards.restore_previous(guild_id, user_id, name=name)
+            if restored is None:
+                await _reply(interaction, "There's no earlier version.")
+            else:
+                await _reply(interaction, f"Changed back to the previous version:\n>>> {restored}")
+        elif value == "clear":
+            if cards.delete(guild_id, user_id):
+                await _reply(interaction, "Deleted your profile card on this server (old versions included).")
+            else:
+                await _reply(interaction, "You don't have a profile card on this server yet.")
+        else:
+            card = cards.get(guild_id, user_id)
+            await interaction.response.send_modal(CardModal(bot, guild_id, card.text if card else ""))
+
     @bot.tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         log.error("Slash command error: %s", error, exc_info=error)
@@ -602,5 +804,27 @@ def register_commands(bot: "DSBot") -> None:
         if now < bot.engine.paused_until:
             lines.append("⚠️ DeepSeek calls are paused (insufficient balance or invalid key; see the logs)")
         await _reply(interaction, "\n".join(lines))
+
+    @owner.command(name="delete-card", description="Delete someone's profile cards on every server, by user ID (without seeing them)")
+    @app_commands.rename(user="user-id")
+    @app_commands.describe(user="Their user ID (with Developer Mode on, right-click their avatar → Copy User ID)")
+    async def owner_delete_card(interaction: discord.Interaction, user: str) -> None:
+        if not await is_owner(interaction):
+            return
+        if bot.cards is None:
+            await _reply(interaction, "Profile cards aren't enabled.")
+            return
+        if not user.strip().isdecimal():
+            await _reply(interaction, "A user ID should be a string of digits (with Developer Mode on, right-click their avatar → Copy User ID).")
+            return
+        cards_deleted, versions_deleted = bot.cards.delete_user(int(user.strip()))
+        log.info("The bot owner deleted the profile cards of user %s (%d cards, %d old versions)", user.strip(), cards_deleted, versions_deleted)
+        if cards_deleted:
+            text = f"Deleted this person's {_n(cards_deleted, 'profile card')} (old versions included)."
+        elif versions_deleted:
+            text = "This person has no profile card right now; the old versions that were kept have been deleted."
+        else:
+            text = "This person has no profile card."
+        await _reply(interaction, text + "\nMemory reviews won't write the card back from chat that happened before the deletion either.")
 
     bot.tree.add_command(owner, guild=discord.Object(id=bot.secrets.control_guild_id))
