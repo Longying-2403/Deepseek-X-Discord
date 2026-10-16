@@ -174,7 +174,7 @@ class XAIConfig:
     # 联网搜索走 xAI 的 Responses API（自带 web_search 工具）
     search_model: str = ""  # 留空 = 和 model 一样
     search_timeout_seconds: float = 90.0
-    search_max_uses: int = 2  # 一次搜索里最多让它搜几轮（每搜一次另收约 0.5 美分）
+    search_max_uses: int = 2  # 一次搜索里最多让它搜几轮（max_turns；每搜一次另收 0.5 美分，一轮里可能同时搜好几次）
     search_effort: str = "low"  # 搜索时的推理强度：low / medium / high；留空 = 用模型默认的
 
     @property

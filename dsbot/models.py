@@ -122,6 +122,7 @@ class IncomingMessage:
     trigger: bool = False  # 引擎设置：这条点名通过了限速，需要立刻回应
     awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
     from_owner: bool = False  # 引擎设置：发言的是 OWNER_ID（xai-owner）本人
+    webhook: bool = False  # webhook 发的（PluralKit 之类代真人发的消息也是）：别的 bot 刚接过话时，这种不算
 
     @property
     def addressed(self) -> bool:

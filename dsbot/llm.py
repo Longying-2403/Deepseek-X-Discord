@@ -29,10 +29,29 @@ EFFORTS = {"off": "none", "low": "low", "medium": "medium", "high": "high"}
 # 这些型号推理关不掉（不收 "none"）：off 只能退到最低的 low
 ALWAYS_REASONING = ("grok-4.5", "grok-4.6", "grok-4.7")
 
-# 余额用完、到了花费上限这类问题：等充值，不是请求本身的错（普通的限流不算，那个过一会儿就好）
-_BILLING = re.compile(r"credit|billing|spending|balance|licen[cs]e|payment", re.I)
-_BAD_KEY = re.compile(r"api[ _-]?key|unauthori[sz]ed|authenticat", re.I)
-_JSON_PARAM = re.compile(r"response_format|json_object|json mode", re.I)
+# 错误说明里的网址（比如 console.x.ai/team/…/billing）先去掉再认，免得网址里的字被当成原因
+_URL = re.compile(r"https?://\S+")
+# 内容审核没过（xAI 用 403，说明里还会带 "API key ID"）：只是这批消息的问题，丢掉这批就好，别暂停整个 bot
+_MODERATION = re.compile(r"violates? (our |the )?usage (guidelines|polic)|content (policy|moderation)|failed check|safety check", re.I)
+# 余额用完、到了花费上限：等充值，不是请求本身的错（普通的限流不算，那个过一会儿就好）
+_BILLING = re.compile(
+    r"\bcredits?\b|spending limit|spend(ing)? cap|insufficient (funds|balance|credits?)|payment required|out of (credits?|balance)", re.I
+)
+_BAD_KEY = re.compile(
+    r"(incorrect|invalid|wrong|revoked|expired|missing|no) api[ _-]?key"
+    r"|api[ _-]?key (is )?(invalid|incorrect|not valid|revoked|expired|missing)|unauthori[sz]ed|authentication (failed|error|required)",
+    re.I,
+)
+# 模型名不对，或者这个 key 没权限用这个模型：每次都会一样失败
+_NO_MODEL = re.compile(r"does ?n[o']t exist|not found|no access|not have access|permission|not allowed|not authori[sz]ed", re.I)
+# “这个参数不收”的说法；只有错误里点了参数的名字、又是这种说法，才去掉或换掉那个参数
+REJECTED = re.compile(
+    r"not supported|unsupported|does ?n[o']t support|not support|invalid|unknown|not allowed|not permitted|expected one of"
+    r"|unrecognized|not available|cannot be used",
+    re.I,
+)
+_EFFORT_PARAM = re.compile(r"reasoning[_ ]?effort", re.I)
+_JSON_PARAM = re.compile(r"response[_ ]?format|json[_ ]?object", re.I)
 
 
 class LLMError(Exception):
@@ -136,12 +155,24 @@ def error_message(data: Any) -> str:
     return str(data)[:300]
 
 
+def without_urls(message: str) -> str:
+    return _URL.sub(" ", message)
+
+
 def classify_status(status: int, message: str) -> int:
-    """把 xAI 的错误归到引擎认识的几类：401 = key 不对，402 = 没钱了（余额用完 / 到了花费上限）。"""
-    if status in (402, 403, 429) and _BILLING.search(message):
+    """把 xAI 的错误归到引擎认识的几类：
+    400 = 这批内容被拒（含内容审核）、丢掉这批；401 = key 不对；402 = 没钱了（余额用完 / 到了花费上限）；
+    404 = 模型名不对或者 key 没权限用它。这三种会让引擎全局暂停，所以要认准了才归过去；认不出的 403 照原样，
+    只让这个频道歇一会儿。"""
+    text = without_urls(message)
+    if status in (400, 403, 422) and _MODERATION.search(text):
+        return 400
+    if status in (402, 403, 429) and _BILLING.search(text):
         return 402
-    if status in (400, 403) and _BAD_KEY.search(message) and not _BILLING.search(message):
+    if status == 401 or (status in (400, 403) and _BAD_KEY.search(text)):
         return 401
+    if status == 404 or (status == 403 and "model" in text.lower() and _NO_MODEL.search(text)):
+        return 404
     return status
 
 
@@ -189,9 +220,11 @@ class XAIClient:
         return "low" if effort == "none" and self.no_none else effort
 
     def _adjust(self, payload: dict[str, Any], message: str) -> bool:
-        """请求因为某个参数被拒（400 / 422）：去掉或换掉它再试一次。被拒的请求不算钱。"""
-        text = message.lower()
-        if "reasoning" in text and "reasoning_effort" in payload:
+        """请求因为某个参数被拒（400 / 422，错误里点了参数的名字、说不收）：去掉或换掉它再试一次。被拒的请求不算钱。"""
+        text = without_urls(message)
+        if not REJECTED.search(text) or _MODERATION.search(text):
+            return False
+        if _EFFORT_PARAM.search(text) and "reasoning_effort" in payload:
             if payload["reasoning_effort"] == "none" and not self.no_none:
                 self.no_none = True
                 payload["reasoning_effort"] = "low"

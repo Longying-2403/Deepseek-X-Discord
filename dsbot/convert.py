@@ -265,6 +265,7 @@ def convert_message(
         author_name=clean_text(message.author.display_name),
         text=text,
         is_bot=bool(message.author.bot),
+        webhook=getattr(message, "webhook_id", None) is not None,
         reply_to_id=reply_to_id,
         reply_to_bot=reply_to_bot,
         mentions_bot=mentions_bot,

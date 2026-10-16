@@ -10,5 +10,11 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro   # 改配置不用重新构建，重启即可
       - ./data:/app/data                    # 数据库：对话记录、设置、花费（自己的 data，别和 DeepSeek 版共用）
-      # 想和 DeepSeek 版共用通用表情包库：去掉下一行开头的 #，路径改成 DeepSeek 版的表情包文件夹（只读挂进来）
-      # - ../ds-discord-bot/data/表情包:/app/data/表情包:ro
+      # 想和 DeepSeek 版共用通用表情包库：去掉下面 6 行开头的 #，source 改成 DeepSeek 版表情包文件夹的实际路径（只读挂进来）。
+      # 路径写错时会直接报错起不来，不会悄悄建一个空文件夹
+      # - type: bind
+      #   source: ../ds-discord-bot/data/表情包
+      #   target: /app/data/表情包
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false

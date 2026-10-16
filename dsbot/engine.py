@@ -679,13 +679,27 @@ class Engine:
             return False
         if self._over_budget(st, view, now)[0]:
             return False
-        if self.ec.yield_to_bots and st.pending and st.pending[-1].is_bot:
-            # 最新的一条是别的 bot 说的（比如同一个频道里的 DeepSeek 版刚接过话）：先不插嘴，等有人再说话。
-            # 不然两个 bot 会抢着回同一件事；也省一次调用
-            return False
+        start = st.first_human_at
+        if self.ec.yield_to_bots:
+            last_bot = self._last_bot_index(st)
+            if last_bot == len(st.pending) - 1:
+                # 最新的一条是别的 bot 说的（比如同一个频道里的 DeepSeek 版刚接过话）：先不插嘴，等有人再说话。
+                # 不然两个 bot 会抢着回同一件事；也省一次调用
+                return False
+            if last_bot >= 0:
+                # 那个 bot 之后又有人说话了：从那之后的第一条算起，重新等冷场、等满时间，别一有人说话就马上插进来
+                start = st.pending[last_bot + 1].received_at
         quiet = now - st.last_activity_at >= view.quiet_seconds
-        waited = now - st.first_human_at >= view.max_wait_seconds
+        waited = now - start >= view.max_wait_seconds
         return quiet or waited
+
+    @staticmethod
+    def _last_bot_index(st: ChannelState) -> int:
+        """缓冲区里最后一条别的 bot 发的消息在哪；没有就是 -1。webhook 不算：PluralKit 之类代发的其实是真人在说话。"""
+        for i in range(len(st.pending) - 1, -1, -1):
+            if st.pending[i].is_bot and not st.pending[i].webhook:
+                return i
+        return -1
 
     async def _run(self, st: ChannelState) -> None:
         async with st.lock:
@@ -2499,17 +2513,21 @@ class Engine:
         generation: int,
         max_tokens: int | None = None,
     ) -> tuple[Completion, float, int]:
-        """调用模型；被点名时显示“正在输入”，空回复（或推理把 token 用光）时关掉思考重试一次。"""
+        """调用模型；被点名时显示“正在输入”。空回复时关掉推理重试一次；回复太长被截断时，放宽输出上限再试一次
+        （xAI 的输出上限只管看得见的部分，推理用不掉它，所以截断了就是真的写太长了，关掉推理没用）。"""
         if kind != "mention":
             return await self._call(st, kind, messages, thinking, max_tokens)
         async with self.transport.typing(st.channel_id):
             completion, cost, row = await self._call(st, kind, messages, thinking, max_tokens)
-            empty = not completion.content.strip() or (
-                completion.finish_reason == "length" and not parse_actions(completion.content)[1]
-            )
-            if empty and st.generation == generation:  # 记忆刚被清空就别再花一次钱了
+            empty = not completion.content.strip()
+            cut = not empty and completion.finish_reason == "length" and not parse_actions(completion.content)[1]
+            cap = max_tokens or (self.ec.max_output_tokens if thinking == "off" else self.ec.max_thinking_tokens)
+            if (empty or (cut and cap < MAX_OUTPUT_CAP)) and st.generation == generation:  # 记忆刚被清空就别再花一次钱了
                 self.store.set_outcome(row, "empty")
-                completion, cost, row = await self._call(st, kind, messages, "off", max_tokens)
+                if empty:
+                    completion, cost, row = await self._call(st, kind, messages, "off", max_tokens)
+                else:
+                    completion, cost, row = await self._call(st, kind, messages, thinking, MAX_OUTPUT_CAP)
         return completion, cost, row
 
     async def _call(
@@ -2561,10 +2579,10 @@ class Engine:
         elif exc.status == 401:
             self.paused_until = now + 3600
             log.error("xAI API key 无效，暂停 1 小时。请检查 .env 里的 XAI_API_KEY（改完要重建容器）。")
-        elif exc.status in (403, 404):
-            # 每一次请求都会一样失败：多半是模型名写错了，或者这个 key 没有权限用这个模型
+        elif exc.status == 404:
+            # 每一次请求都会一样失败：模型名写错了，或者这个 key 没有权限用这个模型（llm.classify_status 归到这里）
             self.paused_until = now + 3600
-            log.error("xAI 拒绝了请求（%s），暂停 1 小时。检查 config.toml 里 [xai] 的 model，以及这个 API key 能用哪些模型。", exc)
+            log.error("xAI 说用不了这个模型（%s），暂停 1 小时。检查 config.toml 里 [xai] 的 model，以及这个 API key 能用哪些模型。", exc)
         elif exc.status in BAD_REQUEST:
             # 这批消息本身被拒（比如内容审核）：丢掉它，别卡住整个频道
             log.error("频道 %s：这批消息被 xAI 拒绝，已丢弃：%s", st.channel_id, exc)

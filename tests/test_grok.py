@@ -133,10 +133,18 @@ class Errors(unittest.TestCase):
         self.assertEqual(classify_status(403, no_credits), 402)
         self.assertEqual(classify_status(429, "Your team has reached its monthly spending limit"), 402)
         self.assertEqual(classify_status(429, "Too many requests, slow down"), 429)  # 普通限流：过一会儿重试
-        self.assertEqual(classify_status(400, "Incorrect API key provided: xa***yz"), 401)
+        self.assertEqual(classify_status(429, "Too many requests. See https://console.x.ai/team/t1/billing"), 429)  # 网址里的字不算
+        self.assertEqual(classify_status(400, "Incorrect API key provided: xa***yz. Get one at https://console.x.ai."), 401)
         self.assertEqual(classify_status(401, "invalid token"), 401)
         self.assertEqual(classify_status(404, "The model grok-9 does not exist or your team does not have access to it"), 404)
+        self.assertEqual(classify_status(403, "The API key does not have permission to access model grok-4.3"), 404)
         self.assertEqual(classify_status(400, "This model's maximum prompt length is 1000000"), 400)
+
+    def test_moderation_is_not_a_bad_key(self):
+        """内容审核没过：xAI 回 403，说明里还带着 “API key ID”。只是这批消息的事，不能当成 key 不对去暂停整个 bot。"""
+        refused = "Content violates usage guidelines. Team: t1, API key ID: k1, Model: grok-4.3, Failed check: SAFETY_CHECK_TYPE_X"
+        self.assertEqual(classify_status(403, refused), 400)  # 引擎会丢掉这批（带图的先去掉图再试一次）
+        self.assertEqual(classify_status(403, "The caller does not have permission to execute the specified operation"), 403)
 
 
 class Client(unittest.IsolatedAsyncioTestCase):
@@ -184,11 +192,22 @@ class Client(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.no_json)
 
     async def test_unrelated_bad_request_is_not_retried(self):
-        client, sent = self._client([(400, {"error": "Failed to deserialize the JSON body: messages[3]: invalid type"})])
-        with self.assertRaises(LLMError) as ctx:
-            await client.complete([{"role": "user", "content": "hi"}], json_mode=True)
-        self.assertEqual((ctx.exception.status, len(sent)), (400, 1))
-        self.assertFalse(client.no_json)  # 和 JSON 模式无关的错误不会把它关掉
+        for body in (
+            {"error": "Failed to deserialize the JSON body: messages[3]: invalid type"},
+            {"error": "This model's maximum prompt length is 1000000 (excluding reasoning)"},  # 提到 reasoning，但不是说参数不收
+        ):
+            client, sent = self._client([(400, body)])
+            with self.assertRaises(LLMError) as ctx:
+                await client.complete([{"role": "user", "content": "hi"}], json_mode=True)
+            self.assertEqual((ctx.exception.status, len(sent)), (400, 1))
+            self.assertFalse(client.no_json or client.no_none or client.no_effort)  # 无关的错误不会改掉参数
+
+    async def test_camel_case_parameter_names(self):
+        rejected = (400, {"error": "Model grok-4.20-0309-reasoning does not support parameter reasoningEffort"})
+        client, sent = self._client([rejected, (200, OK_BODY)])
+        client.no_none = True
+        await client.complete([{"role": "user", "content": "hi"}], thinking="low")
+        self.assertNotIn("reasoning_effort", sent[-1][0])
 
     async def test_no_credits_pauses_without_retrying(self):
         client, sent = self._client([(403, {"code": "Forbidden", "error": "Your team doesn't have any credits yet."})])
@@ -318,6 +337,52 @@ class SharingAChannel(unittest.IsolatedAsyncioTestCase):
         content = llm.calls[0]["messages"][-1]["content"]
         self.assertIn("DeepSeek群友 〔bot〕：试试重启", content)  # 看得到对方说了什么
 
+    async def test_waits_again_after_yielding(self):
+        """让过一次之后，有人再说话：从那时起重新等冷场，不能一有人说话就马上插进来。"""
+        engine, llm, transport, clock = make_engine(defaults={"proactive": True, "quiet_seconds": 60, "max_wait_seconds": 240})
+        await engine.handle_message(msg(501, "有人知道这个怎么修吗"))
+        clock.advance(35)
+        await engine.handle_message(other_bot(502, "试试重启"))
+        clock.advance(600)
+        await engine.tick()
+        await engine.drain()
+        await engine.handle_message(msg(503, "重启也没用"))
+        clock.advance(1)
+        await engine.tick()
+        await engine.drain()
+        self.assertEqual(llm.calls, [])  # 人家可能还在打字
+        clock.advance(60)
+        await engine.tick()
+        await engine.drain()
+        self.assertEqual(len(llm.calls), 1)  # 冷场了才判断
+
+    async def test_waits_at_most_max_wait_after_yielding(self):
+        engine, llm, transport, clock = make_engine(defaults={"proactive": True, "quiet_seconds": 60, "max_wait_seconds": 240})
+        await engine.handle_message(msg(501, "开始"))
+        await engine.handle_message(other_bot(502, "嗯"))
+        clock.advance(600)
+        await engine.handle_message(msg(503, "一直在聊"))
+        for _ in range(23):  # 一直有人说话，没冷场
+            clock.advance(10)
+            await engine.handle_message(msg(504 + _, "还在聊", author=12, name="小雨"))
+            await engine.tick()
+            await engine.drain()
+        self.assertEqual(llm.calls, [])  # 230 秒：还没等满 240 秒
+        clock.advance(10)
+        await engine.tick()
+        await engine.drain()
+        self.assertEqual(len(llm.calls), 1)
+
+    async def test_webhooks_are_not_other_bots(self):
+        """PluralKit 之类用 webhook 代群友发言：那其实是真人，不该让它一直让着。"""
+        engine, llm, transport, clock = make_engine(defaults={"proactive": True})
+        await engine.handle_message(msg(501, "我先说一句"))
+        await engine.handle_message(other_bot(502, "（代发的）大家好", webhook=True))
+        clock.advance(600)
+        await engine.tick()
+        await engine.drain()
+        self.assertEqual(len(llm.calls), 1)
+
     async def test_can_be_turned_off(self):
         engine, llm, transport, clock = make_engine(defaults={"proactive": True}, engine_cfg={"yield_to_bots": False})
         await engine.handle_message(msg(501, "有人知道这个怎么修吗"))
@@ -359,8 +424,35 @@ class PausesOnAccountProblems(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._fail(402), 600)  # 没钱了：10 分钟后再试
         self.assertEqual(await self._fail(401), 3600)  # key 不对
         self.assertEqual(await self._fail(404), 3600)  # 模型名不对 / 没权限：每次都会一样失败
-        self.assertEqual(await self._fail(403), 3600)
+        self.assertLessEqual(await self._fail(403), 0)  # 认不出原因的 403：只让这个频道歇一会儿
         self.assertLessEqual(await self._fail(500), 0)  # 对方临时出问题：不全局暂停
+
+
+class CutOffReply(unittest.IsolatedAsyncioTestCase):
+    async def test_cut_off_reply_gets_more_room_not_less_reasoning(self):
+        """xAI 的输出上限不含推理：回复被截断就是真的写太长了，放宽上限再试一次，推理强度不变。"""
+        from dsbot.engine import MAX_OUTPUT_CAP
+        from dsbot.models import Completion
+
+        replies = iter([
+            Completion(content='{"actions": [{"type": "reply", "to": 1, "messages": ["很长很长', reasoning=None, usage=Usage(), finish_reason="length"),
+            REPLY(1, "完整的回答"),
+        ])
+        engine, llm, transport, clock = make_engine(lambda call: next(replies), defaults={"mention_thinking": "low"})
+        await engine.handle_message(msg(501, "@小G 讲个长故事", mentions_bot=True))
+        await engine.drain()
+        first_cap = engine.ec.max_thinking_tokens  # 开着推理时的上限（6000）
+        self.assertEqual([(c["thinking"], c["max_tokens"]) for c in llm.calls], [("low", first_cap), ("low", MAX_OUTPUT_CAP)])
+        self.assertEqual(transport.sent[0][1], "完整的回答")
+
+    async def test_empty_reply_retries_without_reasoning(self):
+        from dsbot.models import Completion
+
+        replies = iter([Completion(content="", reasoning=None, usage=Usage(), finish_reason="stop"), REPLY(1, "在")])
+        engine, llm, transport, clock = make_engine(lambda call: next(replies), defaults={"mention_thinking": "low"})
+        await engine.handle_message(msg(501, "@小G 在吗", mentions_bot=True))
+        await engine.drain()
+        self.assertEqual([c["thinking"] for c in llm.calls], ["low", "off"])
 
 
 class SearchCost(unittest.IsolatedAsyncioTestCase):

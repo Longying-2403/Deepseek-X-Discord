@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .llm import billed_output, error_message, ticks_to_usd
+from .llm import REJECTED, billed_output, error_message, ticks_to_usd, without_urls
 from .models import SearchResult, Usage
 from .net import host_of
 from .textutil import clean_text
@@ -37,6 +37,7 @@ SEARCH_SYSTEM = """\
 
 # 正文里的引用标记：[[1]](https://…)，来源另外列，正文里就不要了
 _CITE_MARK = re.compile(r"\s?\[\[\d+\]\]\([^)\s]*\)")
+_PARAM_NAMES = {"reasoning": re.compile(r"\breasoning\b", re.I), "max_turns": re.compile(r"max[_ ]?turns", re.I)}
 
 
 class SearchError(Exception):
@@ -276,13 +277,14 @@ class WebSearch:
 
     async def _send(self, payload: dict[str, Any], headers: dict[str, str]) -> tuple[int, Any]:
         status, data = await self._post(self.url, payload, headers)
-        for _ in range(3):  # 某个参数不被接受（400 / 422）：去掉再试，被拒的请求不算钱
+        for _ in range(2):  # 某个参数不被接受（400 / 422，错误里点了它的名字、说不收）：去掉再试，被拒的请求不算钱
             if status not in (400, 422):
                 break
-            text = error_message(data).lower()
-            dropped = next((k for k in ("reasoning", "max_turns") if k in payload and k in text), None)
-            if dropped is None:
+            text = without_urls(error_message(data))
+            named = [k for k in ("reasoning", "max_turns") if k in payload and _PARAM_NAMES[k].search(text)]
+            if not named or not REJECTED.search(text):
                 break
+            dropped = named[0]
             payload.pop(dropped)
             log.warning("xAI 搜索不收 %s 这个参数，去掉再试", dropped)
             status, data = await self._post(self.url, payload, headers)
