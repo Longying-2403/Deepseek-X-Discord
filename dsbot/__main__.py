@@ -8,7 +8,8 @@ import logging
 import os
 import sys
 
-from .config import Secrets, load_config, load_secrets
+from . import __version__
+from .config import Secrets, load_config, load_secrets, unknown_note
 
 
 def _load_dotenv() -> None:
@@ -64,7 +65,11 @@ def check(config_path: str) -> int:
     from .store import Store
 
     cfg = load_config(config_path)
+    print(f"dsbot {__version__}")
     print(f"✓ 配置文件 {config_path} 读取成功，模型：{cfg.deepseek.model}")
+    note = unknown_note(cfg)
+    if note:
+        print(f"! {note}")
     try:
         secrets = load_secrets()
         print(f"✓ .env 已填写（OWNER_ID={secrets.owner_id}，CONTROL_GUILD_ID={secrets.control_guild_id or '未设置'}）")
@@ -86,6 +91,11 @@ def check(config_path: str) -> int:
     shared = memes.names(0) if os.path.isdir(cfg.bot.meme_dir) else []
     print(f"✓ 通用表情包库 {cfg.bot.meme_dir}/：{len(shared)} 张" if shared else f"· 通用表情包库 {cfg.bot.meme_dir}/ 还是空的（可选）")
 
+    from .memory import CardStore, MemoryStore
+
+    for label, path in (("聊天记录", cfg.bot.database), ("人设卡", cfg.bot.cards_database), ("长期记忆", cfg.bot.memory_database)):
+        state = "已有" if os.path.exists(path) else "第一次启动时新建"
+        print(f"· {label}存在 {path}（{state}）")
     store = Store(":memory:")
     bot = DSBot(
         cfg,
@@ -94,6 +104,8 @@ def check(config_path: str) -> int:
         Settings(cfg.defaults, store),
         Ledger(store, cfg.bot.timezone),
         DeepSeekClient(api_key="x", base_url=cfg.deepseek.base_url, model=cfg.deepseek.model),
+        cards=CardStore(":memory:"),
+        memory=MemoryStore(":memory:"),
     )
     groups = [(None, bot.tree.get_commands())]
     if secrets.control_guild_id:
@@ -244,6 +256,7 @@ def test_image(config_path: str, query: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek 群友 Discord bot")
+    parser.add_argument("--version", action="version", version=f"dsbot {__version__}")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="只做离线自检，不启动")
     parser.add_argument("--test-search", metavar="关键词", help="真的搜一次，确认联网搜索能用（花一点点钱）")
@@ -267,16 +280,23 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("discord").setLevel(logging.WARNING)
+    logging.getLogger("dsbot").info("dsbot %s 启动中", __version__)  # 换了代码看日志就知道新版有没有生效
+    note = unknown_note(cfg)
+    if note:
+        logging.getLogger("dsbot").warning(note)
     secrets = load_secrets()
 
     from .discord_app import DSBot
     from .ledger import Ledger
     from .llm import DeepSeekClient
+    from .memory import CardStore, MemoryStore
     from .settings import Settings
     from .store import Store
 
     os.umask(0o077)  # 数据库里有聊天记录：新建的文件只给自己读写
     store = Store(cfg.bot.database)
+    cards = CardStore(cfg.bot.cards_database)  # 人设卡、长期记忆各一个文件，方便备份、搬家
+    memory = MemoryStore(cfg.bot.memory_database)
     bot = DSBot(
         cfg,
         secrets,
@@ -290,6 +310,8 @@ def main() -> int:
             timeout=cfg.deepseek.timeout_seconds,
             max_retries=cfg.deepseek.max_retries,
         ),
+        cards=cards,
+        memory=memory,
     )
     bot.run(secrets.discord_token, log_handler=None)
     return 0

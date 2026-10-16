@@ -12,6 +12,7 @@ from typing import Any
 import discord
 from discord import app_commands
 
+from . import __version__
 from .config import AppConfig, Secrets
 from .convert import (
     convert_message,
@@ -27,6 +28,7 @@ from .ledger import Ledger
 from .links import LinkReader
 from .llm import DeepSeekClient
 from .memes import MemeLibrary
+from .memory import CardStore, MemoryStore
 from .models import ChannelInfo, ChannelPlace, IncomingMessage
 from .net import HttpClient
 from .pictures import PictureFinder
@@ -233,6 +235,8 @@ class DSBot(discord.Client):
         settings: Settings,
         ledger: Ledger,
         llm: DeepSeekClient,
+        cards: CardStore | None = None,
+        memory: MemoryStore | None = None,
     ):
         intents = discord.Intents.default()  # 含消息、打字等普通 intent
         intents.message_content = True  # 特权 intent：需要在开发者后台打开
@@ -274,6 +278,8 @@ class DSBot(discord.Client):
             else None
         )
         self.memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)
+        self.cards = cards  # 人设卡（data/cards.sqlite3）
+        self.memory = memory  # 长期记忆（data/memory.sqlite3）
         self.engine = Engine(
             cfg,
             settings,
@@ -286,6 +292,8 @@ class DSBot(discord.Client):
             link_reader=self.links,
             pictures=self.pictures,
             memes=self.memes,
+            cards=cards,
+            memory=memory,
         )
         self._ticker: asyncio.Task[None] | None = None
 
@@ -318,7 +326,7 @@ class DSBot(discord.Client):
     async def on_ready(self) -> None:
         assert self.user is not None
         url = discord.utils.oauth_url(self.user.id, permissions=BOT_PERMISSIONS, scopes=("bot", "applications.commands"))
-        log.info("已登录：%s（ID %s），在 %d 个服务器里", self.user, self.user.id, len(self.guilds))
+        log.info("已登录：%s（ID %s），在 %d 个服务器里（dsbot %s）", self.user, self.user.id, len(self.guilds), __version__)
         log.info("邀请链接：%s", url)
 
     async def _tick_loop(self) -> None:
@@ -340,6 +348,9 @@ class DSBot(discord.Client):
         await self.llm.close()
         await self.searcher.close()
         await self.web.close()
+        for db in (self.cards, self.memory):
+            if db is not None:
+                db.close()
         await super().close()
 
     # ---------------------------------------------------------------- 事件

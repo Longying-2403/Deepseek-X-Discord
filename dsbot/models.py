@@ -132,19 +132,32 @@ class IncomingMessage:
 @dataclass
 class Action:
     # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
+    # | "card" | "memory" | "who"
     kind: str
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
     query: str | None = None  # search / image：要搜什么；recall：想找的关键词（可以没有）
     channel: str | None = None  # recall：哪个频道
-    name: str | None = None  # sticker：贴图名；meme：表情包名
-    text: str | None = None  # persona：改好之后的完整人设（"" = 恢复默认；None = 没写）
+    name: str | None = None  # sticker：贴图名；meme：表情包名；who：要查谁的人设卡
+    text: str | None = None  # persona：改好之后的完整人设（"" = 恢复默认；None = 没写）；card：完整的新人设卡；memory：内容
     scope: str | None = None  # persona：None = 改这里现在用的那份；"server" = 全服务器；"channel" = 这个频道
     undo: bool = False  # persona：撤销上一次修改
     image: int | None = None  # pick：发找到的第几张图（从 1 开始）
+    op: str | None = None  # memory：add / edit / delete
+    index: int | None = None  # memory：改、删第几条（长期记忆的编号）
 
     def to_json(self) -> dict[str, Any]:
+        if self.kind == "card":
+            return {"type": "card", "to": self.to, "text": self.text or ""}
+        if self.kind == "memory":
+            if self.op == "add":
+                return {"type": "memory", "add": self.text}
+            if self.op == "edit":
+                return {"type": "memory", "edit": self.index, "text": self.text}
+            return {"type": "memory", "delete": self.index}
+        if self.kind == "who":
+            return {"type": "who", "name": self.name}
         if self.kind in ("sticker", "meme"):
             d: dict[str, Any] = {"type": self.kind}
             if self.to is not None:

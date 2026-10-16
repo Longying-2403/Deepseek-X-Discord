@@ -18,9 +18,10 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, *, timeout: bool = False):
         super().__init__(message)
         self.status = status
+        self.timeout = timeout  # 等太久没等到结果（对方可能已经算钱了）
 
 
 def build_payload(
@@ -99,7 +100,7 @@ class DeepSeekClient:
             await self._session.close()
             self._session = None
 
-    async def _post(self, payload: dict[str, Any]) -> tuple[int, Any]:
+    async def _post(self, payload: dict[str, Any], timeout: float) -> tuple[int, Any]:
         import aiohttp  # 延迟导入：核心逻辑测试时不需要
 
         if self._session is None or self._session.closed:
@@ -108,7 +109,7 @@ class DeepSeekClient:
                 trust_env=True,  # 支持 HTTPS_PROXY 环境变量
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
-        async with self._session.post(self.url, json=payload) as resp:
+        async with self._session.post(self.url, json=payload, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             try:
                 data = await resp.json(content_type=None)
             except ValueError:
@@ -123,19 +124,22 @@ class DeepSeekClient:
         json_mode: bool = False,
         max_tokens: int | None = None,
         user_id: str | None = None,
+        timeout_scale: float = 1.0,
     ) -> Completion:
+        """timeout_scale：这次最多等几倍的 timeout（后台整理记忆没人在等，输出又可能比较长）。"""
         payload = build_payload(
             self.model, messages, thinking=thinking, json_mode=json_mode, max_tokens=max_tokens, user_id=user_id
         )
+        timeout = self.timeout * max(1.0, timeout_scale)
         last_error: LLMError | None = None
         for attempt in range(self.max_retries + 1):
             if attempt:
                 await asyncio.sleep(min(2.0**attempt, 10.0))
             try:
-                status, data = await self._post(payload)
+                status, data = await self._post(payload, timeout)
             except asyncio.TimeoutError:
                 # 超时不重试：请求可能已经在对方那边跑完并计费了，再发一次只会更慢、更贵
-                raise LLMError(f"请求超时（{self.timeout:g} 秒）") from None
+                raise LLMError(f"请求超时（{timeout:g} 秒）", timeout=True) from None
             except Exception as exc:  # aiohttp.ClientError 等网络错误
                 last_error = LLMError(f"网络错误：{exc!r}")
                 continue

@@ -6,13 +6,19 @@ import json
 import re
 from typing import Any
 
+from .memory import parse_memory_op
 from .models import Action
 
-MAX_ACTIONS = 6
+MAX_ACTIONS = 8
 MAX_MESSAGES_PER_REPLY = 3
 MAX_MESSAGE_CHARS = 1900
 MAX_QUERY_CHARS = 200
 MAX_PERSONA_PARSE_CHARS = 8000  # 解析时先留这么多；超过人设上限（4000 字）的由引擎拒绝并告诉模型
+MAX_CARD_PARSE_CHARS = 4000  # 人设卡同理（上限由引擎按配置检查）
+MAX_MEMORY_OPS = 3  # 一轮里最多改几条长期记忆
+_MEMORY_KINDS = ("memory", "memo", "long_memory", "note", "长期记忆")
+_CARD_KINDS = ("card", "set_card", "update_card", "persona_card", "人设卡")
+_WHO_KINDS = ("who", "lookup_card", "find_card", "card_lookup", "查人设卡")
 _SERVER_SCOPE = {"server", "guild", "whole server", "all", "服务器", "全服务器", "整个服务器", "全服", "本服务器"}
 _TRUE_WORDS = {"true", "yes", "1", "是", "对"}
 
@@ -153,6 +159,18 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
             undo = item.get("undo") is True or str(item.get("undo", "")).strip().lower() in _TRUE_WORDS
             if not any(a.kind == "persona" for a in actions):
                 actions.append(Action("persona", to, text=text, scope=_persona_scope(item.get("scope")), undo=undo))
+        elif kind in _CARD_KINDS:
+            raw = item.get("text", item.get("card", item.get("content")))
+            if isinstance(raw, str) and to is not None and not any(a.kind == "card" and a.to == to for a in actions):
+                actions.append(Action("card", to, text=raw.strip()[:MAX_CARD_PARSE_CHARS]))
+        elif kind in _MEMORY_KINDS or (kind == "remember" and not any(k in item for k in ("channel", "from", "where"))):
+            op = parse_memory_op(item)
+            if op is not None and sum(a.kind == "memory" for a in actions) < MAX_MEMORY_OPS:
+                actions.append(Action("memory", op=op.op, index=op.no, text=op.text))
+        elif kind in _WHO_KINDS:
+            name = _text_field(item, "name", "who", "user", "query")
+            if name and not any(a.kind == "who" and a.name == name for a in actions):
+                actions.append(Action("who", name=name.lstrip("@＠ ").strip() or name))
         elif kind in ("read", "read_file", "open", "look"):
             if to is not None and not any(a.kind == "read" and a.to == to for a in actions):
                 actions.append(Action("read", to))

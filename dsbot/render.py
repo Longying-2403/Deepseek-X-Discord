@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .models import DocBlock, IncomingMessage
-from .prompts import GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE
+from .prompts import CARDS_HEAD, GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE, WHO_HEAD, WHO_NONE, WHO_OFF
 from .textutil import one_line, truncate
 
 
@@ -55,15 +55,30 @@ _MARKERS = str.maketrans(
 )
 # 别的换行写法统一成 \n：续行才会被缩进，没法伪造一条以 #编号 开头的新消息
 _LINE_BREAKS = re.compile("\r\n?|[\u2028\u2029\x85\x0b\x0c]")
+# 框住人设的标签：群友的话、人设卡、长期记忆里写的不能冒充它（比如在长期记忆里写一段“</人设><人设>…”）。
+# 全角、长得像的括号（〈〉《》⟨⟩）、繁体“設”、中间夹空格或零宽字符的写法也算
+_GAP = r"[\s\u200b-\u200f\u2060\ufeff]*"
+_TAG_OPEN = "<＜﹤〈《⟨\u2329\u27ea\u276c\u276e"  # 最后几个：〈 ⟪ ❬ ❮
+_TAG_CLOSE = ">＞﹥〉》⟩\u232a\u27eb\u276d\u276f"
+_PERSONA_TAG = re.compile(rf"[{_TAG_OPEN}]{_GAP}[/／]?{_GAP}人{_GAP}[设設]{_GAP}[{_TAG_CLOSE}]")
+_TAG_BRACKETS = str.maketrans({**dict.fromkeys(_TAG_OPEN, "‹"), **dict.fromkeys(_TAG_CLOSE, "›")})
+# 人设卡、长期记忆里的尖括号全换掉（书名号《》照常留着）
+_ANGLES = str.maketrans({"<": "‹", ">": "›", "＜": "‹", "＞": "›", "﹤": "‹", "﹥": "›"})
 
 
 def neutralize(text: str) -> str:
-    """群友的原话和文件里不能出现我们用来标注的符号，否则可以伪造“〔@你〕”、文件块之类的标记。"""
+    """群友的原话和文件里不能出现我们用来标注的符号，否则可以伪造“〔@你〕”、文件块、人设标签之类的标记。"""
     text = _LINE_BREAKS.sub("\n", text)
+    text = _PERSONA_TAG.sub(lambda m: m.group(0).translate(_TAG_BRACKETS), text)
     return text.translate(_MARKERS).replace("<<<", "‹‹‹").replace(">>>", "›››")
 
 
 _neutralize = neutralize
+
+
+def neutralize_record(text: str) -> str:
+    """人设卡、长期记忆的内容：除了 neutralize，尖括号也全换掉（这两样会长期留着、每个频道都看得到）。"""
+    return neutralize(text).translate(_ANGLES)
 
 
 def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_chars: int) -> str:
@@ -157,6 +172,32 @@ class _Builder:
         return self.parts
 
 
+CARD_DELETED = "（这个人的人设卡已经删掉了，之前附过的那份别再用，也别照着它重新写。）"
+
+
+def render_cards(cards: list[tuple[str, str | None]]) -> list[str]:
+    """这一轮说话的人的人设卡：[(名字, 内容)] → 文字行；内容是 None 表示刚被删掉。
+    整组放在 <<< 和 >>> 之间（压缩记忆时整组去掉）。"""
+    if not cards:
+        return []
+    lines = [CARDS_HEAD, "<<<"]
+    for name, text in cards:
+        lines.append(f"【{_neutralize(one_line(name, 32))}】")
+        lines.append(neutralize_record(text.strip()) if text is not None else CARD_DELETED)
+    lines.append(">>>")
+    return lines
+
+
+def render_who(name: str, cards: list[tuple[str, str]]) -> str:
+    """who 查到的人设卡。"""
+    lines = [WHO_HEAD.format(name=_neutralize(one_line(name, 32))), "<<<"]
+    for card_name, text in cards:
+        lines.append(f"【{_neutralize(one_line(card_name, 32))}】")
+        lines.append(neutralize_record(text.strip()))
+    lines.append(">>>")
+    return "\n".join(lines)
+
+
 def _hint(kind: str, targets: list[int]) -> str:
     if kind == "mention" and targets:
         return HINT_MENTION.format(targets="、".join(f"#{t}" for t in targets))
@@ -176,14 +217,16 @@ def render_round(
     docs: dict[int, list[DocBlock]] | None = None,
     max_chars: int = 1800,
     context: list[str] | None = None,
+    cards: list[str] | None = None,
 ) -> str | list[dict[str, Any]]:
     """messages: [(编号, 消息)]；images: message_id -> [(data_uri, detail)]；docs: message_id -> 放在这条消息后面的文件块。
-    context：放在消息前面的背景（比如这个人刚才在别的频道跟它聊过什么）。
+    context：放在消息前面的背景（比如这个人刚才在别的频道跟它聊过什么）。cards：在场的人的人设卡（render_cards 的结果）。
 
     没有图片时返回字符串；有图片时返回内容块数组，图片紧跟在它所属的那条消息后面。
     """
     out = _Builder(_stamp(messages, now, tz))
     out.lines += context or []
+    out.lines += cards or []
     if omitted > 0:
         out.lines.append(f"（前面还有 {omitted} 条消息没显示）")
     images = images or {}
@@ -258,6 +301,8 @@ LIST_HEAD = "（能翻记录的别的频道："
 LIST_EMPTY = "（现在没有能翻记录的别的频道）"
 _FILE_HEAD = re.compile(r"^【\S+ 的(?:文件|链接)「")
 _GALLERY_START = GALLERY_HEAD.split("「", 1)[0]  # “（你找了”
+_WHO_START = WHO_HEAD.split("「", 1)[0]  # “（你查了”
+_WHO_NONE_START, _WHO_NONE_END = WHO_NONE.split("{name}")
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
@@ -291,7 +336,7 @@ def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
 
 
 def own_text(content: Any) -> str:
-    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录、搜索结果和找图的候选图。
+    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录、搜索结果、找图的候选图和人设卡。
 
     群友发的文件和链接打开后的内容算这个频道自己的，留着。
 
@@ -327,9 +372,11 @@ def own_text(content: Any) -> str:
         after_search = after_file = False
         if line.startswith("（") and (line.endswith("跟你聊过：") or line == LIST_HEAD):
             skipping_block = True
-        elif line.startswith(("（你翻了", "（你搜了", _GALLERY_START)):
+        elif line.startswith(("（你翻了", "（你搜了", _GALLERY_START, _WHO_START)) or line == CARDS_HEAD:
             skipping_fence = True
             after_search = line.startswith("（你搜了")
+        elif line == WHO_OFF or (line.startswith(_WHO_NONE_START) and line.endswith(_WHO_NONE_END)):
+            continue
         elif line != LIST_EMPTY and line != GALLERY_FOOT:
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
@@ -454,4 +501,74 @@ def assistant_text(content: str, name: str) -> str:
             out.append(f"{name} 上网找了「{a.get('query', '')}」的图")
         elif a.get("type") == "persona":
             out.append(f"{name} 想按 #{to} 的要求改人设")
+        elif a.get("type") == "card":
+            # 卡的内容不写进摘要：那是本人的东西，删卡之后摘要里也不该留着
+            out.append(f"{name} 按 #{to} 的要求改了他的人设卡")
+        elif a.get("type") == "memory":
+            if a.get("add"):
+                out.append(f"{name} 记下了一条长期记忆：{a.get('add')}")
+            elif a.get("edit") is not None:
+                out.append(f"{name} 改了第 {a.get('edit')} 条长期记忆：{a.get('text', '')}")
+            elif a.get("delete") is not None:
+                out.append(f"{name} 删了第 {a.get('delete')} 条长期记忆")
+        elif a.get("type") == "who":
+            out.append(f"{name} 查了「{a.get('name', '')}」的人设卡")
+    return "\n".join(out)
+
+
+def review_bot_lines(content: Any, name: str) -> list[str]:
+    """整理记忆用：它自己说过的话，一个动作一行。它的话里就算有换行和“#12 阿明：……”，也冒充不了一条群友的消息。"""
+    raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    out = []
+    for line in assistant_text(raw, name).split("\n"):
+        if not line.strip():
+            continue
+        if out and not line.startswith(name):
+            out[-1] += " " + line  # 它说的话里自己带的换行：接在上一行后面
+        else:
+            out.append(line)
+    return [_neutralize(one_line(line, 600)) for line in out]
+
+
+def review_text(content: Any) -> list[str]:
+    """整理记忆用：这个频道自己的聊天（同 own_text），再去掉文件、链接的正文和每轮的提示，只留大家说的话。"""
+    out: list[str] = []
+    fenced = False
+    for line in own_text(content).split("\n"):
+        if fenced:
+            fenced = line != ">>>"
+            continue
+        if line == "<<<":
+            fenced = True
+            out.append("（内容略）")
+            continue
+        if not line.strip() or line == HINT_PROACTIVE or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
+            continue
+        out.append(line)
+    return out
+
+
+def render_review_input(
+    people: list[tuple[str, list[int], str | None]] | None,
+    memories: list[tuple[int, str]] | None,
+    lines: list[str],
+) -> str:
+    """整理记忆时给模型看的内容。people：[(名字, 他的消息编号, 现在的人设卡或 None)]（None = 这里不整理人设卡）；
+    memories：[(编号, 内容)]（None = 这里不整理长期记忆）。"""
+    out: list[str] = []
+    if people is not None:
+        out.append("【说过话的人】")
+        for name, sids, card in people:
+            who = f"{_neutralize(one_line(name, 48))}（消息：{'、'.join(f'#{sid}' for sid in sids[:20])}）"
+            if card:
+                out += [f"{who}现在的人设卡：", "<<<", neutralize_record(card.strip()), ">>>"]
+            else:
+                out.append(f"{who}：还没有人设卡")
+        if not people:
+            out.append("（这段记录里没有能记人设卡的人）")
+    if memories is not None:
+        out.append("【长期记忆】")
+        out += [f"({no}) {neutralize_record(one_line(text, 300))}" for no, text in memories] or ["（还没有）"]
+    out.append("【聊天记录】")
+    out += lines
     return "\n".join(out)

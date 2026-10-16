@@ -1,7 +1,8 @@
 """斜杠命令。
 
-/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、状态。
-/dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索等。
+/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
+/ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。
+/dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡等。
             和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
 """
 
@@ -46,6 +47,17 @@ MEME_ACTIONS = [
     Choice(name="删除", value="remove"),
     Choice(name="列表", value="list"),
 ]
+CARD_ACTIONS = [
+    Choice(name="编辑", value="edit"),
+    Choice(name="改回上一版", value="undo"),
+    Choice(name="清空", value="clear"),
+]
+MEMORY_ACTIONS = [
+    Choice(name="查看", value="list"),
+    Choice(name="添加", value="add"),
+    Choice(name="删除", value="delete"),
+    Choice(name="清空", value="clear"),
+]
 LINK_MODES = {
     "all": "读链接：开（推文走 FxTwitter，网页走 Tavily）",
     "x": "读链接：只读推文（没填 TAVILY_API_KEY，别的网站只看 Discord 的预览）",
@@ -63,6 +75,33 @@ async def _reply(interaction: discord.Interaction, text: str) -> None:
         await interaction.followup.send(text, ephemeral=True)
     else:
         await interaction.response.send_message(text, ephemeral=True)
+
+
+def split_message(text: str, limit: int = 1900) -> list[str]:
+    """长文字按行分成几条（每条不超过 limit 字）。"""
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + 1 + len(line) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        parts.append(current)
+    return parts or [""]
+
+
+async def _reply_long(interaction: discord.Interaction, text: str) -> None:
+    """可能超过一条消息长度的回复：分几条发（都只有自己看得到）。"""
+    for part in split_message(text)[:10]:
+        await _reply(interaction, part)
 
 
 def _parent_id(interaction: discord.Interaction) -> int | None:
@@ -173,6 +212,81 @@ class PersonaModal(discord.ui.Modal):
         await _reply(interaction, f"保存失败：{error}")
 
 
+class CardModal(discord.ui.Modal):
+    """/ds-rp：编辑自己的人设卡。卡的主人就是填表的人，改不了别人的。"""
+
+    def __init__(self, bot: "DSBot", guild_id: int, current: str):
+        super().__init__(title="我的人设卡", timeout=900)
+        self.bot = bot
+        self.guild_id = guild_id
+        limit = max(1, min(4000, bot.cfg.engine.card_max_chars))
+        self.text = discord.ui.TextInput(
+            style=discord.TextStyle.long,
+            default=current[:limit] or None,
+            required=False,
+            max_length=limit,
+            placeholder="怎么称呼你、你的设定（比如自称猫娘）、喜好和雷点……留空 = 删掉这张卡（还能改回上一版）",
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="人设卡",
+                description="它会记住这些，和你聊天时用上。只有你自己能看、能改。",
+                component=self.text,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        assert self.bot.cards is not None
+        value = self.text.value
+        name = getattr(interaction.user, "display_name", None) or interaction.user.name
+        changed = self.bot.cards.put(self.guild_id, interaction.user.id, name, value, via="command")
+        if not value.strip():
+            text = (
+                "已删掉你在这个服务器的人设卡（想找回来用 `/ds-rp 操作:改回上一版`；连旧版本一起删用 `/ds-rp 操作:清空`）。"
+                if changed
+                else "你在这个服务器还没有人设卡。"
+            )
+        else:
+            text = "人设卡已保存，下次你说话时它就会用上。" if changed else "人设卡没有改动。"
+        if value.strip() and not self.bot.settings.view(*_ids(interaction)).cards:
+            text += "\n（这里关掉了人设卡，它暂时不会用。）"
+        await _reply(interaction, text)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception("保存人设卡失败", exc_info=error)
+        await _reply(interaction, f"保存失败：{error}")
+
+
+class ConfirmClear(discord.ui.View):
+    """清空长期记忆前再确认一次。"""
+
+    def __init__(self, bot: "DSBot", guild_id: int, user_id: int):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="确认清空", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.user_id:
+            await _reply(interaction, "只有发起的人能确认。")
+            return
+        assert self.bot.memory is not None
+        n = self.bot.memory.clear(self.guild_id)
+        self.stop()
+        await interaction.response.edit_message(content=f"已清空这个服务器的长期记忆（{n} 条）。", view=None)
+
+
+def memory_list_text(bot: "DSBot", guild_id: int) -> str:
+    assert bot.memory is not None
+    entries = bot.memory.entries(guild_id)
+    lines = [f"**长期记忆**（{len(entries)} / {bot.cfg.engine.memory_max_entries} 条）"]
+    lines += [f"({m.no}) {m.text}" for m in entries] or ["还没有。聊天时有人叫它记住群里的事，或者它整理聊天时觉得值得记，就会记在这里。"]
+    if not bot.settings.get("long_memory", guild_id=guild_id):
+        lines.append("⚠️ 这个服务器关掉了长期记忆：`/ds 设置 参数:长期记忆 值:开 范围:全服务器` 打开")
+    return "\n".join(lines)
+
+
 def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     """这个频道的记忆共享情况：能不能看别的频道、自己的内容会不会分享出去、现在和哪些频道互通。"""
     guild_id, channel_id, parent_id, category_id = _ids(interaction)
@@ -233,6 +347,16 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append(f"发图：开 · 表情包库 {own + shared} 张（本服务器 {own}、通用 {shared}）· {found}")
     else:
         lines.append(f"发图：关（来自{view.source('images')}）")
+    if st["cards_on"]:
+        lines.append(f"人设卡：开 · 这个服务器有 {st['card_count']} 张（群友用 /ds-rp 管自己的卡）")
+    else:
+        lines.append(f"人设卡：关（来自{view.source('cards')}）")
+    if st["memory_on"]:
+        lines.append(f"长期记忆：开 · {st['memory_count']} / {st['memory_max']} 条（/ds 长期记忆 查看）")
+    else:
+        lines.append(f"长期记忆：关（来自{view.source('long_memory')}）")
+    if (st["cards_on"] or st["memory_on"]) and not st["review_here"]:
+        lines.append("🔒 私密频道：这里聊的不会被自动整理进人设卡和长期记忆（有人明确叫它记住的除外）")
     if st["memes_on"] and st["media_blocked_for"] > 0:
         minutes = max(1, round(st["media_blocked_for"] / 60))
         lines.append(f"⚠️ 这里最近连着发不出图（多半是 bot 没有“附加文件”权限），约 {minutes} 分钟内先不发图，之后自动再试")
@@ -409,6 +533,57 @@ def register_commands(bot: "DSBot") -> None:
             text += "\n⚠️ 但这里关掉了发图，它不会发：`/ds 设置 参数:发图 值:开`"
         await _reply(interaction, text)
 
+    @admin.command(name="长期记忆", description="查看、添加、删除这个服务器的长期记忆（它记下的约定、大事、梗和剧情）")
+    @app_commands.rename(action="操作", text="内容", number="编号")
+    @app_commands.describe(
+        action="查看 / 添加 / 删除 / 清空",
+        text="添加时填要记的事（一条只记一件事）",
+        number="删除时填编号（查看时括号里的数字）",
+    )
+    @app_commands.choices(action=MEMORY_ACTIONS)
+    async def memory_cmd(
+        interaction: discord.Interaction,
+        action: Choice[str],
+        text: Optional[str] = None,
+        number: Optional[int] = None,
+    ) -> None:
+        guild_id = interaction.guild_id
+        memory = bot.memory
+        if memory is None:
+            await _reply(interaction, "长期记忆没有启用。")
+            return
+        ec = bot.cfg.engine
+        if action.value == "list":
+            await _reply_long(interaction, memory_list_text(bot, guild_id))
+        elif action.value == "add":
+            entry = " ".join((text or "").split())
+            if not entry:
+                await _reply(interaction, "要记什么？在「内容」里填上。")
+            elif len(entry) > ec.memory_entry_chars:
+                await _reply(interaction, f"太长了（{len(entry)} 字），一条最多 {ec.memory_entry_chars} 字。")
+            elif memory.count(guild_id) >= ec.memory_max_entries:
+                await _reply(interaction, f"已经记满 {ec.memory_max_entries} 条了，先删掉几条。")
+            else:
+                no = memory.add(guild_id, entry, via="command")
+                await _reply(interaction, f"已记下第 {no} 条：{entry}")
+        elif action.value == "delete":
+            if number is None:
+                await _reply(interaction, "要删哪一条？在「编号」里填上（`/ds 长期记忆 操作:查看` 能看到编号）。")
+            elif memory.delete(guild_id, number):
+                await _reply(interaction, f"已删掉第 {number} 条。")
+            else:
+                await _reply(interaction, f"没有第 {number} 条。")
+        else:
+            n = memory.count(guild_id)
+            if not n:
+                await _reply(interaction, "长期记忆本来就是空的。")
+                return
+            await interaction.response.send_message(
+                f"确定要清空这个服务器的 {n} 条长期记忆吗？清空后找不回来。",
+                view=ConfirmClear(bot, guild_id, interaction.user.id),
+                ephemeral=True,
+            )
+
     @admin.command(name="区域列表", description="看看它在这个服务器的哪些地方会回应")
     async def area_list_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, area_list_text(bot, interaction.guild))
@@ -509,6 +684,35 @@ def register_commands(bot: "DSBot") -> None:
 
     bot.tree.add_command(admin)
 
+    # 人人都能用（不设 default_permissions）：只能管自己的卡
+    @bot.tree.command(name="ds-rp", description="查看、修改你在这个服务器的人设卡（只有你自己看得到）")
+    @app_commands.guild_only()
+    @app_commands.rename(action="操作")
+    @app_commands.describe(action="编辑（不选就是编辑）/ 改回上一版 / 清空")
+    @app_commands.choices(action=CARD_ACTIONS)
+    async def rp_cmd(interaction: discord.Interaction, action: Optional[Choice[str]] = None) -> None:
+        cards = bot.cards
+        if cards is None:
+            await _reply(interaction, "人设卡没有启用。")
+            return
+        guild_id, user_id = interaction.guild_id, interaction.user.id
+        value = action.value if action is not None else "edit"
+        if value == "undo":
+            name = getattr(interaction.user, "display_name", None) or interaction.user.name
+            restored = cards.restore_previous(guild_id, user_id, name=name)
+            if restored is None:
+                await _reply(interaction, "没有更早的版本了。")
+            else:
+                await _reply(interaction, f"已改回上一版：\n>>> {restored}")
+        elif value == "clear":
+            if cards.delete(guild_id, user_id):
+                await _reply(interaction, "已删掉你在这个服务器的人设卡（连同旧版本）。")
+            else:
+                await _reply(interaction, "你在这个服务器还没有人设卡。")
+        else:
+            card = cards.get(guild_id, user_id)
+            await interaction.response.send_modal(CardModal(bot, guild_id, card.text if card else ""))
+
     @bot.tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         log.error("斜杠命令出错：%s", error, exc_info=error)
@@ -589,5 +793,27 @@ def register_commands(bot: "DSBot") -> None:
         if now < bot.engine.paused_until:
             lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
         await _reply(interaction, "\n".join(lines))
+
+    @owner.command(name="删除人设卡", description="按用户 ID 删掉一个人在所有服务器的人设卡（看不到内容）")
+    @app_commands.rename(user="用户id")
+    @app_commands.describe(user="那个人的用户 ID（开发者模式下右键他的头像 → 复制用户 ID）")
+    async def owner_delete_card(interaction: discord.Interaction, user: str) -> None:
+        if not await is_owner(interaction):
+            return
+        if bot.cards is None:
+            await _reply(interaction, "人设卡没有启用。")
+            return
+        if not user.strip().isdecimal():
+            await _reply(interaction, "用户 ID 应该是一串数字（开发者模式下右键头像 → 复制用户 ID）。")
+            return
+        cards_deleted, versions_deleted = bot.cards.delete_user(int(user.strip()))
+        log.info("bot 主人删掉了用户 %s 的人设卡（%d 张，旧版本 %d 个）", user.strip(), cards_deleted, versions_deleted)
+        if cards_deleted:
+            text = f"已删掉这个人的 {cards_deleted} 张人设卡（连同旧版本）。"
+        elif versions_deleted:
+            text = "这个人现在没有人设卡，已删掉留着的旧版本。"
+        else:
+            text = "这个人没有人设卡。"
+        await _reply(interaction, text + "\n之后整理聊天时，也不会拿删掉之前的聊天把卡重新写回来。")
 
     bot.tree.add_command(owner, guild=discord.Object(id=bot.secrets.control_guild_id))

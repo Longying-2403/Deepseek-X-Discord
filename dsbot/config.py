@@ -45,6 +45,8 @@ _SPEC_LIST = [
     Spec("persona", "人设", str, "admin", "人设描述，留空用默认人设"),
     Spec("share_memory", "记忆共享", bool, "admin", "和别的也开了共享的频道互通记忆（私密频道要单独开才会分享出去）"),
     Spec("images", "发图", bool, "admin", "让它自己发表情包库里的图，或者上网找图（找到的图它会先看一遍再决定发不发）"),
+    Spec("cards", "人设卡", bool, "admin", "记住群友自己说的称呼、设定、喜好，聊天时用上（群友用 /ds-rp 管自己的卡，管理员看不到）"),
+    Spec("long_memory", "长期记忆", bool, "admin", "记住这个服务器的约定、大事、长期的梗和剧情（用 /ds 长期记忆 管理）"),
     # —— 主人 ——
     Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
@@ -77,6 +79,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "persona": "",
     "share_memory": False,
     "images": True,
+    "cards": True,
+    "long_memory": True,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -186,6 +190,8 @@ class BotConfig:
     tick_seconds: float = 5.0
     meme_dir: str = "data/表情包"  # 通用表情包库：自己在 NAS 上建这个文件夹放图
     server_meme_dir: str = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的
+    cards_database: str = "data/cards.sqlite3"  # 人设卡（和聊天记录分开存，方便备份、搬家）
+    memory_database: str = "data/memory.sqlite3"  # 长期记忆
 
 
 @dataclass
@@ -225,6 +231,14 @@ class EngineConfig:
     image_candidates: int = 4  # 上网找图时给它看几张候选
     image_max_bytes: int = 8_000_000  # 发出去的图最大多少（Discord 默认上传上限 10 MB）
     meme_list_limit: int = 80  # 告诉它表情包库里有哪些图，最多列多少个
+    card_max_chars: int = 1600  # 一张人设卡最多多少字
+    cards_per_round: int = 6  # 一轮最多附几个人的人设卡
+    card_list_limit: int = 100  # 告诉它哪些人有人设卡，最多列多少个名字
+    memory_max_entries: int = 50  # 每个服务器的长期记忆最多几条
+    memory_entry_chars: int = 200  # 每条长期记忆最多多少字
+    review_idle_seconds: float = 600  # 频道安静这么久、又攒了几轮新聊天，就整理一次记忆
+    review_min_rounds: int = 3  # 至少攒了几轮新聊天才整理
+    review_max_chars: int = 16000  # 整理记忆时一次给它看多少字的聊天记录（更长的分几次）
 
 
 @dataclass
@@ -234,14 +248,17 @@ class AppConfig:
     bot: BotConfig = field(default_factory=BotConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     defaults: dict[str, Any] = field(default_factory=lambda: dict(BUILTIN_DEFAULTS))
+    # 不认识的配置项（拼错了，或者 config.toml 比代码新）：跳过并在日志里提醒，不让 bot 因此起不来
+    unknown: list[str] = field(default_factory=list)
 
 
-def _fill(cls: type, data: dict[str, Any], section: str) -> Any:
+def _fill(cls: type, data: dict[str, Any], section: str, unknown: list[str]) -> Any:
     known = {f.name: f for f in fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
         if key not in known:
-            raise ValueError(f"config.toml [{section}] 里有未知的配置项：{key}")
+            unknown.append(f"[{section}] {key}")
+            continue
         kwargs[key] = value
     return cls(**kwargs)
 
@@ -253,25 +270,40 @@ def load_config(path: str | Path | None) -> AppConfig:
             data = tomllib.load(fh)
 
     cfg = AppConfig()
+    unknown = cfg.unknown
     if "deepseek" in data:
-        cfg.deepseek = _fill(DeepSeekConfig, data["deepseek"], "deepseek")
+        cfg.deepseek = _fill(DeepSeekConfig, data["deepseek"], "deepseek", unknown)
     if "bot" in data:
-        cfg.bot = _fill(BotConfig, data["bot"], "bot")
+        cfg.bot = _fill(BotConfig, data["bot"], "bot", unknown)
     if "engine" in data:
-        cfg.engine = _fill(EngineConfig, data["engine"], "engine")
+        cfg.engine = _fill(EngineConfig, data["engine"], "engine", unknown)
     if "pricing" in data:
         p = dict(data["pricing"])
         if "peak_hours_utc" in p:
             p["peak_hours_utc"] = tuple(tuple(int(x) for x in pair) for pair in p["peak_hours_utc"])
-        cfg.pricing = _fill(Pricing, p, "pricing")
+        cfg.pricing = _fill(Pricing, p, "pricing", unknown)
 
     defaults = dict(BUILTIN_DEFAULTS)
     for key, raw in (data.get("defaults") or {}).items():
         if key not in SPECS:
-            raise ValueError(f"config.toml [defaults] 里有未知的参数：{key}")
-        defaults[key] = parse_value(SPECS[key], raw)
+            unknown.append(f"[defaults] {key}")
+            continue
+        defaults[key] = parse_value(SPECS[key], raw)  # 认识的参数填错了值还是要报错
     cfg.defaults = defaults
+    for section in data:
+        if section not in ("deepseek", "bot", "engine", "pricing", "defaults"):
+            unknown.append(f"[{section}]")
     return cfg
+
+
+def unknown_note(cfg: AppConfig) -> str | None:
+    """给日志和自检看的提醒。"""
+    if not cfg.unknown:
+        return None
+    return (
+        "config.toml 里有不认识的配置项，已跳过：" + "、".join(cfg.unknown)
+        + "（拼错了？或者 config.toml 比代码新：换了新版要重新构建）"
+    )
 
 
 # ---------------------------------------------------------------------------

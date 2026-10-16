@@ -20,6 +20,8 @@ log_level = "INFO"
 tick_seconds = 5                  # 多久检查一次各频道要不要主动判断
 meme_dir = "data/表情包"           # 通用表情包库：在 NAS 上自己建这个文件夹、放图，文件名就是名字（所有服务器都能用）
 server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的（bot 自己管）
+cards_database = "data/cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
+memory_database = "data/memory.sqlite3"   # 长期记忆
 
 [pricing]
 # 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
@@ -44,6 +46,8 @@ aliases = ""                      # 别名，逗号分隔；消息里出现也�
 persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
 share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
 images = true                     # 让它自己发表情包库里的图、上网找图（找到的图它会先看一遍再决定发不发）
+cards = true                      # 人设卡：记住群友自己说的称呼、设定、喜好（群友用 /ds-rp 管自己的卡，管理员看不到）
+long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/ds 长期记忆 管理）
 
 # —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
@@ -96,3 +100,11 @@ image_cooldown_seconds = 600      # 同一个频道两次上网找图至少隔 1
 image_candidates = 4              # 上网找图时给它看几张候选
 image_max_bytes = 8000000         # 发出去的图最大 8 MB（Discord 默认上传上限 10 MB）
 meme_list_limit = 80              # 告诉它表情包库里有哪些图，最多列多少个
+card_max_chars = 1600             # 一张人设卡最多多少字
+cards_per_round = 6               # 一轮最多附几个人的人设卡
+card_list_limit = 100             # 告诉它哪些人有人设卡，最多列多少个名字
+memory_max_entries = 50           # 每个服务器的长期记忆最多几条
+memory_entry_chars = 200          # 每条长期记忆最多多少字
+review_idle_seconds = 600         # 频道安静 10 分钟、又攒了几轮新聊天，就整理一次记忆
+review_min_rounds = 3             # 至少攒了几轮新聊天才整理
+review_max_chars = 16000          # 整理记忆时一次给它看多少字的聊天（更长的分几次）

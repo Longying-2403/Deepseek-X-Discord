@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     guild_id INTEGER NOT NULL,
     summary TEXT,
     next_short_id INTEGER NOT NULL DEFAULT 1,
-    updated_at REAL
+    updated_at REAL,
+    reviewed_upto INTEGER NOT NULL DEFAULT 0  -- 整理记忆（人设卡、长期记忆）整理到哪条记录了
 );
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +41,8 @@ CREATE TABLE IF NOT EXISTS msgmap (
     channel_id INTEGER NOT NULL,
     short_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
+    author_id INTEGER,            -- 发这条消息的人（整理记忆时知道 #12 是谁说的）；bot 发的是 NULL
+    author_name TEXT,
     PRIMARY KEY (channel_id, short_id)
 );
 CREATE TABLE IF NOT EXISTS usage (
@@ -72,6 +75,37 @@ CREATE TABLE IF NOT EXISTS persona_history (
 """
 
 MSGMAP_KEEP = 3000  # 每个频道保留最近多少个消息编号的映射
+# 旧版本的数据库缺的列：启动时自动补上，原有数据不动
+_MIGRATIONS = (
+    ("msgmap", "author_id", "INTEGER"),
+    ("msgmap", "author_name", "TEXT"),
+    ("conversations", "reviewed_upto", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def open_private_db(path: str, schema: str) -> sqlite3.Connection:
+    """打开（或新建）一个只给 bot 自己读写的 SQLite 数据库：聊天记录、人设卡、长期记忆都是这样存的。"""
+    if path != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    if path != ":memory:":
+        db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.executescript(schema)
+    db.commit()
+    if path != ":memory:":
+        make_private(path)
+    return db
+
+
+def make_private(path: str) -> None:
+    """只让 bot 自己读写（NAS 上别的账号看不到）。尽力而为。"""
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except OSError:
+            pass
 
 
 @dataclass
@@ -79,6 +113,7 @@ class Turn:
     id: int
     role: str
     content: Any  # str 或 list[dict]
+    created_at: float = 0.0
 
 
 @dataclass
@@ -88,6 +123,7 @@ class Conversation:
     summary: str | None = None
     next_short_id: int = 1
     turns: list[Turn] = field(default_factory=list)
+    reviewed_upto: int = 0  # 整理记忆整理到哪条记录了（记录的 id）
 
 
 def _dump(value: Any) -> str:
@@ -97,27 +133,27 @@ def _dump(value: Any) -> str:
 class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
-        self.db.row_factory = sqlite3.Row
-        if self.path != ":memory:":
-            self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=NORMAL")
-        self.db.executescript(SCHEMA)
+        # 聊天记录和读过的文件内容都在数据库里：只让 bot 自己读写
+        self.db = open_private_db(self.path, "")
+        self.db.executescript(SCHEMA)  # 没有的表按新的格式建；已经有的表下面补上缺的列
+        self._migrate()
         # 上次运行到一半就停了（断电、强制关闭）的调用：不会再有结果了
         self.db.execute("UPDATE usage SET outcome = 'error' WHERE outcome = 'pending'")
         self.db.commit()
-        if self.path != ":memory:":
-            self._make_private()
 
-    def _make_private(self) -> None:
-        """聊天记录和读过的文件内容都在数据库里：只让 bot 自己读写（NAS 上别的账号看不到）。尽力而为。"""
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                os.chmod(self.path + suffix, 0o600)
-            except OSError:
-                pass
+    def _migrate(self) -> None:
+        """旧版本建的表少几列：补上（新建的表直接按 SCHEMA 建，已经有这些列）。"""
+        for table, column, decl in _MIGRATIONS:
+            cols = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if cols and column not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                if column == "reviewed_upto":
+                    # 升级前的聊天不回头整理（那时候没记是谁说的，一下子整理一大堆也费钱）：从现在开始整理
+                    self.db.execute(
+                        "UPDATE conversations SET reviewed_upto = "
+                        "(SELECT COALESCE(MAX(id), 0) FROM turns WHERE turns.channel_id = conversations.channel_id)"
+                    )
+        self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -142,16 +178,17 @@ class Store:
     # ---- 对话 ----
     def load_conversation(self, channel_id: int, guild_id: int) -> Conversation:
         row = self.db.execute(
-            "SELECT guild_id, summary, next_short_id FROM conversations WHERE channel_id = ?", (channel_id,)
+            "SELECT guild_id, summary, next_short_id, reviewed_upto FROM conversations WHERE channel_id = ?", (channel_id,)
         ).fetchone()
         conv = Conversation(channel_id=channel_id, guild_id=guild_id)
         if row is not None:
             conv.summary = row["summary"]
             conv.next_short_id = row["next_short_id"]
+            conv.reviewed_upto = row["reviewed_upto"] or 0
         for r in self.db.execute(
-            "SELECT id, role, content FROM turns WHERE channel_id = ? ORDER BY id", (channel_id,)
+            "SELECT id, role, content, created_at FROM turns WHERE channel_id = ? ORDER BY id", (channel_id,)
         ):
-            conv.turns.append(Turn(r["id"], r["role"], json.loads(r["content"])))
+            conv.turns.append(Turn(r["id"], r["role"], json.loads(r["content"]), r["created_at"] or 0.0))
         return conv
 
     def load_msgmap(self, channel_id: int) -> dict[int, int]:
@@ -162,15 +199,43 @@ class Store:
         ).fetchall()
         return {r["short_id"]: r["message_id"] for r in rows}
 
+    def load_authors(self, channel_id: int, short_ids: Iterable[int]) -> dict[int, tuple[int, str]]:
+        """消息编号 -> (发消息的人, 当时的名字)。bot 发的、旧版本记下的（没记作者）不在里面。"""
+        ids = sorted(set(short_ids))
+        out: dict[int, tuple[int, str]] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            marks = ",".join("?" for _ in chunk)
+            for r in self.db.execute(
+                f"SELECT short_id, author_id, author_name FROM msgmap WHERE channel_id = ? AND short_id IN ({marks}) "
+                "AND author_id IS NOT NULL",
+                (channel_id, *chunk),
+            ):
+                out[r["short_id"]] = (r["author_id"], r["author_name"] or "")
+        return out
+
+    def set_reviewed(self, conv: Conversation, turn_id: int) -> None:
+        """整理记忆整理到了哪条记录（只往前走，不会退回去）。"""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at, reviewed_upto) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (channel_id) DO UPDATE SET "
+                "reviewed_upto = MAX(conversations.reviewed_upto, excluded.reviewed_upto)",
+                (conv.channel_id, conv.guild_id, conv.summary, conv.next_short_id, time.time(), turn_id),
+            )
+        conv.reviewed_upto = max(conv.reviewed_upto, turn_id)
+
     def append_round(
         self,
         conv: Conversation,
         user_content: Any,
         assistant_content: str,
-        assigned: Iterable[tuple[int, int]],
+        assigned: Iterable[tuple[Any, ...]],
         now: float | None = None,
     ) -> None:
-        """追加一轮（user + assistant）。conv.turns 和 conv.next_short_id 同步更新。"""
+        """追加一轮（user + assistant）。conv.turns 和 conv.next_short_id 同步更新。
+
+        assigned：这一轮新编的号，(编号, 消息 id) 或 (编号, 消息 id, 发消息的人, 名字)（bot 发的人填 None）。"""
         now = time.time() if now is None else now
         with self.db:
             cur = self.db.execute(
@@ -183,9 +248,14 @@ class Store:
                 (conv.channel_id, _dump(assistant_content), now),
             )
             assistant_id = cur.lastrowid
+            rows = []
+            for item in assigned:
+                sid, mid, *who = item
+                author, name = (who + [None, None])[:2]
+                rows.append((conv.channel_id, sid, mid, author, name))
             self.db.executemany(
-                "INSERT OR REPLACE INTO msgmap (channel_id, short_id, message_id) VALUES (?, ?, ?)",
-                [(conv.channel_id, sid, mid) for sid, mid in assigned],
+                "INSERT OR REPLACE INTO msgmap (channel_id, short_id, message_id, author_id, author_name) VALUES (?, ?, ?, ?, ?)",
+                rows,
             )
             self.db.execute(
                 "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at) "
@@ -198,8 +268,8 @@ class Store:
                 (conv.channel_id, conv.next_short_id - MSGMAP_KEEP),
             )
         # JSON 往返一次，保证内存里的内容和以后从库里读出来的完全一致
-        conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content))))
-        conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content))))
+        conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content)), now))
+        conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content)), now))
 
     def compact(self, conv: Conversation, summary: str, remove_count: int) -> None:
         """用摘要替换最早的 remove_count 条 turn。"""
