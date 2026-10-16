@@ -121,7 +121,7 @@ class IncomingMessage:
     received_at: float = 0.0
     trigger: bool = False  # 引擎设置：这条点名通过了限速，需要立刻回应
     awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
-    from_owner: bool = False  # 引擎设置：发言的是 OWNER_ID（dsowner）本人
+    from_owner: bool = False  # 引擎设置：发言的是 OWNER_ID（xai-owner）本人
 
     @property
     def addressed(self) -> bool:
@@ -210,8 +210,10 @@ class Usage:
     prompt_tokens: int = 0
     hit: int = 0
     miss: int = 0
-    output: int = 0
+    output: int = 0  # 按输出价计费的 token（含推理）
     reasoning: int = 0
+    cost_usd: float | None = None  # xAI 直接给出的这次的实际花费（cost_in_usd_ticks）；没有时按 [pricing] 估
+    web_searches: int = 0  # 联网搜索时 xAI 那边实际搜了几次（每次另外收费）
 
 
 @dataclass

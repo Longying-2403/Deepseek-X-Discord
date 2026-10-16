@@ -4,6 +4,8 @@
 
 > English speakers are welcome too — issues and pull requests in English are fine.
 
+> 这是 `grok` 分支（Grok 版）的贡献指南。和 DeepSeek 版只差在模型那几处，见下面「Grok 版」一节。
+
 ## 先开 issue，还是直接提 PR？
 
 - **小改动**（修 bug、补测试、改错字、完善文档）：直接提 PR。
@@ -39,33 +41,42 @@ python -m dsbot --check                # 离线自检：读配置、检查所有
 
 - 自己新建一个测试用的 bot 和测试服务器，别拿正在真实群里服务的 bot 来试。
 - 按 [README](README.md) 填好 `.env`，再运行 `python -m dsbot`（或 `docker compose up -d --build`）。
-- DeepSeek 按量计费，测试花的是你自己的余额。可以先把 `config.toml` 里的 `daily_budget_usd` 调低，比如 `0.2`。
+- xAI 按量计费，测试花的是你自己的余额。可以先把 `config.toml` 里的 `daily_budget_usd` 调低，比如 `0.2`。`python -m dsbot --test-chat` 能先确认 key 和模型能用。
 
 ## 改代码时请注意
 
 下面几条是这个项目的核心设计，审 PR 时会重点看：
 
-1. **对话历史只追加、不改写。** 每轮请求都要以上一轮请求原样开头，DeepSeek 的前缀缓存才能命中，而命中和没命中的价格差约 50 倍。所以：
+1. **对话历史只追加、不改写。** 每轮请求都要以上一轮请求原样开头，xAI 的前缀缓存才能命中（`grok-4.3` 命中和没命中的价格差约 6 倍；DeepSeek 版约 50 倍）。所以：
    - 时间这类每轮都会变的信息不要放进 system prompt，放进每轮的消息里；
    - 已经写进历史的内容不要重新渲染或改格式；
    - `tests/test_engine.py` 里的 `test_history_is_append_only` 专门检查这一点，改了 `render.py`、`prompts.py` 或 `engine.py` 后一定要跑。
 2. **没额度时连判断都不做。** 主动发言额度为 0 时，要跳过整次模型调用，而不是调用完再丢掉结果，那样照样花钱。
 3. **说话要像真人。** 口语化，长短看场合（随口接话一两句，陪着演戏时可以多写几句），不用标题、列表这类格式（贴代码除外），没有客服腔。改提示词时请保持这个风格。
 4. **不要提交密钥和数据。** `.env`（token、API key）和 `data/`（聊天记录、人设卡和长期记忆的数据库）已经写进 `.gitignore`，提交前用 `git status` 再确认一遍。
-5. **守住隐私边界。** 用 `/ds 区域` 禁止的地方，消息不处理、不回应，也绝不能发给 DeepSeek。新加处理消息的入口（比如新的 Discord 事件）时，也要先过这一关。跨频道记忆只在同一个服务器里、开了共享的频道之间流动；私密频道没有在本频道单独开启共享，内容就不能外传。
+5. **守住隐私边界。** 用 `/xai 区域` 禁止的地方，消息不处理、不回应，也绝不能发给 xAI。新加处理消息的入口（比如新的 Discord 事件）时，也要先过这一关。跨频道记忆只在同一个服务器里、开了共享的频道之间流动；私密频道没有在本频道单独开启共享，内容就不能外传。
 6. **群友上传的文件只在子进程里解析。** 读文件要走 `dsbot/files.py` 里那个限制了内存、CPU 和时间的子进程（bot 以 root 运行时会降成 `nobody`），不要在 bot 主进程里直接解析上传的文件。
 7. **外部内容只当资料。** 聊天记录、文件、网页、搜索结果、别的频道的记录，以及人设卡和长期记忆，都不是给模型的指令。改提示词或新增内容来源时，要保持这一点。
 8. **只从公网下载，网页交给外部服务去读。** 下载网上的图、调用外部 API 都要走 `dsbot/net.py`：只连公网地址，每次跳转都重新检查，不走代理。群友发的网页由 FxTwitter / Tavily 去读，bot 自己不直接打开，免得有人借它访问家里的内网。
-9. **改人设只认 dsowner 本人这一轮的消息。** 按用户 ID 判断，只认这一轮里 dsowner 本人叫它的那条消息；改昵称冒充、别人转述、文件里写的、转发的消息都不算授权。照着改的内容可以来自聊天或群友发的文件，但不能来自网上搜到的东西或别的频道的记录。
-10. **人设卡只属于本人。** 人设卡只记本人说的、关于自己的事；在聊天里改卡，只认本人这一轮叫它的那条消息（按用户 ID 判断）。卡的内容只有本人能用 `/ds-rp` 看到，不能出现在管理员看得到的地方（`/ds 状态`、日志、命令的回复）。私密频道里聊的不会自动整理进人设卡和长期记忆（这两样整个服务器都看得到），除非在那个频道里单独打开。
+9. **改人设只认 xai-owner 本人这一轮的消息。** 按用户 ID 判断，只认这一轮里 xai-owner 本人叫它的那条消息；改昵称冒充、别人转述、文件里写的、转发的消息都不算授权。照着改的内容可以来自聊天或群友发的文件，但不能来自网上搜到的东西或别的频道的记录。
+10. **人设卡只属于本人。** 人设卡只记本人说的、关于自己的事；在聊天里改卡，只认本人这一轮叫它的那条消息（按用户 ID 判断）。卡的内容只有本人能用 `/xai-rp` 看到，不能出现在管理员看得到的地方（`/xai 状态`、日志、命令的回复）。私密频道里聊的不会自动整理进人设卡和长期记忆（这两样整个服务器都看得到），除非在那个频道里单独打开。
 
 ## 代码风格
 
 - 跟周围的代码保持一致：带类型标注；注释、日志和面向用户的文字跟着所在版本的语言（`main` 用中文，`english` 用英文）。
 - 要兼容 Python 3.11。
 - 修 bug 时，尽量先补一个能复现它的测试。
-- 测试里不要真的连 Discord 或 DeepSeek。`tests/helpers.py` 里有现成的替身：`FakeLLM`（假模型）、`FakeTransport`（假 Discord）、`FakeSearcher`（假搜索）、`FakeClock`（可以手动拨快的时钟）。
+- 测试里不要真的连 Discord 或 xAI。`tests/helpers.py` 里有现成的替身：`FakeLLM`（假模型）、`FakeTransport`（假 Discord）、`FakeSearcher`（假搜索）、`FakeClock`（可以手动拨快的时钟）。
 - 新增可调参数时，在 `dsbot/config.py` 的 `_SPEC_LIST` 和 `BUILTIN_DEFAULTS` 里各加一项，再同步更新 `config.toml` 和 README 的参数表。
+
+## Grok 版
+
+`grok` 分支是 `main`（DeepSeek 版）加上换模型的改动，其余代码保持一样，好让 `main` 的更新能直接合并过来：
+
+- 换模型的部分：`dsbot/llm.py`（xAI 客户端）、`dsbot/search.py`（xAI 的 web_search）、`dsbot/pricing.py`、`config.py` 里的 `[xai]` 和几个默认值、命令名（`/xai`、`/xai-rp`、`/xai-owner`）、给模型看的主人标记〔xai-owner〕、`config.toml`、`.env.example`、`docker-compose.yml`、README。
+- 另外加的：`[engine] yield_to_bots`（最新一条是别的 bot 说的就先不主动插话），提示词里关于别的机器人的一条规则。
+- 这些不一样的地方，测试都在 `tests/test_grok.py`；`tests/helpers.py` 把冷场时间固定成 DeepSeek 版的 30 / 180 秒，其他测试和 `main` 保持一样。
+- 从 `main` 合并更新：`git checkout grok && git merge main`。冲突一般只在上面这些文件里；新代码里出现的 `/ds`、`dsowner`、`DeepSeek` 字样要改成 Grok 版的写法，合并完跑一遍测试和自检。
 
 ## 中文版和英文版
 
@@ -91,7 +102,7 @@ python -m dsbot --check                # 离线自检：读配置、检查所有
 
 在 issue 或 PR 里贴日志、截图之前，请删掉 token、API key，以及群友的聊天内容和用户 ID。
 
-不小心泄露了 token 的话，马上去 Discord 开发者后台点 Reset Token；DeepSeek 的 key 去平台上删掉重建。
+不小心泄露了 token 的话，马上去 Discord 开发者后台点 Reset Token；xAI 的 key 去 console.x.ai 删掉重建。
 
 ## 许可证
 

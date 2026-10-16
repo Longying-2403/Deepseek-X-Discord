@@ -5,7 +5,7 @@
 - 主动：频道开了主动发言，并且 有新消息 + (冷场 或 等太久) + 有额度 + 间隔够长 + 没超预算 时跑一轮。
 
 每一轮固定往历史里追加 user（这批新消息）+ assistant（模型原样输出），从不改写旧内容，
-所以下一轮的请求总是以上一轮的请求 + 输出开头，最大化 DeepSeek 的前缀缓存命中。
+所以下一轮的请求总是以上一轮的请求 + 输出开头，最大化 xAI 的前缀缓存命中。
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ _SID_LINE = re.compile(r"^#(\d{1,9}) ")
 SEND_KINDS = ("sticker", "meme", "pick")  # 发出去的是一张图：和说话一样算“开口了”
 RECENT_LINKS_KEEP = 30  # 每个频道记住最近多少条带链接的消息（模型可以用 read 要求打开）
 MAX_RECALLS = 2
-OWNER_EXTRA_TOKENS = 4000  # dsowner 叫它的那一轮：可能要整段重写人设（最多 4000 字），输出上限多给一些
+OWNER_EXTRA_TOKENS = 4000  # xai-owner 叫它的那一轮：可能要整段重写人设（最多 4000 字），输出上限多给一些
 MAX_OUTPUT_CAP = 8000
 INTERACTIONS_PER_PERSON = 3  # 每个人记住最近几次跟它的对话（跨频道带近况用）
 
@@ -466,7 +466,7 @@ class Engine:
         self.link_reader = link_reader  # 打开链接（推文走 FxTwitter，网页走 Tavily）
         self.pictures = pictures  # 上网找图（要 Tavily）
         self.memes = memes  # 表情包库
-        self.owner_id = owner_id  # OWNER_ID：聊天记录里标〔dsowner〕，只有他能在聊天里改人设
+        self.owner_id = owner_id  # OWNER_ID：聊天记录里标〔xai-owner〕，只有他能在聊天里改人设
         self.ec = cfg.engine
         self.settings = settings
         self.store = store
@@ -678,6 +678,10 @@ class Engine:
         if now - st.last_eval_at < view.min_eval_interval:
             return False
         if self._over_budget(st, view, now)[0]:
+            return False
+        if self.ec.yield_to_bots and st.pending and st.pending[-1].is_bot:
+            # 最新的一条是别的 bot 说的（比如同一个频道里的 DeepSeek 版刚接过话）：先不插嘴，等有人再说话。
+            # 不然两个 bot 会抢着回同一件事；也省一次调用
             return False
         quiet = now - st.last_activity_at >= view.quiet_seconds
         waited = now - st.first_human_at >= view.max_wait_seconds
@@ -1655,7 +1659,7 @@ class Engine:
         if len(text) > self.ec.card_max_chars:
             log.info("频道 %s：%s 的新人设卡太长（%d 字，最多 %d），没改", st.channel_id, m.author_name, len(text), self.ec.card_max_chars)
             return None
-        # 它是照着对话里附着的那份改的：那份在这期间被本人改了、删了（/ds-rp、bot 主人删卡），就不写
+        # 它是照着对话里附着的那份改的：那份在这期间被本人改了、删了（/xai-rp、bot 主人删卡），就不写
         seen = st.cards_shown.get(m.author_id)
         expect = seen[1] if seen is not None else None
         current = self.cards.get(st.guild_id, m.author_id)
@@ -1711,7 +1715,7 @@ class Engine:
         if st.reviewing or st.scheduled or st.lock.locked():
             return False
         if st.unreviewed_rounds < max(1, self.ec.review_min_rounds) or now < self.paused_until:
-            return False  # 没攒够；或者 DeepSeek 暂停中（余额不足、key 不对）
+            return False  # 没攒够；或者 xAI 暂停中（余额不足、key 不对）
         wait = self.ec.review_idle_seconds * (2 ** min(st.review_failures, 5))
         if now - st.last_review_at < wait:
             return False  # 上次刚整理过（或者刚失败过）
@@ -2151,7 +2155,7 @@ class Engine:
         return origin[0], origin[1], where
 
     def _inherited_persona(self, st: ChannelState, scope: str, scope_id: int) -> str:
-        """这一级不单独设置时会用的人设（和 /ds 人设 的“上一级”一致）。"""
+        """这一级不单独设置时会用的人设（和 /xai 人设 的“上一级”一致）。"""
         if scope == "guild":
             value = self.settings.get("persona")
         elif scope == "category":
@@ -2165,18 +2169,18 @@ class Engine:
     async def _persona_section(
         self, st: ChannelState, action: Action, numbered: list[tuple[int, IncomingMessage]], targets: list[int]
     ) -> str:
-        """改人设：只认这一轮里 dsowner 本人叫它的那条消息。改完（或没改成）的结果告诉模型，它再回话。"""
+        """改人设：只认这一轮里 xai-owner 本人叫它的那条消息。改完（或没改成）的结果告诉模型，它再回话。"""
         by_sid = dict(numbered)
         to = action.to
         if to is None:
-            # 没写是哪条：这一轮 dsowner 只叫了它一次，就是那条
+            # 没写是哪条：这一轮 xai-owner 只叫了它一次，就是那条
             owners = [sid for sid in targets if sid in by_sid and self._is_owner(by_sid[sid]) and by_sid[sid].addressed]
             if len(owners) != 1:
                 return PERSONA_NO_ASKER
             to = owners[0]
         asker = by_sid.get(to)
         if asker is None or to not in targets or not self._is_owner(asker) or not asker.addressed:
-            log.warning("频道 %s：有人想让它改人设，但 #%s 不是 dsowner 这一轮叫它的消息，没改", st.channel_id, to)
+            log.warning("频道 %s：有人想让它改人设，但 #%s 不是 xai-owner 这一轮叫它的消息，没改", st.channel_id, to)
             return PERSONA_NOT_OWNER.format(to=to)
 
         if action.undo:
@@ -2233,7 +2237,7 @@ class Engine:
             request=one_line(asker.text, 300),
         )
         log.info(
-            "频道 %s：dsowner 在聊天里%s人设（%s）。要求：%s\n  原来：%s\n  现在：%s",
+            "频道 %s：xai-owner 在聊天里%s人设（%s）。要求：%s\n  原来：%s\n  现在：%s",
             st.channel_id,
             "撤销了上一次修改的" if action.undo else "改了",
             where,
@@ -2241,7 +2245,7 @@ class Engine:
             old if old else "（没单独设置，沿用上一级）",
             restored if restored else "（不单独设置，沿用上一级）",
         )
-        await self._safe_react(st, asker.message_id, "📝")  # 让 dsowner 一眼看到人设真的改了
+        await self._safe_react(st, asker.message_id, "📝")  # 让 xai-owner 一眼看到人设真的改了
         return note
 
     def _recall_section(self, st: ChannelState, view: View, action: Action, info: ChannelInfo) -> str:
@@ -2547,19 +2551,23 @@ class Engine:
         conv: Conversation,
         info: ChannelInfo,
     ) -> None:
-        log.warning("频道 %s：DeepSeek 调用失败：%s", st.channel_id, exc)
+        log.warning("频道 %s：xAI 调用失败：%s", st.channel_id, exc)
         st.last_eval_at = now
         for m in batch:
             m.trigger = False  # 只清这一批的点名；调用期间新来的点名照常处理
         if exc.status == 402:
             self.paused_until = now + 600
-            log.error("DeepSeek 余额不足，暂停 10 分钟。请到 platform.deepseek.com 充值。")
+            log.error("xAI 账户没钱了（余额用完，或者到了自己设的花费上限），暂停 10 分钟。请到 console.x.ai 充值或调高上限。")
         elif exc.status == 401:
             self.paused_until = now + 3600
-            log.error("DeepSeek API key 无效，暂停 1 小时。请检查 .env 里的 DEEPSEEK_API_KEY。")
+            log.error("xAI API key 无效，暂停 1 小时。请检查 .env 里的 XAI_API_KEY（改完要重建容器）。")
+        elif exc.status in (403, 404):
+            # 每一次请求都会一样失败：多半是模型名写错了，或者这个 key 没有权限用这个模型
+            self.paused_until = now + 3600
+            log.error("xAI 拒绝了请求（%s），暂停 1 小时。检查 config.toml 里 [xai] 的 model，以及这个 API key 能用哪些模型。", exc)
         elif exc.status in BAD_REQUEST:
             # 这批消息本身被拒（比如内容审核）：丢掉它，别卡住整个频道
-            log.error("频道 %s：这批消息被 DeepSeek 拒绝，已丢弃：%s", st.channel_id, exc)
+            log.error("频道 %s：这批消息被 xAI 拒绝，已丢弃：%s", st.channel_id, exc)
             self._consume(st, batch, now)
             text = str(exc).lower()
             too_big = exc.status == 413 or any(word in text for word in ("context", "length", "token", "too large", "too many"))

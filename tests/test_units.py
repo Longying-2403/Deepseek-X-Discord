@@ -8,9 +8,7 @@ from helpers import T0, msg
 
 from dsbot.actions import dump_actions, parse_actions
 from dsbot.config import PRESETS, SPECS, load_config, load_secrets, parse_value
-from dsbot.llm import build_payload, parse_completion
 from dsbot.models import ImageAttachment, Usage
-from dsbot.pricing import Pricing
 from dsbot.prompts import build_system_prompt
 from dsbot.quota import QuotaBucket, SlidingWindow, TurnTracker
 from dsbot.render import assistant_text, render_round
@@ -95,21 +93,7 @@ class Actions(unittest.TestCase):
         self.assertEqual(parse_actions(dump_actions(actions))[0], actions)
 
 
-class PricingTest(unittest.TestCase):
-    def test_peak_detection(self):
-        p = Pricing()
-        tuesday_0230 = 1_791_253_800.0  # 2026-10-06 周二 02:30 UTC
-        self.assertTrue(p.is_peak(tuesday_0230))
-        self.assertFalse(p.is_peak(tuesday_0230 + 3 * 3600))  # 05:30
-        self.assertFalse(p.is_peak(tuesday_0230 + 5 * 86400))  # 周日
-
-    def test_cost(self):
-        p = Pricing()
-        usage = Usage(prompt_tokens=30000, hit=28500, miss=1500, output=300)
-        tuesday_0230 = 1_791_253_800.0
-        peak = p.cost(usage, tuesday_0230)
-        self.assertAlmostEqual(peak, (28500 * 0.006 + 1500 * 0.3 + 300 * 1.2) / 1e6)
-        self.assertAlmostEqual(p.cost(usage, tuesday_0230 + 5 * 86400), peak / 2)
+# 价格和 xAI 客户端的测试在 test_grok.py（Grok 版和 DeepSeek 版不一样的部分都放在那里）
 
 
 class Quota(unittest.TestCase):
@@ -149,7 +133,7 @@ class Quota(unittest.TestCase):
 class ConfigAndSettings(unittest.TestCase):
     def test_shipped_config_parses(self):
         cfg = load_config(ROOT / "config.toml")
-        self.assertEqual(cfg.deepseek.model, "deepseek-flash")
+        self.assertEqual(cfg.xai.model, "grok-4.3")
         self.assertEqual(set(cfg.defaults), set(SPECS))
 
     def test_unknown_key_is_skipped_with_a_note(self):
@@ -203,7 +187,7 @@ class ConfigAndSettings(unittest.TestCase):
     def test_secrets(self):
         with self.assertRaises(SystemExit):
             load_secrets({"DISCORD_TOKEN": "x"})
-        s = load_secrets({"DISCORD_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "OWNER_ID": " 42 ", "CONTROL_GUILD_ID": ""})
+        s = load_secrets({"DISCORD_TOKEN": "t", "XAI_API_KEY": "k", "OWNER_ID": " 42 ", "CONTROL_GUILD_ID": ""})
         self.assertEqual((s.owner_id, s.control_guild_id), (42, None))
 
 
@@ -292,43 +276,6 @@ class Render(unittest.TestCase):
         self.assertIn("大家在聊考试", custom)
         # 固定规则在前：不同频道共享同一段前缀
         self.assertTrue(custom.startswith(text.split("## 你是谁")[0]))
-
-
-class LLMPayload(unittest.TestCase):
-    def test_thinking_off(self):
-        p = build_payload("deepseek-flash", [], thinking="off", json_mode=True, max_tokens=100, user_id="guild-1")
-        self.assertEqual(p["thinking"], {"type": "disabled"})
-        self.assertNotIn("reasoning_effort", p)
-        self.assertEqual(p["response_format"], {"type": "json_object"})
-        self.assertEqual((p["max_tokens"], p["user_id"]), (100, "guild-1"))
-
-    def test_thinking_low(self):
-        p = build_payload("deepseek-flash", [], thinking="low")
-        self.assertEqual((p["thinking"], p["reasoning_effort"]), ({"type": "enabled"}, "low"))
-        self.assertNotIn("response_format", p)
-
-    def test_parse_completion(self):
-        c = parse_completion(
-            {
-                "choices": [{"message": {"content": "{}", "reasoning_content": "嗯"}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": 1000,
-                    "prompt_cache_hit_tokens": 900,
-                    "prompt_cache_miss_tokens": 100,
-                    "completion_tokens": 50,
-                    "completion_tokens_details": {"reasoning_tokens": 20},
-                },
-            }
-        )
-        self.assertEqual((c.content, c.reasoning, c.finish_reason), ("{}", "嗯", "stop"))
-        self.assertEqual(c.usage, Usage(1000, 900, 100, 50, 20))
-
-    def test_parse_completion_minimal_usage(self):
-        c = parse_completion(
-            {"choices": [{"message": {"content": None}}], "usage": {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 4}}}
-        )
-        self.assertEqual((c.content, c.usage.hit, c.usage.miss), ("", 4, 6))
-
 
 
 class ReviewRegressions(unittest.TestCase):

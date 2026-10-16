@@ -1,64 +1,68 @@
-# DeepSeek 群友 —— 配置文件
+# Grok 群友（xAI 版）—— 配置文件
 # 这里是所有参数的默认值，改完重启生效。
-# 服务器管理员在 Discord 里用 /ds 改的设置会覆盖这里的默认值（存在数据库里）。
+# 服务器管理员在 Discord 里用 /xai 改的设置会覆盖这里的默认值（存在数据库里）。
 
-[deepseek]
-base_url = "https://api.deepseek.com"
-model = "deepseek-flash"          # V4.1 Flash
+[xai]
+base_url = "https://api.x.ai/v1"
+model = "grok-4.3"                # 推理能完全关掉，价格最低。grok-4.5 / 4.6 / 4.7 更强，但贵一倍多，推理也关不掉
 timeout_seconds = 90
 max_retries = 2                   # 429 / 5xx 时自动重试几次
-# 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search），留空 = base_url 后面加 /anthropic
-search_base_url = ""
-search_timeout_seconds = 60
-search_max_uses = 3               # 一次搜索里最多让它搜几轮
+# 联网搜索走 xAI 的 Responses API（自带 web_search 工具）
+search_model = ""                 # 留空 = 和 model 一样
+search_timeout_seconds = 90
+search_max_uses = 2               # 一次搜索里最多让它搜几轮（每搜一次 xAI 另收约 0.5 美分）
+search_effort = "low"             # 搜索时的推理强度：low / medium / high；留空 = 用模型默认的
 
 [bot]
 timezone = "Asia/Taipei"          # 每日预算按这个时区的自然日算；聊天记录里的时间也用它
-database = "data/dsbot.sqlite3"
+database = "data/xaibot.sqlite3"  # 文件名和 DeepSeek 版不一样：两个 bot 万一指到同一个 data 文件夹，数据也不会混
 sync_commands_on_start = true     # 启动时注册斜杠命令
 log_level = "INFO"
 tick_seconds = 5                  # 多久检查一次各频道要不要主动判断
 meme_dir = "data/表情包"           # 通用表情包库：在 NAS 上自己建这个文件夹、放图，文件名就是名字（所有服务器都能用）
-server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的（bot 自己管）
-cards_database = "data/cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
-memory_database = "data/memory.sqlite3"   # 长期记忆
+server_meme_dir = "data/服务器表情包"  # 各服务器用 /xai 表情包 上传的（bot 自己管）
+cards_database = "data/xai-cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
+memory_database = "data/xai-memory.sqlite3"   # 长期记忆
 
 [pricing]
-# 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
-# DeepSeek 调价时改这里：https://api-docs.deepseek.com/quick_start/pricing
-cache_hit = 0.006
-cache_miss = 0.30
-output = 1.20
-offpeak_factor = 0.5
-peak_hours_utc = [[1, 4], [6, 10]]  # 周一到周五，UTC
+# 美元 / 百万 token（grok-4.3）。xAI 每次都会告诉实际花了多少钱，有就直接用；没有时才按这里估。
+# 换模型、xAI 调价时改这里：https://docs.x.ai/developers/pricing
+# grok-4.5：cache_hit 0.30 / cache_miss 2.00 / output 6.00；grok-4.6、4.7：0.50 / 2.00 / 6.00
+cache_hit = 0.20
+cache_miss = 1.25
+output = 2.50                     # 推理 token 也按这个价
+long_context_tokens = 200000      # 一次请求的输入达到这么多 token，整次按 long_context_factor 倍算
+long_context_factor = 2.0
+web_search_per_1k = 5.0           # 联网搜索：每 1000 次 5 美元
 
 [defaults]
-# —— 管理员可以在 Discord 里用 /ds 改的 ——
-enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /ds 区域 允许 的地方回（白名单）
-proactive = false                 # 主动发言默认关，在需要的频道里用 /ds 主动 打开
+# —— 管理员可以在 Discord 里用 /xai 改的 ——
+enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /xai 区域 允许 的地方回（白名单）
+proactive = false                 # 主动发言默认关，在需要的频道里用 /xai 主动 打开
 refill_turns = 15                 # 别人每说 15 轮，恢复 1 次主动发言额度
 quota_capacity = 3                # 额度最多攒 3 次（热聊时最多连插 3 句）
 min_speak_gap = 120               # 两次发言至少隔 120 秒
-quiet_seconds = 30                # 30 秒没人说话、也没人在打字，算冷场
-max_wait_seconds = 180            # 一直没冷场的话，最多等 180 秒也判断一次
+quiet_seconds = 60                # 60 秒没人说话、也没人在打字，算冷场（别的 bot 说话不算）
+max_wait_seconds = 240            # 一直没冷场的话，最多等 240 秒也判断一次
+# 上面两项比 DeepSeek 版（30 / 180）长一点：两个 bot 在同一个频道时，它晚一点判断，能先看到对方说了什么
 mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
-aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
-persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
-share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
+aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "Grok,小G"（别和同一个服务器里别的 bot 重复）
+persona = ""                      # 留空 = 默认人设；建议用 /xai 人设 在 Discord 里改
+share_memory = false              # 跨频道记忆，默认关；用 /xai 记忆共享 打开（私密频道要单独开才会分享出去）
 images = true                     # 让它自己发表情包库里的图、上网找图（找到的图它会先看一遍再决定发不发）
-cards = true                      # 人设卡：记住群友自己说的称呼、设定、喜好（群友用 /ds-rp 管自己的卡，管理员看不到）
-long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/ds 长期记忆 管理）
+cards = true                      # 人设卡：记住群友自己说的称呼、设定、喜好（群友用 /xai-rp 管自己的卡，管理员看不到）
+long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/xai 长期记忆 管理）
 
-# —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
+# —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /xai-owner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
-proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
-mention_thinking = "off"          # 被叫到时思考强度：off 最快
+proactive_thinking = "low"        # 主动判断时的推理强度：off（不推理）/ low / medium / high
+mention_thinking = "off"          # 被叫到时的推理强度：off 最快（grok-4.5 及以后的型号关不掉推理，off 按 low 算）
 daily_budget_usd = 1.0            # 单个服务器每天最多花多少美元，超了只回点名；超过 2 倍连点名也不回
 global_daily_budget_usd = 3.0     # 所有服务器加起来的上限
 context_budget_tokens = 30000     # 上下文超过这么多 token，就把最早的一半压成摘要（最大 200000）
 vision = true                     # 是否把群里的图片发给模型
 files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
-web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 自带的搜索）
+web_search = true                 # 被叫到时，需要最新信息就上网搜（xAI 自带的搜索，每搜一次另收约 0.5 美分）
 daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
 links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页要填 TAVILY_API_KEY）
 daily_image_limit = 10            # 每个服务器每天最多上网找几次图（要 TAVILY_API_KEY；0 = 不找，表情包库照常能用）
@@ -82,8 +86,8 @@ react_cost = 0.3                  # 只加表情消耗多少额度
 typing_chars_per_second = 3.0     # “打字”速度
 typing_min_seconds = 2.0
 typing_max_seconds = 10.0
-max_output_tokens = 2000
-max_thinking_tokens = 6000
+max_output_tokens = 2000          # 输出上限（xAI 的上限只管看得见的输出，不含推理）
+max_thinking_tokens = 6000        # 开了推理时的输出上限
 hard_stop_multiplier = 2.0
 summary_max_chars = 600
 max_searches_per_round = 2        # 被叫到的一轮里最多搜几次
@@ -108,3 +112,4 @@ memory_entry_chars = 200          # 每条长期记忆最多多少字
 review_idle_seconds = 600         # 频道安静 10 分钟、又攒了几轮新聊天，就整理一次记忆
 review_min_rounds = 3             # 至少攒了几轮新聊天才整理
 review_max_chars = 16000          # 整理记忆时一次给它看多少字的聊天（更长的分几次）
+yield_to_bots = true              # 最新一条消息是别的 bot 发的（比如 DeepSeek 版刚接过话）：先不主动插话，等有人再说话

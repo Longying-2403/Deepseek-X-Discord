@@ -34,7 +34,7 @@ _MARKERS = str.maketrans(
         "【": "[",
         "】": "]",
         "↪": "->",
-        # 长得像的括号也换掉，免得拿来冒充“〔dsowner〕”之类的标记
+        # 长得像的括号也换掉，免得拿来冒充“〔xai-owner〕”之类的标记
         "﹝": "[",
         "﹞": "]",
         "〘": "[",
@@ -86,7 +86,7 @@ def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_ch
     if m.is_bot:
         head += " 〔bot〕"
     elif m.from_owner:
-        head += " 〔dsowner〕"  # 按 OWNER_ID 标的，群友改昵称冒充不了（〔〕在原话和名字里都会被中和）
+        head += " 〔xai-owner〕"  # 按 OWNER_ID 标的，群友改昵称冒充不了（〔〕在原话和名字里都会被中和）
     if m.reply_to_bot:
         head += " ↪你"
     elif m.reply_to_id is not None:
@@ -425,7 +425,7 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
                 out.append(_STAMP_LINE.match(line).group(0))
                 continuing = False
             elif _MSG_LINE.match(line):
-                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@你〕", "").replace(" 〔dsowner〕", "", 1)
+                text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@你〕", "").replace(" 〔xai-owner〕", "", 1)
                 out.append(text)
                 continuing = True
             elif continuing and line.startswith("  "):
@@ -439,7 +439,8 @@ _CJK = re.compile(r"[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
 
 
 def estimate_tokens(text: str) -> int:
-    """按 DeepSeek 文档的经验值估算：1 个中文字符 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token。"""
+    """粗估（DeepSeek 文档的经验值：1 个中文字符 ≈ 0.6 token，1 个英文字符 ≈ 0.3 token；Grok 的分词不完全一样）。
+    只用来挑压缩到哪里；什么时候该压缩，看的是 xAI 返回的真实输入 token 数。"""
     cjk = len(_CJK.findall(text))
     return int(cjk * 0.6 + (len(text) - cjk) * 0.3) + 4
 

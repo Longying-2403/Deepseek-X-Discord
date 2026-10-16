@@ -26,7 +26,7 @@ from .convert import (
 from .engine import Engine
 from .ledger import Ledger
 from .links import LinkReader
-from .llm import DeepSeekClient
+from .llm import XAIClient
 from .memes import MemeLibrary
 from .memory import CardStore, MemoryStore
 from .models import ChannelInfo, ChannelPlace, IncomingMessage
@@ -234,7 +234,7 @@ class DSBot(discord.Client):
         store: Store,
         settings: Settings,
         ledger: Ledger,
-        llm: DeepSeekClient,
+        llm: XAIClient,
         cards: CardStore | None = None,
         memory: MemoryStore | None = None,
     ):
@@ -254,11 +254,12 @@ class DSBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.transport = DiscordTransport(self)
         self.searcher = WebSearch(
-            api_key=secrets.deepseek_api_key,
-            url=cfg.deepseek.anthropic_url,
-            model=cfg.deepseek.model,
-            timeout=cfg.deepseek.search_timeout_seconds,
-            max_uses=cfg.deepseek.search_max_uses,
+            api_key=secrets.xai_api_key,
+            url=cfg.xai.responses_url,
+            model=cfg.xai.search_model_name,
+            timeout=cfg.xai.search_timeout_seconds,
+            max_uses=cfg.xai.search_max_uses,
+            effort=cfg.xai.search_effort,
             tavily_key=secrets.tavily_api_key,
         )
         # 读链接、找图：推文走 FxTwitter（不用 key），网页和找图要 Tavily。

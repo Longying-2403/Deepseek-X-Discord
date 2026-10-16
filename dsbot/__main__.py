@@ -1,4 +1,4 @@
-"""启动入口：python -m dsbot [--config config.toml] [--check]"""
+"""启动入口：python -m dsbot [--config config.toml] [--check] [--test-chat]"""
 
 from __future__ import annotations
 
@@ -60,13 +60,15 @@ def check(config_path: str) -> int:
     """离线自检：配置能不能读、斜杠命令定义是否合法（不连 Discord、不花钱）。"""
     from .discord_app import DSBot
     from .ledger import Ledger
-    from .llm import DeepSeekClient
+    from .llm import XAIClient, effort_for
     from .settings import Settings
     from .store import Store
 
     cfg = load_config(config_path)
     print(f"dsbot {__version__}")
-    print(f"✓ 配置文件 {config_path} 读取成功，模型：{cfg.deepseek.model}")
+    print(f"✓ 配置文件 {config_path} 读取成功，模型：{cfg.xai.model}（{cfg.xai.base_url}）")
+    if effort_for(cfg.xai.model, "off") != "none":
+        print(f"! {cfg.xai.model} 的推理关不掉：思考强度 off 会按 low 算（每次多一些推理 token）。想完全不推理就用 grok-4.3")
     note = unknown_note(cfg)
     if note:
         print(f"! {note}")
@@ -77,9 +79,10 @@ def check(config_path: str) -> int:
         print(f"✗ {exc}")
         secrets = Secrets("x", "x", 0, control_guild_id=1)
     check_files()
-    print(f"✓ 联网搜索：DeepSeek 自带的搜索（{cfg.deepseek.anthropic_url}）"
+    print(f"✓ 联网搜索：xAI 自带的搜索（{cfg.xai.responses_url}，模型 {cfg.xai.search_model_name}，每次最多搜 {cfg.xai.search_max_uses} 轮）"
           + ("，失败时改用 Tavily" if secrets.tavily_api_key else "")
           + "。想实际搜一次试试：python -m dsbot --test-search 关键词")
+    print("· 想确认 key、模型和参数都能用：python -m dsbot --test-chat（真的调用一次，花不到 0.1 美分）")
     if secrets.tavily_api_key:
         print("✓ 读链接：推文走 FxTwitter，网页走 Tavily；上网找图：Tavily。"
               "想试试：python -m dsbot --test-link 网址 / --test-image 关键词")
@@ -103,7 +106,7 @@ def check(config_path: str) -> int:
         store,
         Settings(cfg.defaults, store),
         Ledger(store, cfg.bot.timezone),
-        DeepSeekClient(api_key="x", base_url=cfg.deepseek.base_url, model=cfg.deepseek.model),
+        XAIClient(api_key="x", base_url=cfg.xai.base_url, model=cfg.xai.model),
         cards=CardStore(":memory:"),
         memory=MemoryStore(":memory:"),
     )
@@ -133,11 +136,12 @@ def test_search(config_path: str, query: str) -> int:
     cfg = load_config(config_path)
     secrets = load_secrets()
     searcher = WebSearch(
-        api_key=secrets.deepseek_api_key,
-        url=cfg.deepseek.anthropic_url,
-        model=cfg.deepseek.model,
-        timeout=cfg.deepseek.search_timeout_seconds,
-        max_uses=cfg.deepseek.search_max_uses,
+        api_key=secrets.xai_api_key,
+        url=cfg.xai.responses_url,
+        model=cfg.xai.search_model_name,
+        timeout=cfg.xai.search_timeout_seconds,
+        max_uses=cfg.xai.search_max_uses,
+        effort=cfg.xai.search_effort,
         tavily_key=secrets.tavily_api_key,
     )
 
@@ -159,8 +163,69 @@ def test_search(config_path: str, query: str) -> int:
     print(f"✓ 用 {result.provider} 搜到了：\n{result.summary}")
     for title, url in result.sources:
         print(f"  - {title} {url}")
-    print(f"用量：输入 {u.prompt_tokens} token（命中 {u.hit}），输出 {u.output} token，约 ${cfg.pricing.cost(u, time.time()):.5f}")
+    searched = f"，xAI 搜了 {u.web_searches} 次" if u.web_searches else ""
+    print(f"用量：输入 {u.prompt_tokens} token（命中 {u.hit}），输出 {u.output} token{searched}，"
+          f"约 ${cfg.pricing.cost(u, time.time()):.5f}" + ("（xAI 给的实际花费）" if u.cost_usd is not None else "（按 [pricing] 估算）"))
     return 0
+
+
+TEST_CHAT_SYSTEM = (
+    "你在一个 Discord 群聊里，是群里的一个普通群友。只输出一个 json 对象，不要输出别的："
+    '{"actions": [{"type": "reply", "messages": ["要说的话"]}]}'
+)
+
+
+def test_chat(config_path: str, text: str) -> int:
+    """用 .env 里的 key 真的调用一次模型（参数和 bot 被叫到时一样），确认 key、模型、JSON 模式、推理强度都没问题。"""
+    import asyncio
+    import time
+
+    from .actions import parse_actions
+    from .llm import LLMError, XAIClient, effort_for
+
+    logging.getLogger("dsbot.llm").setLevel(logging.ERROR)  # 改了什么参数下面会直接打印出来，日志里就不重复了
+    cfg = load_config(config_path)
+    secrets = load_secrets()
+    view = cfg.defaults
+    client = XAIClient(
+        api_key=secrets.xai_api_key, base_url=cfg.xai.base_url, model=cfg.xai.model, timeout=cfg.xai.timeout_seconds, max_retries=0
+    )
+    messages = [{"role": "system", "content": TEST_CHAT_SYSTEM}, {"role": "user", "content": f"#1 阿明：{text} 〔@你〕"}]
+
+    async def run():  # type: ignore[no-untyped-def]
+        try:
+            return await client.complete(
+                messages, thinking=view["mention_thinking"], json_mode=True, max_tokens=cfg.engine.max_output_tokens, user_id="test-chat"
+            )
+        finally:
+            await client.close()
+
+    effort = effort_for(cfg.xai.model, view["mention_thinking"])
+    print(f"调用 {cfg.xai.model}（被叫到时的推理强度：{view['mention_thinking']} → reasoning_effort={effort}，JSON 模式）……")
+    started = time.time()
+    try:
+        completion = asyncio.run(run())
+    except LLMError as exc:
+        print(f"✗ 调用失败：{exc}")
+        if exc.status == 401:
+            print("  多半是 XAI_API_KEY 填错了（去 console.x.ai 重新复制一个）")
+        elif exc.status == 402:
+            print("  账户没钱了：去 console.x.ai 充值，或者调高自己设的花费上限")
+        elif exc.status in (403, 404):
+            print(f"  多半是模型名 {cfg.xai.model} 写错了，或者这个 key 没有权限用它")
+        return 1
+    for note in client.notes:
+        print(f"! {note}")
+    actions, ok = parse_actions(completion.content)
+    said = [m for a in actions if a.kind == "reply" for m in a.messages]
+    if ok and said:
+        print(f"✓ 回复（{time.time() - started:.1f} 秒）：" + " / ".join(said))
+    else:
+        print(f"✗ 输出不是 bot 能用的 JSON：{completion.content[:300]!r}")
+    u = completion.usage
+    print(f"用量：输入 {u.prompt_tokens} token（命中 {u.hit}），输出 {u.output} token（其中推理 {u.reasoning}），"
+          f"约 ${cfg.pricing.cost(u, time.time()):.5f}" + ("（xAI 给的实际花费）" if u.cost_usd is not None else "（按 [pricing] 估算）"))
+    return 0 if ok and said else 1
 
 
 def test_link(config_path: str, url: str) -> int:
@@ -255,10 +320,11 @@ def test_image(config_path: str, query: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="dsbot", description="DeepSeek 群友 Discord bot")
+    parser = argparse.ArgumentParser(prog="dsbot", description="Grok 群友 Discord bot（xAI 版）")
     parser.add_argument("--version", action="version", version=f"dsbot {__version__}")
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="只做离线自检，不启动")
+    parser.add_argument("--test-chat", nargs="?", const="在吗？随便说句话", metavar="一句话", help="真的调用一次模型，确认 key 和模型能用（花一点点钱）")
     parser.add_argument("--test-search", metavar="关键词", help="真的搜一次，确认联网搜索能用（花一点点钱）")
     parser.add_argument("--test-link", metavar="网址", help="真的打开一个链接，确认读链接能用（网页会用掉一点 Tavily 额度）")
     parser.add_argument("--test-image", metavar="关键词", help="真的找一次图，候选图存到 data/找图测试/（用掉 1 次 Tavily 额度）")
@@ -267,6 +333,8 @@ def main() -> int:
 
     if args.check:
         return check(args.config)
+    if args.test_chat:
+        return test_chat(args.config, args.test_chat)
     if args.test_search:
         return test_search(args.config, args.test_search)
     if args.test_link:
@@ -288,7 +356,7 @@ def main() -> int:
 
     from .discord_app import DSBot
     from .ledger import Ledger
-    from .llm import DeepSeekClient
+    from .llm import XAIClient
     from .memory import CardStore, MemoryStore
     from .settings import Settings
     from .store import Store
@@ -303,12 +371,12 @@ def main() -> int:
         store,
         Settings(cfg.defaults, store),
         Ledger(store, cfg.bot.timezone),
-        DeepSeekClient(
-            api_key=secrets.deepseek_api_key,
-            base_url=cfg.deepseek.base_url,
-            model=cfg.deepseek.model,
-            timeout=cfg.deepseek.timeout_seconds,
-            max_retries=cfg.deepseek.max_retries,
+        XAIClient(
+            api_key=secrets.xai_api_key,
+            base_url=cfg.xai.base_url,
+            model=cfg.xai.model,
+            timeout=cfg.xai.timeout_seconds,
+            max_retries=cfg.xai.max_retries,
         ),
         cards=cards,
         memory=memory,

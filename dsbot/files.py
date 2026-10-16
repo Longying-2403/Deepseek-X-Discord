@@ -1,6 +1,6 @@
 """读取群友上传的文件：文本 / 代码、PDF、Word、Excel、PowerPoint。
 
-DeepSeek 的接口只收图片，文档要先在这边转成文字。
+模型的接口只收图片（xAI 只收 JPG / PNG，看图前都会转成 JPEG），文档要先在这边转成文字。
 
 所有文件都在子进程里解析：限内存、限 CPU，超时就杀掉，坏文件或恶意文件最多让这一次读取失败。
 bot 以 root 运行时（Docker 里默认就是），子进程会降成 nobody 用户，读不到 bot 进程的环境变量（token、API key）。

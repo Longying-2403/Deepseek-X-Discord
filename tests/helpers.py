@@ -21,7 +21,7 @@ from dsbot.store import Store  # noqa: E402
 T0 = 1_791_374_400.0
 GUILD = 1
 CHANNEL = 100
-OWNER = 7  # 测试里的 OWNER_ID（dsowner）
+OWNER = 7  # 测试里的 OWNER_ID（xai-owner）
 
 
 class FakeClock:
@@ -151,7 +151,7 @@ class FakeSearcher:
                 summary=f"关于「{query}」搜到的内容",
                 sources=[("示例网站", "https://example.com/a")],
                 usage=Usage(prompt_tokens=3000, hit=0, miss=3000, output=200),
-                provider="DeepSeek",
+                provider="xAI",
             )
         return out
 
@@ -171,6 +171,9 @@ def make_engine(
     engine_cfg: dict[str, Any] | None = None,
 ):
     cfg = AppConfig()
+    # 引擎的测试按 DeepSeek 版的时间写（冷场 30 秒、最长等 180 秒），两个版本的测试能保持一样；
+    # Grok 版自己的默认值（60 / 240，好让两个 bot 错开）另外测
+    cfg.defaults.update({"quiet_seconds": 30, "max_wait_seconds": 180})
     for key, value in (engine_cfg or {}).items():
         setattr(cfg.engine, key, value)
     if defaults:

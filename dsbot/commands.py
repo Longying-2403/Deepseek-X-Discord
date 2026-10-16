@@ -1,9 +1,10 @@
 """斜杠命令。
 
-/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
-/ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。
-/dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡等。
-            和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
+/xai …        服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
+/xai-rp       所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。
+/xai-owner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡等。
+              和 /xai 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
+命令名都以 xai 开头，和 DeepSeek 版的 /ds 系列分开：两个 bot 放在同一个服务器里也不会混。
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ LINK_MODES = {
     "off": "读链接：关",
 }
 NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
-# 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
+# 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /xai 设置
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
 
@@ -192,7 +193,7 @@ class PersonaModal(discord.ui.Modal):
             new = value
             done = "人设已更新"
         if new != old:
-            # 记进人设历史：dsowner 在聊天里说“改回去”时能撤销
+            # 记进人设历史：xai-owner 在聊天里说“改回去”时能撤销
             self.bot.store.add_persona_change(
                 ts=time.time(),
                 scope=self.scope,
@@ -204,7 +205,7 @@ class PersonaModal(discord.ui.Modal):
             )
         await _reply(
             interaction,
-            f"{self.where}：{done}，下一轮对话生效。\n改动比较大的话，可以用 `/ds 清空记忆` 让它不受之前说话风格的影响。",
+            f"{self.where}：{done}，下一轮对话生效。\n改动比较大的话，可以用 `/xai 清空记忆` 让它不受之前说话风格的影响。",
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
@@ -213,7 +214,7 @@ class PersonaModal(discord.ui.Modal):
 
 
 class CardModal(discord.ui.Modal):
-    """/ds-rp：编辑自己的人设卡。卡的主人就是填表的人，改不了别人的。"""
+    """/xai-rp：编辑自己的人设卡。卡的主人就是填表的人，改不了别人的。"""
 
     def __init__(self, bot: "DSBot", guild_id: int, current: str):
         super().__init__(title="我的人设卡", timeout=900)
@@ -242,7 +243,7 @@ class CardModal(discord.ui.Modal):
         changed = self.bot.cards.put(self.guild_id, interaction.user.id, name, value, via="command")
         if not value.strip():
             text = (
-                "已删掉你在这个服务器的人设卡（想找回来用 `/ds-rp 操作:改回上一版`；连旧版本一起删用 `/ds-rp 操作:清空`）。"
+                "已删掉你在这个服务器的人设卡（想找回来用 `/xai-rp 操作:改回上一版`；连旧版本一起删用 `/xai-rp 操作:清空`）。"
                 if changed
                 else "你在这个服务器还没有人设卡。"
             )
@@ -283,7 +284,7 @@ def memory_list_text(bot: "DSBot", guild_id: int) -> str:
     lines = [f"**长期记忆**（{len(entries)} / {bot.cfg.engine.memory_max_entries} 条）"]
     lines += [f"({m.no}) {m.text}" for m in entries] or ["还没有。聊天时有人叫它记住群里的事，或者它整理聊天时觉得值得记，就会记在这里。"]
     if not bot.settings.get("long_memory", guild_id=guild_id):
-        lines.append("⚠️ 这个服务器关掉了长期记忆：`/ds 设置 参数:长期记忆 值:开 范围:全服务器` 打开")
+        lines.append("⚠️ 这个服务器关掉了长期记忆：`/xai 设置 参数:长期记忆 值:开 范围:全服务器` 打开")
     return "\n".join(lines)
 
 
@@ -298,7 +299,7 @@ def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     if shares_out:
         out_text = "这里的内容也会分享给别的共享频道"
     elif place is not None and not place.public:
-        out_text = "🔒 这是私密频道，这里的内容不会分享出去（要分享就在这里单独执行 `/ds 记忆共享 操作:开`）"
+        out_text = "🔒 这是私密频道，这里的内容不会分享出去（要分享就在这里单独执行 `/xai 记忆共享 操作:开`）"
     else:
         out_text = "这里的内容不会分享出去"
     sources = bot.engine.shared_sources(guild_id, channel_id)
@@ -348,11 +349,11 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     else:
         lines.append(f"发图：关（来自{view.source('images')}）")
     if st["cards_on"]:
-        lines.append(f"人设卡：开 · 这个服务器有 {st['card_count']} 张（群友用 /ds-rp 管自己的卡）")
+        lines.append(f"人设卡：开 · 这个服务器有 {st['card_count']} 张（群友用 /xai-rp 管自己的卡）")
     else:
         lines.append(f"人设卡：关（来自{view.source('cards')}）")
     if st["memory_on"]:
-        lines.append(f"长期记忆：开 · {st['memory_count']} / {st['memory_max']} 条（/ds 长期记忆 查看）")
+        lines.append(f"长期记忆：开 · {st['memory_count']} / {st['memory_max']} 条（/xai 长期记忆 查看）")
     else:
         lines.append(f"长期记忆：关（来自{view.source('long_memory')}）")
     if (st["cards_on"] or st["memory_on"]) and not st["review_here"]:
@@ -374,7 +375,7 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     if st["guild_spent"] >= view.daily_budget_usd:
         lines.append("⚠️ 今天已超预算：只回应点名，不主动说话")
     if st["paused"]:
-        lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
+        lines.append("⚠️ xAI 调用暂停中（余额不足、key 无效或模型用不了，详见日志）")
     if st["send_blocked"]:
         lines.append("⚠️ 最近几轮在这里发不出消息（检查 bot 的发言权限），主动发言暂停 30 分钟")
     return "\n".join(lines)
@@ -385,10 +386,10 @@ def meme_list_text(bot: "DSBot", guild_id: int) -> str:
     own = sorted(name for name, meme in entries.items() if not meme.shared)
     shared = sorted(name for name, meme in entries.items() if meme.shared)
     lines = [f"**表情包库**（本服务器 {len(own)} 张 · 通用 {len(shared)} 张）"]
-    lines.append("本服务器：" + ("、".join(own) if own else "还没有（用 `/ds 表情包 操作:上传` 加）"))
+    lines.append("本服务器：" + ("、".join(own) if own else "还没有（用 `/xai 表情包 操作:上传` 加）"))
     lines.append("通用：" + ("、".join(shared) if shared else f"没有（bot 主人可以在 NAS 上的 `{bot.cfg.bot.meme_dir}/` 里放图）"))
     if not bot.settings.get("images", guild_id=guild_id):
-        lines.append("⚠️ 这个服务器关掉了发图：`/ds 设置 参数:发图 值:开 范围:全服务器` 打开")
+        lines.append("⚠️ 这个服务器关掉了发图：`/xai 设置 参数:发图 值:开 范围:全服务器` 打开")
     return "\n".join(lines)
 
 
@@ -425,8 +426,8 @@ def area_list_text(bot: "DSBot", guild: discord.Guild) -> str:
 
 def register_commands(bot: "DSBot") -> None:
     admin = app_commands.Group(
-        name="ds",
-        description="DeepSeek 群友：本服务器的设置",
+        name="xai",
+        description="Grok 群友：本服务器的设置",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
@@ -451,7 +452,7 @@ def register_commands(bot: "DSBot") -> None:
             f"现在这个频道：{'会回应' if view.enabled else '不回应'}（来自{view.source('enabled')}）",
         ]
         if scope_name == "guild" and action.value == "off":
-            lines.append("现在是白名单模式：在要用的频道里执行 `/ds 区域 操作:允许`（或选“本类别”放开整个区）。")
+            lines.append("现在是白名单模式：在要用的频道里执行 `/xai 区域 操作:允许`（或选“本类别”放开整个区）。")
         await _reply(interaction, "\n".join(lines))
 
     @admin.command(name="记忆共享", description="让它在开了共享的频道之间互通记忆（私密频道要单独开才会分享出去）")
@@ -496,7 +497,7 @@ def register_commands(bot: "DSBot") -> None:
             return
         if action.value == "remove":
             if not name or not name.strip():
-                await _reply(interaction, "要删哪一张？在「名字」里填上表情包的名字（`/ds 表情包 操作:列表` 能看到全部）。")
+                await _reply(interaction, "要删哪一张？在「名字」里填上表情包的名字（`/xai 表情包 操作:列表` 能看到全部）。")
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)  # 可能要等正在上传的那张写完
             result = await asyncio.to_thread(library.remove, guild_id, name)
@@ -530,7 +531,7 @@ def register_commands(bot: "DSBot") -> None:
             return
         text = f"已加入这个服务器的表情包库：「{meme.name}」。它看名字决定什么时候发，名字写清楚是什么意思最好。"
         if not bot.settings.view(*_ids(interaction)).images:
-            text += "\n⚠️ 但这里关掉了发图，它不会发：`/ds 设置 参数:发图 值:开`"
+            text += "\n⚠️ 但这里关掉了发图，它不会发：`/xai 设置 参数:发图 值:开`"
         await _reply(interaction, text)
 
     @admin.command(name="长期记忆", description="查看、添加、删除这个服务器的长期记忆（它记下的约定、大事、梗和剧情）")
@@ -568,7 +569,7 @@ def register_commands(bot: "DSBot") -> None:
                 await _reply(interaction, f"已记下第 {no} 条：{entry}")
         elif action.value == "delete":
             if number is None:
-                await _reply(interaction, "要删哪一条？在「编号」里填上（`/ds 长期记忆 操作:查看` 能看到编号）。")
+                await _reply(interaction, "要删哪一条？在「编号」里填上（`/xai 长期记忆 操作:查看` 能看到编号）。")
             elif memory.delete(guild_id, number):
                 await _reply(interaction, f"已删掉第 {number} 条。")
             else:
@@ -603,7 +604,7 @@ def register_commands(bot: "DSBot") -> None:
         bot.settings.set(scope_name, scope_id, "proactive", state.value)
         text = f"{where}：主动发言已{'打开' if state.value == 'on' else '关闭'}。"
         if state.value == "on" and not bot.settings.view(*_ids(interaction)).enabled:
-            text += "\n⚠️ 但这个频道不在允许的区域，它不会说话。先用 `/ds 区域 操作:允许`。"
+            text += "\n⚠️ 但这个频道不在允许的区域，它不会说话。先用 `/xai 区域 操作:允许`。"
         await _reply(interaction, text)
 
     @admin.command(name="档位", description="一键套用发言频率：安静 / 普通 / 话痨")
@@ -685,7 +686,7 @@ def register_commands(bot: "DSBot") -> None:
     bot.tree.add_command(admin)
 
     # 人人都能用（不设 default_permissions）：只能管自己的卡
-    @bot.tree.command(name="ds-rp", description="查看、修改你在这个服务器的人设卡（只有你自己看得到）")
+    @bot.tree.command(name="xai-rp", description="查看、修改你在这个服务器的人设卡（只有你自己看得到）")
     @app_commands.guild_only()
     @app_commands.rename(action="操作")
     @app_commands.describe(action="编辑（不选就是编辑）/ 改回上一版 / 清空")
@@ -726,10 +727,10 @@ def register_commands(bot: "DSBot") -> None:
         return
 
     # 能不能用由 is_owner 决定；default_permissions 只是让普通成员看不到。用“管理服务器”而不是“管理员”：
-    # bot 放在朋友的服务器时，你在那里多半只是管理（能用 /ds），不一定有“管理员”权限
+    # bot 放在朋友的服务器时，你在那里多半只是管理（能用 /xai），不一定有“管理员”权限
     owner = app_commands.Group(
-        name="dsowner",
-        description="DeepSeek 群友：主人专用",
+        name="xai-owner",
+        description="Grok 群友：主人专用",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
@@ -791,7 +792,7 @@ def register_commands(bot: "DSBot") -> None:
             )
         lines.append(f"合计：${sum(spend.values()):.4f}")
         if now < bot.engine.paused_until:
-            lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
+            lines.append("⚠️ xAI 调用暂停中（余额不足、key 无效或模型用不了，详见日志）")
         await _reply(interaction, "\n".join(lines))
 
     @owner.command(name="删除人设卡", description="按用户 ID 删掉一个人在所有服务器的人设卡（看不到内容）")

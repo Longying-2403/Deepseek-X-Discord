@@ -1,7 +1,7 @@
 """人设卡和长期记忆：各存一个 SQLite 文件（默认 data/cards.sqlite3、data/memory.sqlite3），和聊天记录分开，方便备份、搬家。
 
 - 人设卡：每个服务器里每人一张，记本人说的、关于自己的事（称呼、设定、喜好、梗）。管理员看不到；
-  本人用 /ds-rp 查看、修改、清空；bot 主人只能按用户 ID 整个删掉（看不到内容）。每人保留最近几个旧版本。
+  本人用 /xai-rp 查看、修改、清空；bot 主人只能按用户 ID 整个删掉（看不到内容）。每人保留最近几个旧版本。
 - 长期记忆：每个服务器一份带编号的清单，记群里的事（约定、大事、长期的梗、进行中的剧情）。
 """
 
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS cards (
     name TEXT NOT NULL,           -- 最近一次看到的名字（按名字查人设卡时用）
     text TEXT NOT NULL,
     updated_at REAL NOT NULL,
-    via TEXT NOT NULL,            -- chat（聊天里让它记）/ review（整理记忆）/ command（/ds-rp）/ restore（改回上一版）
+    via TEXT NOT NULL,            -- chat（聊天里让它记）/ review（整理记忆）/ command（/xai-rp）/ restore（改回上一版）
     PRIMARY KEY (guild_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS card_versions (
@@ -200,7 +200,7 @@ class CardStore:
             )
 
     def delete(self, guild_id: int, user_id: int, *, now: float | None = None) -> bool:
-        """删掉这个人在这个服务器的卡，连同旧版本（/ds-rp 清空）。返回原来有没有东西。"""
+        """删掉这个人在这个服务器的卡，连同旧版本（/xai-rp 清空）。返回原来有没有东西。"""
         now = time.time() if now is None else now
         with self.db:
             cur = self.db.execute("DELETE FROM cards WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))

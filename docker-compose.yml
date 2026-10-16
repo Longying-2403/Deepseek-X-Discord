@@ -1,10 +1,14 @@
+name: xai-discord-bot                       # 项目名：和 DeepSeek 版（ds-discord-bot）分开，两个可以同时跑
+
 services:
-  dsbot:
+  xaibot:
     build: .
-    container_name: dsbot
+    container_name: xaibot                  # 和 DeepSeek 版的 dsbot 不重名
     restart: unless-stopped
     stop_grace_period: 30s                  # 给它时间把正在发的消息发完
     env_file: .env
     volumes:
       - ./config.toml:/app/config.toml:ro   # 改配置不用重新构建，重启即可
-      - ./data:/app/data                    # 数据库：对话记录、设置、花费
+      - ./data:/app/data                    # 数据库：对话记录、设置、花费（自己的 data，别和 DeepSeek 版共用）
+      # 想和 DeepSeek 版共用通用表情包库：去掉下一行开头的 #，路径改成 DeepSeek 版的表情包文件夹（只读挂进来）
+      # - ../ds-discord-bot/data/表情包:/app/data/表情包:ro
