@@ -2,6 +2,111 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.2.2] - 2026-10-21
+
+> 2.1.0、2.2.0 和 2.2.1 没有单独发布，它们的改动也都包含在这个版本里。英文版这次没有更新，还是 2.0.0。
+> 2.1.0, 2.2.0 and 2.2.1 were never released on their own; their changes are included here. The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **点歌（B站）**：先进语音频道，再叫它“放首晴天”“来点周杰伦”，或者贴 B站视频链接、BV 号，它会进你所在的语音频道放视频的声音。新命令 `/ds-music`（所有人都能用）：播放、切歌、暂停、继续、删除、清空、停止、队列，不经过 DeepSeek，不花钱。同一个语音频道里的人都能切歌、暂停、停止、删歌。只放 B站的，不放直播；不限时长和队列长短，每个服务器只先下载接下来的两首，放完就删。放完了 5 分钟没人点歌、或者语音频道里只剩它 2 分钟，它就自己离开。
+- **按歌名找歌**：有 `TAVILY_API_KEY` 时用 Tavily 只搜 bilibili.com（B站自己的搜索很容易被风控拦下来），原曲、官方 MV 优先，翻唱、伴奏、合集往后。按歌名点歌算一次联网搜索，和每天的搜索次数共用；每人每分钟最多按歌名点“每人每分钟点名”那么多次。贴链接不受这两个限制。
+- **删歌、清空队列**：“刚才那首不要了”“把第 2 首删了”“把稻香删了”，或者 `/ds-music 删除`（会列出队列里的歌让你选）；`/ds-music 清空` 清掉后面排着的歌。一句话里说好几件事（“先清空，再放 X”），它会照你说的顺序办。
+- **会 @ 人**：它话里写的 @名字、#频道名 会变成真的 @ 和频道链接。能 @ 的是最近说过话的、最近被 @ 过的、有人设卡的人，都对不上时再按名字在服务器成员里找。只在有人叫它的时候才真的提醒，而且有上限：一次回话最多 3 个人，同一个人 5 分钟一次，每个服务器 10 分钟 10 次；其他时候只显示成蓝字。@everyone、@here 和身份组永远不会变成真的 @。
+- **跟着删改**：群友删掉的消息，它记录里的那一行变成“（这条消息已删除）”，带的图、文件和链接内容一起拿掉，整理记忆、压缩摘要、别的频道翻记录时都看不到了；它正要回的那条被删了，就不回。编辑过的消息以新内容为准：最近几轮的直接改记录，更早的在下一轮附一句说明（改旧记录会让缓存全部失效）。想让它彻底忘掉某条消息，请删掉，不要只是编辑。
+- **加表情就够的时候不硬回**：道谢、晚安、哈哈哈这类不需要它说什么的，被叫到时也只加个表情；好几个人同时叫它，也不一定每条都回话。
+- 它知道有哪些斜杠命令，群友问起时能直接告诉对方。
+- `--check` 和 `/ds 状态` 会显示点歌能不能用（yt-dlp、ffmpeg、语音库在不在）；启动日志会列出注册了哪些斜杠命令。
+- `config.toml` 的 `[bot]` 新增 `music`（默认 `true`，`false` 就关掉点歌）。
+
+**改进**
+
+- B站的视频链接（包括 b23.tv 短链接）不再交给 Tavily 打开，只看 Discord 的预览：视频它本来就看不了，要听就点歌。
+- 关机更稳：`docker stop` 时会正常收尾（发完正在发的消息、离开语音频道）；`docker-compose.yml` 里的等待时间加到 45 秒。
+- 消息太多、缓冲区满了时，先丢掉没叫它的消息，叫它的留着。
+- 文档：改了 `config.toml` 之后，也改用 `docker compose up -d --force-recreate` 重建容器。
+
+**修复**（来自另一份针对 v1.4.0 的验证报告）
+
+- 坏掉的、包在 ``` 里的 JSON 不会再被当成话发出来。
+- 看文件、开链接、搜索那一步失败时，记录里会留一句说明，下一轮它知道上次没查成。
+- 只有真的超出上下文长度的错误才会压缩记忆。
+- 同一批消息里有别人也在叫它时，没写明给谁的改人设请求不算数。
+- 读失败的文件不再占掉一个文件名额。
+- 响应传到一半连接断了，不再重试（那次已经算过钱了）。
+- 链接预览、贴图的图片边下边数，太大就放弃；PNG、WebP 这类只能整张解码的图上限 1600 万像素，同时最多解码 2 张。
+- 判断是不是二进制文件时多看一些内容（前 200 KB）；格式不对的 .ipynb 当普通文本读。
+
+**升级须知**
+
+- **这次除了 `dsbot` 文件夹，`Dockerfile` 和 `requirements.txt` 也要换成新的**：镜像里要多装 ffmpeg、yt-dlp 和语音库（`discord.py[voice]` 2.7 起）。只换 `dsbot` 的话别的功能照常，只是点歌用不了。`docker-compose.yml` 没改过的话也一起覆盖（等待时间改成 45 秒）。然后重新构建：`sudo docker compose up -d --build`。
+- 不用 Docker 的话：再跑一次 `pip install -r requirements.txt`，另外装上 ffmpeg。
+- 确认新版生效：日志里有 `dsbot 2.2.2 启动中`、`点歌：开`，以及 `已注册 3 个全局斜杠命令：…`（`/ds`、`/ds-rp`、`/ds-music`）。看不到 `/ds-music` 的话，电脑版 Discord 按 Ctrl+R（Mac 是 ⌘R），手机版把 App 完全关掉再打开。
+- 点歌要 bot 在语音频道有“连接”和“说话”权限，@everyone 默认就有；新的邀请链接已经带上。
+- **推荐填 `TAVILY_API_KEY`**：按歌名找歌时优先用它（每次 1 次额度），B站自己的搜索很容易被风控拦下来。
+- 旧的 `config.toml`、`.env` 和数据库可以直接沿用，数据库启动时会自动加一个索引。
+- 不想要点歌：`config.toml` 的 `[bot]` 里写 `music = false`，再 `docker compose up -d --force-recreate`。
+- B站改版、所有歌都放不了时，要更新 yt-dlp：`sudo docker compose build --no-cache && sudo docker compose up -d`。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新模块 `dsbot/mentions.py`（@ 人和频道链接）、`dsbot/music.py`（找歌、下载、播放队列；Discord 语音那一层在 `discord_app.py` 的 `DiscordVoice`）。
+- 新测试 `test_sync.py`、`test_mentions.py`、`test_fixes.py`、`test_music.py`、`test_music_remove.py`；测试从 482 个增加到 653 个。测试用的是假的语音和下载，不需要 ffmpeg 和 yt-dlp。
+- CONTRIBUTING.md：“只追加”写明了两个例外（删除消息、编辑最近的消息）；隐私边界加上删除的消息；下载那条写明点歌只从 B站下载；新增一条“真的 @ 人要有节制”。
+
+### English
+
+**Added**
+
+- **Music from Bilibili**: join a voice channel and ask it to "play 晴天" or "play some Jay Chou", or paste a Bilibili video link or BV number, and it joins your voice channel and plays the video's audio. New `/ds-music` command for everyone, with 播放 / 切歌 / 暂停 / 继续 / 删除 / 清空 / 停止 / 队列 (play, skip, pause, resume, remove, clear, stop, queue); it doesn't go through DeepSeek and costs nothing. Anyone in the same voice channel can skip, pause, stop or remove songs. Bilibili only, no live streams; there's no limit on length or queue size, and each server only downloads the next two songs ahead, deleting each file once it's played. It leaves after 5 minutes with nothing queued, or after 2 minutes alone in the voice channel.
+- **Finding songs by name**: with `TAVILY_API_KEY` set, it searches only bilibili.com through Tavily (Bilibili's own search is often blocked by its anti-bot checks), preferring originals and official MVs over covers, instrumentals and compilations. A search by song name counts as one web search against the daily search limit, and each person can search by name at most "Mentions per person per minute" times a minute; pasted links count against neither.
+- **Removing songs and clearing the queue**: "drop the one I just added", "remove number 2", "remove 稻香", or `/ds-music 删除` (remove), which lists the queue to pick from; `/ds-music 清空` (clear) drops everything waiting after the current song. When one message asks for several things ("clear the queue, then play X"), it does them in the order given.
+- **Real mentions**: an @name or #channel in what it writes becomes a real mention or channel link. It can mention people who spoke recently, people mentioned recently and people with a profile card, and otherwise looks the name up among the server's members. People only get notified when someone called it, within limits: at most 3 people per reply, the same person once every 5 minutes, and 10 per server every 10 minutes; otherwise the mention just shows as blue text. @everyone, @here and roles never become real mentions.
+- **Keeping up with deletes and edits**: when someone deletes a message, its line in the history is replaced with a "message deleted" marker and its images, files and link contents are dropped, so memory reviews, summaries and other channels looking through the history no longer see it; if it was about to answer that message, it doesn't. For edited messages it goes by the new text: recent ones are changed in the history, while older ones get a note in the next round instead (rewriting old history would invalidate the whole cache). To make it forget something completely, delete the message rather than editing it.
+- **Reacting when words aren't needed**: thanks, good night, lol and the like get just a reaction even when it's called, and when several people call it at once, not every message gets a reply.
+- It knows which slash commands exist, so it can point people to them.
+- `--check` and `/ds 状态` (status) show whether music works (yt-dlp, ffmpeg, voice libraries), and the startup log lists the registered slash commands.
+- `config.toml` gains `music` under `[bot]` (default `true`; `false` turns music off).
+
+**Changed**
+
+- Bilibili video links (including b23.tv short links) are no longer opened through Tavily; it only looks at Discord's preview, since it can't watch videos anyway, and playing them is what music is for.
+- Cleaner shutdown: on `docker stop` it finishes sending and leaves the voice channel, and `docker-compose.yml` now allows 45 seconds for that.
+- When the message buffer fills up, messages that didn't call it are dropped first, so the ones that did are kept.
+- Docs: after editing `config.toml`, recreate the container with `docker compose up -d --force-recreate` as well.
+
+**Fixed** (from another verification report, against v1.4.0)
+
+- Broken JSON wrapped in ``` is no longer posted as a message.
+- When reading files, opening links or searching fails, the history keeps a note, so the next round knows the lookup didn't happen.
+- Only real context-length errors trigger compacting the history.
+- A persona change that doesn't say who it's for is refused when someone else is also calling it in the same batch.
+- Files that fail to read no longer use up a file slot.
+- A response cut off mid-transfer isn't retried (it was already billed).
+- Link-preview and sticker images are counted while downloading and dropped when too large; images that can only be decoded at full size (PNG, WebP) are capped at 16 megapixels, and at most 2 images are decoded at once.
+- Binary-file detection looks further into the file (the first 200 KB), and .ipynb files with unusual cells are read as plain text.
+
+**Upgrading**
+
+- **Besides the `dsbot` folder, replace `Dockerfile` and `requirements.txt` this time**: the image needs ffmpeg, yt-dlp and the voice libraries (`discord.py[voice]` 2.7 or later). With only `dsbot` replaced, everything else works but music doesn't. If you never edited `docker-compose.yml`, replace it too (the 45-second shutdown wait). Then rebuild: `sudo docker compose up -d --build`.
+- Without Docker: run `pip install -r requirements.txt` again and install ffmpeg.
+- To check that the new version took effect: the log shows `dsbot 2.2.2 启动中`, `点歌：开` and `已注册 3 个全局斜杠命令：…` listing `/ds`, `/ds-rp` and `/ds-music`. If `/ds-music` doesn't show up, press Ctrl+R (⌘R on Mac) in desktop Discord, or fully close and reopen the mobile app.
+- Music needs the Connect and Speak permissions in the voice channel; @everyone has them by default, and the new invite link includes them.
+- **Setting `TAVILY_API_KEY` is recommended**: finding songs by name uses it first (1 credit per search), and Bilibili's own search is often blocked.
+- Your existing `config.toml`, `.env` and database keep working; the database gets one new index at startup.
+- To turn music off: set `music = false` under `[bot]` in `config.toml`, then run `docker compose up -d --force-recreate`.
+- If every song suddenly fails to play (usually a change on Bilibili's side), update yt-dlp: `sudo docker compose build --no-cache && sudo docker compose up -d`.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New modules `dsbot/mentions.py` (mentions and channel links) and `dsbot/music.py` (finding songs, downloading, the play queues; the Discord voice layer is `DiscordVoice` in `discord_app.py`).
+- New tests `test_sync.py`, `test_mentions.py`, `test_fixes.py`, `test_music.py` and `test_music_remove.py`; tests grew from 482 to 653. The tests use fake voice and downloads, so they need neither ffmpeg nor yt-dlp.
+- CONTRIBUTING.md: "append-only" now names its two exceptions (deleted messages, edits to recent messages), the privacy rule covers deleted messages, the download rule says music only downloads from Bilibili, and a new rule keeps real mentions in check.
+
 ## [2.0.0] - 2026-10-16
 
 ### 中文
@@ -384,6 +489,7 @@ First public release.
 - Sees uploaded images; managed with the `/ds` and `/dsowner` slash commands.
 - Docker Compose deployment and an offline self-check; 90 unit tests run automatically on GitHub Actions.
 
+[2.2.2]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v2.0.0...v2.2.2
 [2.0.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Longying-2403/Deepseek-X-Discord/compare/v1.3.0...v1.3.1
