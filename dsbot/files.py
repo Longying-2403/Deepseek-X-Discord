@@ -345,7 +345,7 @@ def decode_text(raw: bytes) -> str | None:
         return raw.decode("utf-32", "replace")
     if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return raw.decode("utf-16", "replace")
-    if b"\x00" in raw[:8192]:
+    if b"\x00" in raw[:DETECT_SAMPLE]:  # 二进制文件：开头一段里有 NUL（只看前 8 KB 会漏掉后面才出现的）
         return None
     try:
         return raw.decode("utf-8")
@@ -390,6 +390,8 @@ def _notebook(text: str) -> str:
         cells = json.loads(text).get("cells") or []
     except (ValueError, AttributeError):
         return text
+    if not isinstance(cells, list):
+        return text  # 不像正常的笔记本：当普通文本读
     out = []
     for cell in cells:
         if not isinstance(cell, dict):

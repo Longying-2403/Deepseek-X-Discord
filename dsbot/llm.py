@@ -17,6 +17,10 @@ log = logging.getLogger(__name__)
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+class _CutOff(Exception):
+    """响应读到一半连接断了：请求已经被处理（多半也算了钱），不重试。"""
+
+
 class LLMError(Exception):
     def __init__(self, message: str, status: int | None = None, *, timeout: bool = False):
         super().__init__(message)
@@ -111,9 +115,12 @@ class DeepSeekClient:
             )
         async with self._session.post(self.url, json=payload, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             try:
-                data = await resp.json(content_type=None)
-            except ValueError:
-                data = await resp.text()
+                try:
+                    data = await resp.json(content_type=None)
+                except ValueError:
+                    data = await resp.text()
+            except aiohttp.ClientPayloadError as exc:
+                raise _CutOff(repr(exc)) from None
             return resp.status, data
 
     async def complete(
@@ -140,6 +147,9 @@ class DeepSeekClient:
             except asyncio.TimeoutError:
                 # 超时不重试：请求可能已经在对方那边跑完并计费了，再发一次只会更慢、更贵
                 raise LLMError(f"请求超时（{timeout:g} 秒）", timeout=True) from None
+            except _CutOff as exc:
+                # 同理：结果传到一半断了，对方已经算过钱，不再发一次
+                raise LLMError(f"响应传到一半连接断了：{exc}") from None
             except Exception as exc:  # aiohttp.ClientError 等网络错误
                 last_error = LLMError(f"网络错误：{exc!r}")
                 continue

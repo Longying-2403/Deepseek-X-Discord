@@ -255,6 +255,11 @@ def convert_message(
         if url and fmt in STICKER_IMAGE_FORMATS and fetch_url is not None:
             images.append(ImageAttachment(sticker.name, None, 0, fetch=_fetcher(fetch_url, url), kind="sticker"))
 
+    mentioned = [
+        (user.id, clean_text(getattr(user, "display_name", None) or user.name))
+        for user in message.mentions
+        if not getattr(user, "bot", False) and user.id != me_id
+    ]
     return IncomingMessage(
         message_id=message.id,
         channel_id=channel.id,
@@ -273,4 +278,5 @@ def convert_message(
         stickers=stickers,
         links=links,
         awaiting_embeds=not embeds and bool(URL_RE.search(message.clean_content or "")),
+        mentioned=mentioned,
     )

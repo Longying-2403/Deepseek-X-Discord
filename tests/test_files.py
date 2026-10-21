@@ -410,6 +410,9 @@ class ChildIsolation(unittest.IsolatedAsyncioTestCase):
 
         if os.name != "posix" or os.geteuid() != 0:
             self.skipTest("只有以 root 运行时才会降权")
+        if not all(files._others_can_use(path, read=read) for path, read in files._child_needs()):
+            # 和 _child_user() 一样：nobody 读不到 Python 或装的库（比如 venv 在 0700 的目录里）时 bot 本来就不降权
+            self.skipTest("nobody 读不到这里的 Python 或库，bot 不会降权")
         kwargs = {"user": files.CHILD_UID, "group": files.CHILD_UID, "extra_groups": []}  # _child_user() 降权时给的参数
         code = (
             "import os\n"

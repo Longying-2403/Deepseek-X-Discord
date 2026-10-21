@@ -2,6 +2,7 @@
 
 /ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
 /ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。
+/ds-music … 所有人：点歌（B站）、切歌、暂停、继续、停止、看队列、从队列里删歌、清空队列。切歌这些要在它放歌的语音频道里。
 /dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡等。
             和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
 """
@@ -24,6 +25,11 @@ from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
 
 if TYPE_CHECKING:
     from .discord_app import DSBot
+
+
+def discord_safe(text: str) -> str:
+    """外面来的文字（歌名、UP主的名字之类）发到 Discord 之前：Markdown 和 @ 都转义掉（不会变成加粗、剧透、@所有人）。"""
+    return discord.utils.escape_markdown(discord.utils.escape_mentions(text))
 
 log = logging.getLogger(__name__)
 
@@ -360,6 +366,11 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     if st["memes_on"] and st["media_blocked_for"] > 0:
         minutes = max(1, round(st["media_blocked_for"] / 60))
         lines.append(f"⚠️ 这里最近连着发不出图（多半是 bot 没有“附加文件”权限），约 {minutes} 分钟内先不发图，之后自动再试")
+    if st["music_on"]:
+        playing = f" · 现在{st['playing']}" if st["playing"] else ""
+        lines.append(f"点歌：开（/ds-music，只能放 B站的，按歌名找算一次联网搜索）{discord_safe(playing)}")
+    else:
+        lines.append(f"点歌：没启用（{bot.music_problem}）")
     if st["last_decision"]:
         lines.append(f"上次：{st['last_decision']}")
     lines.append(
@@ -421,6 +432,104 @@ def area_list_text(bot: "DSBot", guild: discord.Guild) -> str:
         lines.append("主动发言开着的地方：" + "、".join(proactive))
     lines.append("（帖子跟着所在频道走；频道的设置优先于类别，类别优先于全服务器）")
     return "\n".join(lines)
+
+
+async def _say_public(interaction: discord.Interaction, text: str, footer: str = "") -> None:
+    """大家都看得到的回复（点歌的结果）。歌名是外面来的：转义掉 Markdown 和 @。footer：自己写的提示（不转义）。"""
+    text = discord_safe(text)
+    text = (text if len(text) <= 1900 else text[:1900] + "…") + footer
+    none = discord.AllowedMentions.none()
+    if interaction.response.is_done():
+        await interaction.followup.send(text, allowed_mentions=none)
+    else:
+        await interaction.response.send_message(text, allowed_mentions=none)
+
+
+def register_music_commands(bot: "DSBot") -> None:
+    """/ds-music：人人都能用。点歌的人要在语音频道里；切歌、暂停、继续、停止、删除、清空要在它放歌的那个语音频道里。"""
+    group = app_commands.Group(name="ds-music", description="点歌：在语音频道里放 B站视频的声音", guild_only=True)
+
+    async def ready(interaction: discord.Interaction) -> bool:
+        if bot.music is None:
+            await _reply(interaction, f"点歌没有启用：{bot.music_problem}")
+            return False
+        if not bot.engine.enabled(*_ids(interaction)):
+            await _reply(interaction, "这个频道不在它回应的区域里，换个频道点歌。")
+            return False
+        return True
+
+    def name_of(interaction: discord.Interaction) -> str:
+        return getattr(interaction.user, "display_name", None) or interaction.user.name
+
+    async def run(interaction: discord.Interaction, op: str, query: str = "") -> None:
+        if not await ready(interaction):
+            return
+        if op in ("play", "stop"):
+            await interaction.response.defer(thinking=True)  # 找歌、拿视频信息、离开语音频道要几秒
+        text = await bot.engine.music_request(
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
+            name_of(interaction),
+            op,
+            query,
+            view=bot.settings.view(*_ids(interaction)),
+        )
+        footer = ""
+        if op == "queue" and bot.music is not None and bot.music.queued(interaction.guild_id):
+            footer = "\n-# 删掉某一首：`/ds-music 删除`（会列出队列里的歌）；清空后面排着的：`/ds-music 清空`"
+        await _say_public(interaction, text, footer)
+
+    @group.command(name="播放", description="点一首歌：写歌名（加上歌手更准），或者贴 B站视频链接")
+    @app_commands.rename(query="歌")
+    @app_commands.describe(query="比如“周杰伦 晴天”，或者 B站视频链接、BV 号（只能放 B站的，不放直播）")
+    async def play_cmd(interaction: discord.Interaction, query: app_commands.Range[str, 1, 200]) -> None:
+        await run(interaction, "play", query)
+
+    @group.command(name="切歌", description="跳过正在放的这首（要在它放歌的语音频道里）")
+    async def skip_cmd(interaction: discord.Interaction) -> None:
+        await run(interaction, "skip")
+
+    @group.command(name="暂停", description="暂停正在放的歌（要在它放歌的语音频道里）")
+    async def pause_cmd(interaction: discord.Interaction) -> None:
+        await run(interaction, "pause")
+
+    @group.command(name="继续", description="接着放暂停的歌（要在它放歌的语音频道里）")
+    async def resume_cmd(interaction: discord.Interaction) -> None:
+        await run(interaction, "resume")
+
+    @group.command(name="停止", description="停止放歌、清空队列，让它离开语音频道（要在它放歌的语音频道里）")
+    async def stop_cmd(interaction: discord.Interaction) -> None:
+        await run(interaction, "stop")
+
+    @group.command(name="队列", description="看看正在放什么、后面还有哪些")
+    async def queue_cmd(interaction: discord.Interaction) -> None:
+        await run(interaction, "queue")
+
+    @group.command(name="删除", description="从队列里删掉一首：输入时会列出队列里的歌；不填就删你自己最近点的那首")
+    @app_commands.rename(target="歌")
+    @app_commands.describe(target="选一首，或者填队列里的编号（看“队列”）、歌名；不填 = 你自己最近点的那首")
+    async def remove_cmd(interaction: discord.Interaction, target: Optional[app_commands.Range[str, 1, 100]] = None) -> None:
+        await run(interaction, "remove", target or "")
+
+    @remove_cmd.autocomplete("target")
+    async def remove_choices(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        music = bot.music
+        if music is None or interaction.guild_id is None:
+            return []
+        try:
+            if not bot.engine.enabled(*_ids(interaction)):
+                return []
+            return [Choice(name=name, value=value) for name, value in music.choices(interaction.guild_id, current or "")]
+        except Exception:
+            log.exception("列出队列里的歌出错")
+            return []
+
+    @group.command(name="清空", description="清掉后面排着的歌，正在放的这首接着放完（要在它放歌的语音频道里）")
+    async def clear_cmd(interaction: discord.Interaction) -> None:
+        await run(interaction, "clear")
+
+    bot.tree.add_command(group)
 
 
 def register_commands(bot: "DSBot") -> None:
@@ -712,6 +821,8 @@ def register_commands(bot: "DSBot") -> None:
         else:
             card = cards.get(guild_id, user_id)
             await interaction.response.send_modal(CardModal(bot, guild_id, card.text if card else ""))
+
+    register_music_commands(bot)
 
     @bot.tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:

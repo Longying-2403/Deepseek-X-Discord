@@ -192,6 +192,7 @@ class BotConfig:
     server_meme_dir: str = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的
     cards_database: str = "data/cards.sqlite3"  # 人设卡（和聊天记录分开存，方便备份、搬家）
     memory_database: str = "data/memory.sqlite3"  # 长期记忆
+    music: bool = True  # 点歌（B站，/ds-music）：要 yt-dlp、ffmpeg 和语音库（Docker 镜像里都装好了）
 
 
 @dataclass

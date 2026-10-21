@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS msgmap (
     author_name TEXT,
     PRIMARY KEY (channel_id, short_id)
 );
+CREATE INDEX IF NOT EXISTS idx_msgmap_message ON msgmap (channel_id, message_id);
 CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -213,6 +214,39 @@ class Store:
             ):
                 out[r["short_id"]] = (r["author_id"], r["author_name"] or "")
         return out
+
+    def recent_authors(self, channel_id: int, limit: int) -> list[tuple[int, str]]:
+        """这个频道最近说过话的人（不含 bot）：[(用户 ID, 最近一次的名字)]，最近的在前。"""
+        rows = self.db.execute(
+            "SELECT author_id, author_name FROM msgmap WHERE channel_id = ? AND author_id IS NOT NULL "
+            "ORDER BY short_id DESC LIMIT ?",
+            (channel_id, limit * 5),
+        ).fetchall()
+        seen: dict[int, str] = {}
+        for r in rows:
+            if r["author_name"]:
+                seen.setdefault(r["author_id"], r["author_name"])
+        return list(seen.items())[:limit]
+
+    def message_rows(self, channel_id: int, message_ids: Iterable[int]) -> dict[int, list[tuple[int, str | None]]]:
+        """消息 -> [(它在记录里的编号, 发消息的人当时的名字)]。不在记录里的消息不在结果里。"""
+        ids = sorted(set(message_ids))
+        out: dict[int, list[tuple[int, str | None]]] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            marks = ",".join("?" for _ in chunk)
+            for r in self.db.execute(
+                f"SELECT short_id, message_id, author_name FROM msgmap WHERE channel_id = ? AND message_id IN ({marks}) "
+                "ORDER BY short_id",
+                (channel_id, *chunk),
+            ):
+                out.setdefault(r["message_id"], []).append((r["short_id"], r["author_name"]))
+        return out
+
+    def update_turn(self, turn_id: int, content: Any) -> None:
+        """改写一条记录（消息被删、被编辑时用；平时记录只追加）。"""
+        with self.db:
+            self.db.execute("UPDATE turns SET content = ? WHERE id = ?", (_dump(content), turn_id))
 
     def set_reviewed(self, conv: Conversation, turn_id: int) -> None:
         """整理记忆整理到了哪条记录（只往前走，不会退回去）。"""
@@ -398,8 +432,9 @@ class Store:
         if channel_id is not None:
             where.append("channel_id = ?")
             args.append(channel_id)
-        # 打开链接、上网找图只是记次数（不是 DeepSeek 的调用），不算进调用次数和结果统计
+        # 打开链接、上网找图、点歌时按歌名找歌只是记次数（不是 DeepSeek 的调用），不算进调用次数和结果统计
         where.append("kind NOT IN ('link', 'image')")
+        where.append("NOT (kind = 'search' AND outcome = 'music')")
         clause = " AND ".join(where)
         totals = self.db.execute(
             f"SELECT COUNT(*) AS n, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",

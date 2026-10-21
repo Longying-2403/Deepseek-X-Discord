@@ -225,6 +225,11 @@ class CardStore:
     def count(self, guild_id: int) -> int:
         return int(self.db.execute("SELECT COUNT(*) AS n FROM cards WHERE guild_id = ?", (guild_id,)).fetchone()["n"])
 
+    def owners(self, guild_id: int) -> list[tuple[int, str]]:
+        """这个服务器里有人设卡的人：[(用户 ID, 卡上记的名字)]（它在话里 @ 人时用）。"""
+        rows = self.db.execute("SELECT user_id, name FROM cards WHERE guild_id = ? AND name != ''", (guild_id,)).fetchall()
+        return [(r["user_id"], r["name"]) for r in rows]
+
     def find(self, guild_id: int, wanted: str, *, limit: int = 3) -> list[Card]:
         """按名字找人设卡：先找名字完全一样的（不分大小写），没有再找名字里包含它的。"""
         key = " ".join(wanted.split()).lstrip("@＠").strip().casefold()

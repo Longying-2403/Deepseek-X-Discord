@@ -8,45 +8,51 @@
 
 - **被叫到就回**：有人 @ 它、回复它的消息、或叫它的别名，立刻回应。
 - **主动接话**（按频道开启）：等群里冷场一小会儿（或等太久），再让模型判断要不要说话；默认倾向沉默。
-- **像真人**：口语化，长短看场合（随口接话一两句，接剧情时多写几句）；先显示“正在输入”，按字数等几秒再发；可以把一段话拆成两三条，或只加个表情。别人聊得正起劲时也会委婉地插一句，被拒绝就道个歉，这个话题里不再插话。
+- **像真人**：口语化，长短看场合（随口接话一两句，接剧情时多写几句）；先显示“正在输入”，按字数等几秒再发；可以把一段话拆成两三条。不需要说什么的（道谢、晚安、哈哈哈）就只加个表情。别人聊得正起劲时也会委婉地插一句，被拒绝就道个歉，这个话题里不再插话。
+- **会 @ 人**：它话里写的 @某人、#频道 会变成真的 @ 和频道链接；有人叫它的时候，被 @ 的人才会真的收到提醒。
+- **跟着删改**：群友删掉的消息，它的聊天记录里也跟着删掉；编辑过的消息，它会以改过之后的内容为准。
 - **会用服务器的表情和贴图**：知道这个服务器有哪些自定义表情和贴图，回复里、加表情反应、单独发一张贴图都行。
 - **能陪着演**：群友拉它角色扮演时，照设定演、跟着剧情走，动作写在斜体括号里；戏散了自动回到平时的样子。
 - **记得每个人**：每个群友一张人设卡（他自己说的称呼、设定比如自称猫娘、喜好和雷点），聊天时自然地用上；还有一份这个服务器的长期记忆（约定、大事、长期的梗和剧情）。说“记住……”当场记下，平时它会趁聊天安静下来时自己整理。人设卡只有本人能看、能改（`/ds-rp`），管理员也看不到。
 - **dsowner 能在聊天里改人设**：`OWNER_ID` 本人叫它说“以后说话毒舌一点”，它会把人设改好并存进设置，说“改回去”还能撤销；别人这么说，它会让对方找 dsowner。
 - **话量可控**：主动发言额度按群里的消息量恢复，群越热闹恢复越快；档位和各项参数都能在 Discord 里调。
-- **省钱**：对话历史只追加不改写，尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
+- **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
 - **能打开链接**：平时看 Discord 生成的链接预览；被叫到时真的打开：X（推特）的推文走 FxTwitter（不用账号），别的网页交给 Tavily。要登录才能看的网站只看预览。
 - **会发表情包和图**：有表情包库（通用的放在 NAS 上，各服务器也能自己上传），也会上网找图——找到的图它先看一遍，合适才发。
 - **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 自带的搜索查一下再回答。每个服务器每天有次数上限。
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
+- **会点歌**：进语音频道后叫它“放首晴天”，或者用 `/ds-music 播放`，它会进你所在的语音频道放 B站视频的声音；同一个语音频道里的人都能切歌、暂停、停止。只能放 B站的，不放直播。
 - **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
-> 这是中文版（命令、回复和文档都是中文）。英文版功能相同、全部是英文，在 [`english` 分支](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)，也可以在 [Releases](https://github.com/Longying-2403/Deepseek-X-Discord/releases) 下载 `-en.zip`。
+> 这是中文版（命令、回复和文档都是中文）。英文版全部是英文，在 [`english` 分支](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)；它目前是 v2.0.0，还没有之后加的功能（会 @ 人、跟着删改、会点歌），可以在 [v2.0.0 的 Release](https://github.com/Longying-2403/Deepseek-X-Discord/releases/tag/v2.0.0) 下载 `-en.zip`。
 
 A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like any other member:
 
 - **Answers when called**: when someone @mentions it, replies to one of its messages, or uses one of its aliases, it responds right away.
 - **Joins in on its own** (per channel): it waits for a short lull in the chat (or until it has waited long enough), then lets the model decide whether to say anything; by default it leans toward staying quiet.
-- **Feels human**: casual, with the length fitting the moment (a sentence or two for a quick comeback, a few more when it's playing along with a story). It shows "typing…" first and waits a few seconds based on the length before sending; it can split a thought into two or three messages, or just react with an emoji. When people are deep in a conversation it may tactfully chime in, and if it's told to stay out of it, it apologizes and keeps out of that topic.
+- **Feels human**: casual, with the length fitting the moment (a sentence or two for a quick comeback, a few more when it's playing along with a story). It shows "typing…" first and waits a few seconds based on the length before sending; it can split a thought into two or three messages. When nothing needs saying (thanks, good night, lol), it just reacts with an emoji. When people are deep in a conversation it may tactfully chime in, and if it's told to stay out of it, it apologizes and keeps out of that topic.
+- **Mentions people**: an @name or #channel in what it writes becomes a real mention or channel link; people only actually get notified when someone called it.
+- **Keeps up with deletes and edits**: when someone deletes a message, it's deleted from its chat history too; for an edited message, it goes by the edited version.
 - **Uses the server's emoji and stickers**: it knows which custom emoji and stickers this server has, and can use them in replies, as reactions, or send a sticker on its own.
 - **Plays along**: when people pull it into a roleplay, it plays the part they set up and follows the story, with actions in italic parentheses; once the scene is over, it goes back to its usual self.
 - **Remembers everyone**: each member gets a profile card (what they've said about themselves: what to call them, a character they've given themselves such as being a catgirl, likes and pet peeves), and it uses it naturally in chat; there's also a long-term memory for the server (agreements, big events, long-running jokes and storylines). Say "remember …" and it saves it on the spot; otherwise it reviews the chat on its own once things go quiet. A profile card can only be seen and edited by its owner (`/ds-rp`), not even by admins.
 - **dsowner can change its persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites its persona and saves it to the settings, and "change it back" undoes that; if anyone else asks, it tells them to ask dsowner.
 - **You control how much it talks**: its quota for speaking up on its own refills with the chat's message volume, so the livelier the chat, the faster it refills. Presets and every parameter can be adjusted from inside Discord.
-- **Saves money**: the conversation history is append-only and never rewritten, to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
+- **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
 - **Opens links**: normally it sees the link previews Discord generates; when it's called it really opens them: posts on X (Twitter) through FxTwitter (no account needed), other web pages through Tavily. Sites you have to log in to see only get the preview.
 - **Sends memes and pictures**: it has a meme library (a shared one on your NAS, and each server can upload its own), and it can also look for pictures online. It looks at what it finds first and only sends one if it fits.
 - **Searches the web**: when it's called with a question about news, prices, scores, weather or anything else recent that it doesn't know, it looks it up with DeepSeek's built-in search first, then answers. Each server has a daily search cap.
 - **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share. Private channels don't share by default.
+- **Plays music**: join a voice channel and ask it to "play some Jay Chou", or use `/ds-music 播放`, and it joins your voice channel and plays the audio of a Bilibili video; anyone in the same voice channel can skip, pause or stop. Bilibili only, no live streams.
 - **You control where it responds**: limit it by channel, by category, or for the whole server.
 
 It replies in the language of the message it's answering, so it also works in mixed-language servers.
 
-> **English edition:** this page describes the Chinese edition, whose commands and replies are in Chinese. The English edition has the same features with English commands, replies and docs. It lives on the [`english` branch](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english), or download the `-en.zip` from [Releases](https://github.com/Longying-2403/Deepseek-X-Discord/releases).
+> **English edition:** this page describes the Chinese edition, whose commands and replies are in Chinese. The English edition, with English commands, replies and docs, lives on the [`english` branch](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english). It's currently at v2.0.0 and doesn't have the features added since (mentioning people, keeping up with deletes and edits, playing music); download it as `-en.zip` from the [v2.0.0 release](https://github.com/Longying-2403/Deepseek-X-Discord/releases/tag/v2.0.0).
 
 ---
 
@@ -58,7 +64,7 @@ It replies in the language of the message it's answering, so it also works in mi
 2. 左侧 **Bot** 页：
    - 点 Reset Token，复制 token（填到 `.env` 的 `DISCORD_TOKEN`）。
    - 往下找到 **Privileged Gateway Intents**，打开 **Message Content Intent**（必须，否则看不到消息内容）。
-3. 邀请进服务器：bot 第一次启动时会在日志里打印邀请链接（已带好权限）。也可以在后台 **OAuth2 → URL Generator** 里勾 `bot` 和 `applications.commands`，权限勾：查看频道、发送消息、在帖子中发送消息、读取消息历史、添加反应、嵌入链接、附加文件（发表情包和图要用；1.4.0 之前邀请的 bot 一般也有，因为 @everyone 默认就有这个权限）。
+3. 邀请进服务器：bot 第一次启动时会在日志里打印邀请链接（已带好权限）。也可以在后台 **OAuth2 → URL Generator** 里勾 `bot` 和 `applications.commands`，权限勾：查看频道、发送消息、在帖子中发送消息、读取消息历史、添加反应、嵌入链接、附加文件（发表情包和图要用；1.4.0 之前邀请的 bot 一般也有，因为 @everyone 默认就有这个权限）、连接、说话（点歌要用；之前邀请的 bot 一般也有，@everyone 默认就有）。
 
 > 小规模用不需要审核。bot 进到 100 个服务器以上要先完成 Discord 的应用验证；能看到它的用户超过 1 万人时，Message Content 这个特权 intent 也要提交审核，到时 Discord 会通知你。
 
@@ -92,15 +98,15 @@ docker compose up -d --build
 docker compose logs -f          # 看日志，确认“已登录”
 ```
 
-数据库在 `./data/`。改了 `config.toml` 之后 `docker compose restart` 就行；改了 `.env` 要用 `docker compose up -d --force-recreate`（restart 不会重新读 `.env`）。
+数据库在 `./data/`。改了 `config.toml` 或 `.env` 之后，用 `docker compose up -d --force-recreate` 重建容器（`.env` 只在建容器时读，`restart` 不会重新读）。
 
-用群晖 Container Manager 的话：改了 `.env`，到“项目”里选中它 → 操作 → 停止，再 操作 → 构建（会删掉旧容器、用新的 `.env` 重建；数据在 `./data/` 里不受影响）。只在“容器”页面点重新启动不会读新的 `.env`，也不会换上新代码。
+用群晖 Container Manager 的话：改了 `.env` 或 `config.toml`，到“项目”里选中它 → 操作 → 停止，再 操作 → 构建（会删掉旧容器、用新的设置重建；数据在 `./data/` 里不受影响）。只在“容器”页面点重新启动不会读新的 `.env`，也不会换上新代码。
 
 **更新到新版本**：代码是构建时复制进镜像的，所以要把新代码放进项目原来的文件夹，再重新构建：
 
-1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的 `dsbot`；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。
+1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 或 2.2.1 更新到 2.2.2 只有 `dsbot` 文件夹变了。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.0.0 启动中`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.2.2 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 3 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -115,6 +121,8 @@ python -m dsbot --test-image "水豚"              # 可选：真的找一次图
 python -m dsbot
 ```
 
+点歌还要装 ffmpeg（比如 `sudo apt install ffmpeg`）；没装的话别的功能照常，只是点歌用不了，`--check` 会提醒。
+
 ---
 
 ## 三、上手
@@ -127,7 +135,7 @@ python -m dsbot
 4. 给它定人设：`/ds 人设`（弹出编辑框）；`OWNER_ID` 本人也可以直接在聊天里 @ 它让它改（见下面“十二”）
 5. 想让它记得别的频道聊过的事：`/ds 记忆共享 操作:开 范围:全服务器`（见下面“七、跨频道记忆”）
 6. 给它几张表情包：`/ds 表情包 操作:上传`（见下面“十、发表情包和图”）
-7. 告诉群友：用 `/ds-rp` 可以看、改自己的人设卡，叫它“记住……”也行（见下面“十一、人设卡和长期记忆”）
+7. 告诉群友：用 `/ds-rp` 可以看、改自己的人设卡，叫它“记住……”也行（见下面“十一、人设卡和长期记忆”）；想听歌就先进语音频道，再叫它“放首晴天”或者用 `/ds-music 播放`（见下面“十三、点歌”）
 8. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/ds 区域列表` 看它在哪些地方会回应
 
 不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
@@ -151,7 +159,7 @@ python -m dsbot
 | `/ds 记忆共享` | 开 / 关 / 跟随上级。开了共享的频道之间互通记忆；私密频道要在那个频道里单独开才会分享出去 |
 | `/ds 表情包` | 这个服务器的表情包库：上传（附上图片、写个名字）/ 删除 / 列表 |
 | `/ds 长期记忆` | 这个服务器的长期记忆：查看 / 添加 / 删除（填编号）/ 清空（会再确认一次） |
-| `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数 |
+| `/ds 状态` | 查看本频道的设置、额度、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数、点歌的状态 |
 | `/ds 清空记忆` | 清空本频道的对话记录和摘要 |
 
 除了“清空记忆”“状态”“区域列表”“表情包”“长期记忆”，这些命令都有一个“范围”选项：**本频道**（默认，人设除外）、**本类别**（Discord 里的“XX区”）、**全服务器**。
@@ -167,6 +175,19 @@ python -m dsbot
 | `/ds-rp` | 打开编辑框，查看、修改自己在这个服务器的人设卡（只有自己看得到）；清空编辑框就是删掉这张卡（还能改回上一版） |
 | `/ds-rp 操作:改回上一版` | 卡被改坏了（或者删错了）：改回上一个版本，最多能往回改 5 次 |
 | `/ds-rp 操作:清空` | 删掉自己的人设卡，连同旧版本，找不回来 |
+
+### `/ds-music`（所有人）
+
+| 命令 | 作用 |
+|---|---|
+| `/ds-music 播放 歌:周杰伦 晴天` | 点一首歌：写歌名（加上歌手更准），或者贴 B站视频链接、BV 号。要先进语音频道 |
+| `/ds-music 切歌` / `暂停` / `继续` | 要在它放歌的那个语音频道里才能用 |
+| `/ds-music 删除` | 从队列里删掉一首：点“歌”那一栏会列出队列里的歌，选一首就行（也可以填编号、歌名）；不填就是删你自己最近点的那首。也要在那个语音频道里 |
+| `/ds-music 清空` | 清掉后面排着的歌，正在放的这首接着放完（也要在那个语音频道里） |
+| `/ds-music 停止` | 停止放歌、清空队列，让它离开语音频道（也要在那个语音频道里） |
+| `/ds-music 队列` | 看看正在放什么、后面还有哪些（前面的编号就是删除时用的编号） |
+
+不用命令也行：叫它“放首晴天”“切歌”“暂停一下”“刚才点错了，删掉”“把第 2 首删了”“现在放的什么”都可以（见“十三、点歌”）。
 
 ### `/dsowner`（只有你能用；只出现在 `CONTROL_GUILD_ID` 那个服务器，有“管理服务器”权限的人看得到）
 
@@ -212,7 +233,7 @@ python -m dsbot
 | 看图 | 开 | 是否把图片发给模型 |
 | 读文件 | 开 | 是否读取群友上传的文件 |
 | 联网搜索 | 开 | 被叫到时，需要最新信息就上网搜 |
-| 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
+| 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。按歌名点歌也算一次（见“十三”）。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
 | 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily） |
 | 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
 
@@ -281,7 +302,7 @@ python -m dsbot
 群友发的链接，它分两种情况看：
 
 - **平时**（包括主动聊天）：只看 Discord 自己生成的链接预览：标题、作者、开头一段描述，预览图也会看（排在群友发的图后面）。不额外花钱。
-- **被叫到时真的打开**：叫它的那条消息里的链接、叫它时回复的那条消息里的链接、同一个人两分钟内刚发的链接，会直接打开再回答；“帮我看看上面那个链接”这种，它会自己去打开（和看文件一样，多一次调用，慢几秒）。
+- **被叫到时真的打开**：叫它的那条消息里的链接、叫它时回复的那条消息里的链接、同一个人两分钟内刚发的链接，会直接打开再回答；“帮我看看上面那个链接”这种，它会自己去打开（和看文件一样，多一次调用，慢几秒）。B站的视频链接（包括 `b23.tv` 短链接）不打开，只看 Discord 的预览（标题、简介、封面）：视频它本来就看不了，要放歌就叫它点歌（见“十三”）。
   - **X（推特）的推文**：走 [FxTwitter](https://github.com/FxEmbed/FxEmbed) 的免费接口，不用账号、不用 key。能拿到全文、引用的推文、投票、社区笔记和图片（图片交给它看图）。视频只看得到时长和封面。
   - **别的网页**：交给 [Tavily](https://tavily.com) 去抓，要在 `.env` 里填 `TAVILY_API_KEY`。每打开 5 个网页算 1 次额度（免费每月 1000 次）。没填的话，别的网站只看预览。
   - **要登录才能看的网站**（Threads、IG、Facebook、小红书……）多半打不开，它会照实说只看到了预览，不会照着标题瞎猜。
@@ -358,6 +379,25 @@ python -m dsbot
 
 角色卡之类的长设定：单条消息进上下文前最多 1800 字（`config.toml` 里的 `max_chars_per_message`）。更长的就做成 .txt 发出来，在同一条消息里 @ 它，会整份读（最多 2 万字）。
 
+**加表情就够的时候不硬回**：被叫到时，如果对方的话不需要它说什么（道谢、晚安、收到、哈哈哈、只是给它看个东西），它会只加个表情；好几个人同时叫它，也不一定每条都回话。
+
+**@ 人和频道**：它话里写 `@名字 `、`#频道名 `（名字后面空一格），发出去之前会换成真的 @ 和频道链接。
+- **能 @ 的人**：最近在这个频道说过话的、最近消息里被 @ 过的、这个服务器有人设卡的；都对不上的话，再按名字的开头在服务器成员里找一次（Discord 按用户名和服务器昵称找）。同名分不清的、它自己、别的 bot，保持普通文字。@everyone、@here、身份组永远不会变成真的 @。
+- **名字后面要隔开**（空格、标点或者结尾）才会换：“@阿明 快上线”会换，“@阿明快上线”不换。这样“@大家”不会被当成 @ 一个叫“大”的人。代码块和网址里的 @（比如 `youtube.com/@xxx`）也不换。
+- **什么时候真的提醒**：只在有人叫它的时候；它这一次回话（分几条发也算一次）最多提醒 3 个人；同一个人 5 分钟内最多被它提醒一次；整个服务器 10 分钟内最多提醒 10 次。其他时候 @ 只显示成蓝字，不发通知。它主动插话时也只显示、不提醒。
+- 频道链接：这个服务器里它看得到的频道和帖子。纯数字的（比如 `#12`，那是它看的消息编号）不换。
+
+**消息被删除、被编辑**：
+- 还没轮到它处理的：删了就不看了，那条是在叫它的话就不回；改了就看改过的。改的时候补上 @它，算叫它；把 @ 删掉，就不回了。
+- 它正在想怎么回的：删了就不回那条、也不给那条加表情；人设卡也不照那条改。
+- 已经在它聊天记录里的：
+  - **删除**：那一行变成“（这条消息已删除）”，带的图、文件和链接内容一起拿掉。整理记忆、压缩成摘要、别的频道来翻记录时都看不到了。
+  - **编辑**：最近几轮里的消息，直接换成新内容，标上〔已编辑〕；更早的消息，记录不动，下一轮附一句“（#12 阿明 改了这条消息，现在是：……）”。
+  - 别的 bot 一直在改自己的消息（播放进度、投票、倒计时之类）：还没处理的照样更新，已经在记录里的不跟着改。
+- 为什么编辑早的消息不直接改：改写旧记录会让那一处之后的缓存全部失效，有人一直改很早的消息就会一直多花钱。删除总是直接改（隐私优先），每删一条最多多花不到 1 美分（上下文满 3 万 token、删的是最早那条的时候）。
+- 所以**想让它彻底忘掉某条消息里的内容（比如不小心发了手机号），请删掉那条消息，不要只是编辑**：编辑较早的消息时，旧内容还留在它的记录里，只是会告诉它以新的为准。
+- 收不回来的：已经压进摘要的、已经写进人设卡或长期记忆的、它自己的回复里复述过的、已经带到别的频道去的近况。人设卡本人可以用 `/ds-rp` 改，长期记忆管理员可以用 `/ds 长期记忆` 删。它自己发的消息被删掉，不影响它的记录。
+
 **服务器表情和贴图**：它知道这个服务器有哪些自定义表情和贴图（名单放在 system prompt 里，最多列 100 个表情、30 张贴图，在 `[engine]` 的 `emoji_list_limit`、`sticker_list_limit` 改）。回复里写 `:名字:` 会变成那个表情，加表情反应也能用服务器表情，也能单独发一张贴图（和说话一样算一次发言、扣额度）。只给某些身份组用、bot 又没有那个身份组的表情，以及因为加成等级掉了的表情和贴图，不会列出来。
 
 **聊天里改人设**：`OWNER_ID` 本人叫它（@、回复它或者叫别名都行）说“以后说话毒舌一点”之类，它会把改好的完整人设存进设置，和用 `/ds 人设` 改一样，下一轮生效。改好后它会在你那条消息上加个 📝，看到它就是真的改了。
@@ -369,7 +409,47 @@ python -m dsbot
 
 这些规则都写在 `dsbot/prompts.py` 里，改那里要重新构建容器（Container Manager 里是项目先停止再构建）。
 
-## 十三、它是怎么工作的
+## 十三、点歌（B站）
+
+它能进语音频道放 B站视频的声音。只能放 B站的：YouTube 现在要登录验证、限制越来越多，暂时不支持。
+
+**怎么点**
+- 先进一个语音频道，然后：
+  - 在聊天里叫它：“@小D 放首晴天”“来点周杰伦”“放这个 BV1xx411c7mD”。切歌、暂停、继续、停止、删歌、清空队列，问“现在放的什么”，也都可以直接跟它说。
+  - 或者用 `/ds-music`：`播放`（填歌名或者 B站链接）、`切歌`、`暂停`、`继续`、`停止`、`队列`、`删除`、`清空`。不经过 DeepSeek，不花钱。
+- **点错了、不想听某一首**：跟它说“刚才那首不要了”（不说哪首，就删你自己最近点的那首）、“把第 2 首删了”“把稻香删了”，或者用 `/ds-music 删除`（点“歌”那一栏会列出队列里的歌，选一首就行）。编号就是 `/ds-music 队列` 里前面的数字，1 是接下来要放的那首；一次可以删好几首（“删掉第 2 和第 4 首”“把 2 到 5 删了”，或者填 `2 4`、`2-5`）。删到正在放的那首就等于切歌。后面排着的全都不要了，用 `/ds-music 清空`（正在放的接着放完）。一句话里说好几件事（“放 X，然后把它删了”“先清空，再放 X”），它会照你说的顺序办。
+- 它会进你所在的那个语音频道（耳机图标是关着的：它只放歌，听不到大家说话）。它正在别的语音频道放歌时，会请你过去一起听，或者等那边放完。
+- 写歌名时，它会上网找 B站上的视频，挑标题最对得上的：原曲、官方 MV 优先，翻唱、伴奏、教学、合集往后（你自己说要那种的除外）。没填 `TAVILY_API_KEY`、用 B站自己的搜索时，B站的搜索结果没有标题，就照 B站的排序。找错了就直接贴 B站链接（`bilibili.com/video/…`、`b23.tv/…` 短链接，带不带 `https://` 都行；只写 BV 号、av 号也行），或者把歌手说清楚。分 P 的视频放链接里那一 P。
+- 不限时长，不限队列长短。直播不放。
+- 第一首要先下载才能放，一般几秒；很长的视频要久一点，它会先说“正在下载”，下好了自己开始放。每个服务器只先下载接下来的两首，后面的轮到了再下载，所以队列再长，NAS 上也只存着几首。
+
+**谁能操作**
+- 谁都能点歌（要在语音频道里）。
+- 切歌、暂停、继续、停止、删除、清空：在它放歌的那个语音频道里的人都能用（也能删别人点的歌），不在里面的不行。
+
+**它什么时候离开**
+- 放完了 5 分钟没人点歌，或者语音频道里只剩它 2 分钟。
+- 有人用了“停止”；被管理员踢出语音频道、或者语音一直连不上（超过 1 分钟）时，队列也会清掉。
+- 在最后一次点歌的那个文字频道里，它会说一声的：自动放下一首、下载失败、放不出来跳过、语音频道没人了离开、语音断了。放完了没人点歌、安静地离开时不说。
+
+**次数和费用**
+- 写歌名点歌算一次联网搜索，和“八、联网搜索”共用每个服务器每天的次数（`每日搜索上限`，默认 30）。用完了直接贴 B站链接还能点。每个人每分钟最多按歌名点“每人每分钟点名”那么多次（默认 3 次），免得一个人一下子把全服务器的次数用光；贴链接不受这个限制。
+- 找歌优先用 Tavily（填了 `TAVILY_API_KEY` 时，每次用掉 1 次额度）；没填就用 B站自己的搜索，但它很容易被 B站风控拦下来，建议填。
+- 在聊天里叫它点歌，它要先点歌再回话，会多一次调用（很便宜）。
+- 下载和播放都在 NAS 上，不用 B站账号：音质最高 192 kbps（更高的要大会员）。要登录、开大会员、付费才能看的视频，在你那里看不了的视频（地区限制），放不了，它会照实说原因。
+- 下载的音频存在容器里的临时文件夹，放完、切掉、停止就删，重启时也会清空，不占 `data/`。
+
+**权限**
+- bot 要有那个语音频道的“连接”和“说话”权限。新的邀请链接已经带上了；之前邀请的 bot 一般也有（@everyone 默认就有这两个权限），没有的话在语音频道的设置 → 权限里给 bot 的身份组打开。
+- 舞台频道放不了，要用普通的语音频道。频道满员时它进不去（除非它有“移动成员”权限）。
+
+**出问题时**
+- 它说“B站暂时把请求拦下来了（风控）”：B站觉得请求太多了，过几分钟再试。多半发生在没填 `TAVILY_API_KEY`、用 B站自己的搜索的时候；直接贴链接比较不容易被拦。队列排得很长时，后面的歌下载前可能要重新向 B站拿一次信息，这时被拦的话，它会说一声，过 3 分钟再接着下载，排着的歌不会被跳过。
+- 突然所有歌都放不了（多半是 B站改版了）：要更新 yt-dlp。SSH 进 NAS，在项目文件夹里跑 `sudo docker compose build --no-cache && sudo docker compose up -d`（要加 `--no-cache` 才会装上新版的 yt-dlp）。
+- 关掉点歌：`config.toml` 的 `[bot]` 里写 `music = false`，再 `docker compose up -d --force-recreate`。
+- `docker compose exec dsbot python -m dsbot --check` 会显示点歌要用的东西（yt-dlp、ffmpeg、语音库）在不在；`/ds 状态` 里也有一行点歌的状态。
+
+## 十四、它是怎么工作的
 
 ```
 消息进来 ──► 存进该频道的缓冲区
@@ -382,21 +462,23 @@ python -m dsbot
 一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息（该读的文件、该打开的链接的内容跟在后面）
       → 连同全部历史发给 DeepSeek（JSON 输出）
       → 模型返回 {"actions": [...]}：回复 / 加表情 / 发贴图 / 发表情包 / 找图 / 发找到的图 / 看文件或打开链接 /
-        上网搜 / 翻别的频道 / 改人设 / 改人设卡 / 记长期记忆 / 查人设卡 / 什么都不做
-        （要看文件、打开链接、搜索、找图、翻记录、改人设、查人设卡时：办完把结果追加进去，再问它一次）
+        上网搜 / 翻别的频道 / 改人设 / 改人设卡 / 记长期记忆 / 查人设卡 / 点歌 / 什么都不做
+        （要看文件、打开链接、搜索、找图、翻记录、改人设、查人设卡、点歌时：办完把结果追加进去，再问它一次）
       → 这一轮的 user + assistant 原样追加进历史（沉默也记）
-      → 显示“正在输入”，按字数等几秒再发
+      → 显示“正在输入”，按字数等几秒再发（话里的 @名字、#频道名 换成真的 @ 和频道链接）
+
+消息被删、被编辑 ──► 缓冲区里的直接更新；已经在历史里的：删除改写那一行，编辑最近的改写那一行、早的下一轮附一句
 
 频道安静下来（或者旧记录要压缩之前）──► 整理记忆：回顾还没整理过的聊天，更新人设卡和长期记忆
 ```
 
-**缓存**：历史只追加、不改写，system prompt 固定（时间等会变的信息放在每轮消息里），所以每次请求都以上一次的请求开头，绝大部分输入按缓存命中价计费（便宜约 50 倍）。上下文太长时把较旧的一半（按 token 估算）压成摘要，最近 6 轮不动，只在那一次 miss。日志里每轮都会打印输入 token 数和命中数。
+**缓存**：历史只追加、不改写（消息被删、最近的消息被编辑时例外），system prompt 固定（时间等会变的信息放在每轮消息里），所以每次请求都以上一次的请求开头，绝大部分输入按缓存命中价计费（便宜约 50 倍）。上下文太长时把较旧的一半（按 token 估算）压成摘要，最近 6 轮不动，只在那一次 miss。日志里每轮都会打印输入 token 数和命中数。
 
 **费用参考**（高峰价，3 万 token 上下文，缓存正常时只有新消息那几百 token 未命中）：一次判断约 0.04–0.06 美分（开思考会多一些推理 token）；一个频道全天热聊、每 3 分钟判断一次，一天约 5–10 美分。非高峰时段（含周末）半价。价格变动时改 `config.toml` 的 `[pricing]`。
 
 ---
 
-## 十四、常见问题
+## 十五、常见问题
 
 **@ 它没反应**
 - 这个频道不在允许的区域：`/ds 状态` 第一行会提示，`/ds 区域列表` 看整体设置。
@@ -432,11 +514,25 @@ python -m dsbot
 
 **人设卡被改坏了**：本人用 `/ds-rp 操作:改回上一版`，或者直接打开编辑框改。
 
+**它 @ 了人，对方却没收到提醒**：只有有人叫它的时候才真的提醒，同一个人 5 分钟内只提醒一次，一次回话最多提醒 3 个人，整个服务器 10 分钟内最多 10 次（见“十二”）。它 @ 的名字对不上人（最近没说过话、没有人设卡、按名字也找不到）、名字后面没隔开、或者有两个人同名时，会保持普通文字。
+
+**点歌说“点歌没有启用”**：`/ds 状态` 里会写原因。多半是只换了 `dsbot` 文件夹，没换 `Dockerfile` 和 `requirements.txt`，镜像里没装 ffmpeg、yt-dlp 和语音库：把这两个文件也换成新的，再 `sudo docker compose up -d --build`。
+
+**看不到 `/ds-music`（或者别的新命令）**：
+- Discord 会缓存命令列表：电脑版按 Ctrl+R（Mac 是 ⌘R）刷新，手机版把 App 完全关掉再打开。
+- 看日志里启动时那一行：2.2.1 起会写成 `已注册 3 个全局斜杠命令：/ds、/ds-rp、/ds-music`（顺序可能不一样）。后面没列出名字、或者只有 2 个，说明跑的还是旧代码（回到“更新到新版本”那几步）；有“注册全局斜杠命令失败”，看后面写的原因。
+- `config.toml` 里的 `sync_commands_on_start` 要是 `true`（默认就是）。
+- 服务器设置 → 整合 → 这个 bot：管理员可能限制了谁能用它的命令。
+
+**它说自己不能删歌、没有指令**：2.2.1 之前它确实不会删歌，也不知道有 `/ds-music`，更新以后就会了。它要是还照着自己以前在频道里说过的话回答，跟它说一句“现在可以删歌了”就行；实在不行再用 `/ds 清空记忆`（会清掉这个频道的聊天记录）。
+
+**点歌之后没声音**：看它在语音频道里头像有没有亮绿圈（在说话）。没有的话检查它在那个语音频道的“说话”权限，日志里搜“放不出来”“下载”。
+
 **私信**：目前只在服务器里工作，不处理私信。
 
 ---
 
-## 十五、开发
+## 十六、开发
 
 欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤、几条设计约束，以及中英两个版本怎么同步。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -451,13 +547,15 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 | `dsbot/engine.py` | 调度引擎：缓冲、时机判断、额度、预算、执行动作、压缩摘要、跨频道记忆 |
 | `dsbot/render.py` / `prompts.py` | 聊天记录渲染格式、system prompt |
 | `dsbot/memory.py` | 人设卡、长期记忆的存储（各一个 SQLite 文件），整理记忆的输出解析 |
+| `dsbot/mentions.py` | 把它话里的 @名字、#频道名 换成真的 @ 和频道链接 |
+| `dsbot/music.py` | 点歌：找歌（Tavily / B站搜索）、yt-dlp 下载音频、每个服务器的播放队列；Discord 语音那一层在 `discord_app.py` 的 `DiscordVoice` |
 | `dsbot/llm.py` | DeepSeek HTTP 客户端（思考开关、JSON 模式、用量解析） |
 | `dsbot/files.py` | 读文件：分类、解码、PDF / Office 解析、解析子进程 |
 | `dsbot/search.py` | 联网搜索：DeepSeek 自带的 web_search（Anthropic 兼容接口），Tavily 备用 |
 | `dsbot/links.py` / `tavily.py` | 读链接：推文走 FxTwitter，网页走 Tavily Extract |
 | `dsbot/pictures.py` / `memes.py` | 上网找图（Tavily）、表情包库 |
 | `dsbot/net.py` | 调用外部 API；下载网上的图时只连公网地址 |
-| `dsbot/discord_app.py` / `convert.py` | Discord 事件与消息转换、发送、表情和贴图、“正在输入” |
+| `dsbot/discord_app.py` / `convert.py` | Discord 事件（含删除、编辑）与消息转换、发送、表情和贴图、“正在输入” |
 | `dsbot/commands.py` | 斜杠命令和人设编辑框 |
 | `dsbot/config.py` / `settings.py` | 配置、参数定义与分层覆盖 |
 | `dsbot/store.py` / `ledger.py` | SQLite 存储、每日花费 |

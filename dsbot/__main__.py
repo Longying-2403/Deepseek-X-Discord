@@ -85,6 +85,15 @@ def check(config_path: str) -> int:
               "想试试：python -m dsbot --test-link 网址 / --test-image 关键词")
     else:
         print("! 没填 TAVILY_API_KEY：只能打开 X 的推文（别的网站只看 Discord 的预览），也不能上网找图（表情包库照常能用）")
+    from .music import missing_parts
+
+    if str(cfg.bot.music).strip().lower() in ("false", "0", "no", "off", ""):
+        print("· 点歌：config.toml 里关掉了（[bot] music = false）")
+    elif missing := missing_parts():
+        print(f"! 点歌用不了：{missing}")
+    else:
+        how = "Tavily" if secrets.tavily_api_key else "B站自己的搜索（容易被风控，建议填 TAVILY_API_KEY）"
+        print(f"✓ 点歌：yt-dlp、ffmpeg、语音库都在（只能放 B站的；按歌名找歌用 {how}）")
     from .memes import MemeLibrary
 
     memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)

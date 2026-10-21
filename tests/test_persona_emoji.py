@@ -98,7 +98,7 @@ class PromptRules(unittest.TestCase):
         self.assertIn("「〔dsowner〕」表示发言的是 dsowner", SYSTEM_RULES)
         self.assertIn('{"type": "persona"', SYSTEM_RULES)
         self.assertIn('"undo": true', SYSTEM_RULES)
-        self.assertIn("read、search、recall、persona、who 只在被叫到时用", SYSTEM_RULES)
+        self.assertIn("read、search、recall、persona、who、music 只在被叫到时用", SYSTEM_RULES)
         self.assertIn("persona 要单独用", SYSTEM_RULES)
         self.assertIn('dsowner 说"照他说的改"之类，也算他自己要改', SYSTEM_RULES)
         self.assertIn('写 "" 就是不再单独设置、沿用上一级', SYSTEM_RULES)

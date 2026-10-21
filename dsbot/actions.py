@@ -19,6 +19,19 @@ MAX_MEMORY_OPS = 3  # 一轮里最多改几条长期记忆
 _MEMORY_KINDS = ("memory", "memo", "long_memory", "note", "长期记忆")
 _CARD_KINDS = ("card", "set_card", "update_card", "persona_card", "人设卡")
 _WHO_KINDS = ("who", "lookup_card", "find_card", "card_lookup", "查人设卡")
+_MUSIC_KINDS = ("music", "play_music", "song", "play", "点歌", "放歌")
+MAX_MUSIC = 3  # 一轮最多点几首
+MAX_REMOVE = 10  # 一轮最多从队列里删几首
+_MUSIC_OPS = {
+    **dict.fromkeys(("play", "add", "enqueue", "queue_add", "点歌", "放", "播放"), "play"),
+    **dict.fromkeys(("skip", "next", "切歌", "下一首", "跳过"), "skip"),
+    **dict.fromkeys(("pause", "暂停"), "pause"),
+    **dict.fromkeys(("resume", "continue", "unpause", "继续"), "resume"),
+    **dict.fromkeys(("stop", "leave", "disconnect", "停止", "停", "离开"), "stop"),
+    **dict.fromkeys(("queue", "list", "now", "now_playing", "nowplaying", "status", "队列", "在放什么"), "queue"),
+    **dict.fromkeys(("remove", "delete", "del", "drop", "unqueue", "dequeue", "删除", "删", "删歌", "移除", "去掉"), "remove"),
+    **dict.fromkeys(("clear", "clear_queue", "clearqueue", "empty", "清空", "清空队列", "清掉"), "clear"),
+}
 _SERVER_SCOPE = {"server", "guild", "whole server", "all", "服务器", "全服务器", "整个服务器", "全服", "本服务器"}
 _TRUE_WORDS = {"true", "yes", "1", "是", "对"}
 
@@ -54,6 +67,36 @@ def _coerce_index(value: Any) -> int | None:
     if isinstance(value, str):
         value = value.strip().removeprefix("图").removeprefix("第").removesuffix("张").strip()
     return _coerce_id(value)
+
+
+def _music_numbers(value: Any) -> tuple[list[int], list[str]]:
+    """music remove 的 index：2、"2"、[2, 3] → 队列里的编号；别的写法（"第2首"、"2-4"、"稻香"）另外返回，当成 query。"""
+    numbers: list[int] = []
+    words: list[str] = []
+    for v in (value if isinstance(value, list) else [value])[:MAX_REMOVE]:
+        number = None
+        if isinstance(v, str):
+            number = _coerce_id(v)  # 只认纯数字（"2"、"#2"）；"第2首"“2-4”这些原样交给点歌那边认（它们不算歌名《1874》）
+            name = " ".join(v.split())[:MAX_QUERY_CHARS]
+            if number is None and name and name not in words:
+                words.append(name)
+        elif isinstance(v, (int, float)):
+            number = _coerce_id(v)
+        if number is not None and number not in numbers:
+            numbers.append(number)
+    return numbers, words
+
+
+def _music_removals(item: dict[str, Any], to: int | None, query: str | None) -> list[Action]:
+    """{"op": "remove"}：写了 query（歌名）就按歌名删（编号可能是它猜的，歌名不会错位），没写就按 index 删，
+    都没写就是删叫它的那个人自己最近点的那首。"""
+    raw = next((item[k] for k in ("index", "number", "no", "position", "n") if item.get(k) is not None), None)
+    numbers, words = _music_numbers(raw) if raw is not None else ([], [])
+    if query:
+        return [Action("music", to, op="remove", query=query)]
+    out = [Action("music", to, op="remove", index=n) for n in numbers]
+    out += [Action("music", to, op="remove", query=w) for w in words]  # index 里写成了“第2首”、歌名之类
+    return out or [Action("music", to, op="remove")]
 
 
 def _text_field(item: dict[str, Any], *keys: str) -> str | None:
@@ -171,6 +214,29 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
             name = _text_field(item, "name", "who", "user", "query")
             if name and not any(a.kind == "who" and a.name == name for a in actions):
                 actions.append(Action("who", name=name.lstrip("@＠ ").strip() or name))
+        elif kind in _MUSIC_KINDS:
+            raw_op = str(item.get("op", item.get("action", item.get("do", ""))) or "").strip().lower()
+            query = _text_field(item, "query", "song", "q", "url", "link", "name", "title", "text")
+            op = _MUSIC_OPS.get(raw_op) or ("play" if not raw_op and query else None)
+            if op == "queue" and query:
+                op = "play"  # {"op": "queue", "query": "稻香"}：是要加进队列
+            if op == "remove":
+                removes = [a for a in actions if a.kind == "music" and a.op == "remove"]
+                for removal in _music_removals(item, to, query):
+                    same = any((a.to, a.query, a.index) == (removal.to, removal.query, removal.index) for a in removes)
+                    if len(removes) < MAX_REMOVE and not same:
+                        actions.append(removal)
+                        removes.append(removal)
+                continue
+            if op == "play" and not query:
+                continue
+            if op is not None and op != "play":
+                query = None
+            plays = [a.query for a in actions if a.kind == "music" and a.op == "play"]
+            if op == "play" and len(plays) < MAX_MUSIC and query not in plays:
+                actions.append(Action("music", to, query=query, op=op))
+            elif op is not None and op != "play" and not any(a.kind == "music" and a.op == op for a in actions):
+                actions.append(Action("music", to, op=op))
         elif kind in ("read", "read_file", "open", "look"):
             if to is not None and not any(a.kind == "read" and a.to == to for a in actions):
                 actions.append(Action("read", to))

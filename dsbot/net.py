@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 PROJECT_URL = "https://github.com/Longying-2403/Deepseek-X-Discord"
 API_USER_AGENT = f"Deepseek-X-Discord/{__version__} (+{PROJECT_URL})"
 FETCH_USER_AGENT = f"Mozilla/5.0 (compatible; Deepseek-X-Discord/{__version__}; +{PROJECT_URL})"
+# 展开 b23.tv 短链接时用：有的短链接服务只对浏览器直接给跳转
+BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 REDIRECTS = (301, 302, 303, 307, 308)
 MAX_REDIRECTS = 3
 API_MAX_BYTES = 10_000_000  # API 返回的 JSON 最多这么大
@@ -301,6 +303,25 @@ class HttpClient:
             raise FetchError("超时", transient=True) from None
         except aiohttp.ClientError as exc:
             raise FetchError(f"网络错误：{exc!r}", transient=True) from None
+
+    async def redirect_target(self, url: str) -> str | None:
+        """打开一个短链接，只看它跳转到哪里（不跟着跳，也不读内容），不跳转就是 None。和 fetch 一样只连公网地址。"""
+        aiohttp = self._aiohttp()
+        reason = check_url(url) or _check_as_aiohttp_sees_it(url, None)
+        if reason:
+            raise FetchError(f"不连 {host_of(url) or url[:80]}：{reason}")
+        session = self._public_session()
+        try:
+            headers = {"Accept": "text/html,*/*;q=0.8", "User-Agent": BROWSER_USER_AGENT}
+            async with session.get(url, allow_redirects=False, headers=headers) as resp:
+                if resp.status in REDIRECTS:
+                    location = resp.headers.get("Location")
+                    return urljoin(url, location) if location else None
+                return None
+        except asyncio.TimeoutError:
+            raise FetchError("超时", transient=True) from None
+        except (aiohttp.ClientError, OSError, ValueError) as exc:
+            raise FetchError(f"连不上：{exc!r}"[:200], transient=True) from None
 
     async def fetch(
         self,

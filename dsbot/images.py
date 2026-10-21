@@ -11,6 +11,9 @@ log = logging.getLogger(__name__)
 
 MAX_RAW_BYTES = 20 * 1024 * 1024  # 超过这个大小的原图直接跳过
 MAX_PIXELS = 40_000_000  # 解码前先看尺寸，超大图跳过，防止占满内存
+# JPEG 能按缩小的尺寸解码（draft），4000 万像素也不怎么占内存；PNG、WebP 只能整张解码，
+# 6000×6000 的 PNG 解码时要三四百 MB，所以上限小一些（4000×4000）
+FULL_DECODE_MAX_PIXELS = 16_000_000
 FALLBACK_MAX_BYTES = 4 * 1024 * 1024  # 没装 Pillow 时，原样发送的上限
 
 _SIGNATURES = [
@@ -146,7 +149,9 @@ def to_data_uri(raw: bytes, max_side: int = 1024, quality: int = 80, *, max_pixe
 
     try:
         with Image.open(io.BytesIO(raw)) as img:
-            if img.width * img.height > max_pixels:
+            # MPO 是很多手机存的多张 JPEG（照片 + 景深图），一样能缩小解码
+            limit = max_pixels if img.format in ("JPEG", "MPO") else min(max_pixels, FULL_DECODE_MAX_PIXELS)
+            if img.width * img.height > limit:
                 log.info("图片太大（%dx%d），跳过", img.width, img.height)
                 return None
             img.seek(0)  # 动图只取第一帧

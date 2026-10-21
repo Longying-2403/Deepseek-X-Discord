@@ -10,7 +10,22 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .models import DocBlock, IncomingMessage
-from .prompts import CARDS_HEAD, GALLERY_FOOT, GALLERY_HEAD, HINT_MENTION, HINT_PROACTIVE, WHO_HEAD, WHO_NONE, WHO_OFF
+from .prompts import (
+    CARDS_HEAD,
+    EDIT_NOTE,
+    EDITED_MARK,
+    GALLERY_FOOT,
+    GALLERY_HEAD,
+    HINT_MENTION,
+    HINT_PROACTIVE,
+    MESSAGE_DELETED,
+    MUSIC_IDLE,
+    MUSIC_NOW,
+    MUSIC_RESULT,
+    WHO_HEAD,
+    WHO_NONE,
+    WHO_OFF,
+)
 from .textutil import one_line, truncate
 
 
@@ -103,6 +118,172 @@ def render_line(m: IncomingMessage, sid: int, sid_by_msg: dict[int, int], max_ch
     if m.mentions_bot and not m.is_bot:
         line += " 〔@你〕"
     return line
+
+
+_HEAD_NAME = re.compile(r"^#\d+ (.+?)(?: 〔bot〕| 〔dsowner〕)?(?: ↪(?:你|#\d+|\(更早的消息\)))?：")
+
+
+def deleted_line(sid: int, name: str | None, old_line: str = "") -> str:
+    """被删掉的消息在记录里的样子：留着是谁发的，内容拿掉。name 不知道时从原来那行里取。"""
+    if name:
+        shown = _neutralize(one_line(name))
+    else:
+        found = _HEAD_NAME.match(old_line)
+        shown = found.group(1) if found else "某人"
+    return f"#{sid} {shown}：{MESSAGE_DELETED}"
+
+
+def is_deleted_line(line: str) -> bool:
+    return line.startswith("#") and line.endswith("：" + MESSAGE_DELETED)
+
+
+def _tokens(content: Any) -> list[Any]:
+    """记录内容 → 一行行的文字（str）和图片块（dict），顺序不变。"""
+    if isinstance(content, str):
+        return content.split("\n")
+    out: list[Any] = []
+    for part in content or []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            out += str(part.get("text", "")).split("\n")
+        else:
+            out.append(part)
+    return out
+
+
+def _untokens(tokens: list[Any]) -> Any:
+    """_tokens 反过来：没有图片了就是一个字符串，有图片就是内容块数组（相邻的文字合成一块）。"""
+    if all(isinstance(t, str) for t in tokens):
+        return "\n".join(tokens)
+    parts: list[Any] = []
+    lines: list[str] = []
+    for t in tokens:
+        if isinstance(t, str):
+            lines.append(t)
+            continue
+        if lines:
+            parts.append({"type": "text", "text": "\n".join(lines)})
+            lines = []
+        parts.append(t)
+    if lines:
+        parts.append({"type": "text", "text": "\n".join(lines)})
+    return parts
+
+
+def message_line(content: Any, sid: int) -> str | None:
+    """记录里 #sid 那条消息的第一行（找不到就是 None）。"""
+    fence = False
+    for tok in _tokens(content):
+        if not isinstance(tok, str):
+            continue
+        if fence:
+            fence = tok != ">>>"
+        elif tok == "<<<":
+            fence = True
+        elif tok.startswith(f"#{sid} "):
+            return tok
+    return None
+
+
+def message_block(content: Any, sid: int) -> list[str] | None:
+    """记录里 #sid 那条消息的几行（第一行和缩进的续行）；找不到就是 None。"""
+    tokens = _tokens(content)
+    fence = False
+    for i, tok in enumerate(tokens):
+        if not isinstance(tok, str):
+            continue
+        if fence:
+            fence = tok != ">>>"
+        elif tok == "<<<":
+            fence = True
+        elif tok.startswith(f"#{sid} "):
+            block = [tok]
+            for nxt in tokens[i + 1 :]:
+                if not isinstance(nxt, str) or not nxt.startswith("  "):
+                    break
+                block.append(nxt)
+            return block
+    return None
+
+
+_EDIT_NOTE_MARK = EDIT_NOTE.split("{name}", 1)[1].split("{text}", 1)[0]  # “ 改了这条消息，现在是：”
+
+
+def rewrite_message(
+    content: Any, sid: int, lines: list[str] | None, *, drop_images: bool, drop_docs: bool, drop_notes: bool = False
+) -> tuple[Any, bool]:
+    """改写一条记录里 #sid 那条消息（被删、被编辑时）。lines：换掉它那几行（None = 不换）；drop_images：去掉它附带的图；
+    drop_docs：去掉这条记录里它的文件、链接的内容；drop_notes：去掉“（#sid 某人 改了这条消息，现在是：……）”那几句。
+    返回 (新内容, 有没有改)；没什么要改的就原样返回。
+
+    记录的结构是 render_round / render_tool_result 写出来的：消息一行以“#编号 ”开头、续行缩进两格，后面跟着它的图和
+    “（以上是 #编号 的图片）”；文件、链接以“【#编号 的文件「”或“【#编号 的链接「”开头，正文在 <<< >>> 之间，图在后面。
+    <<< >>> 里面的内容（文件正文、搜索结果、人设卡……）不当成消息。"""
+    tokens = _tokens(content)
+    head = f"#{sid} "
+    doc_heads = (f"【#{sid} 的文件「", f"【#{sid} 的链接「")
+    images_after = f"（以上是 #{sid} 的图片）"
+    doc_after = f"（以上是 #{sid} 的"
+    note_head = f"（#{sid} "
+    out: list[Any] = []
+    changed = fence = False
+    i, n = 0, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if not isinstance(tok, str):
+            out.append(tok)
+            i += 1
+            continue
+        if fence:
+            out.append(tok)
+            fence = tok != ">>>"
+            i += 1
+            continue
+        if tok == "<<<":
+            out.append(tok)
+            fence = True
+            i += 1
+            continue
+        if tok.startswith(head):
+            j = i + 1
+            while j < n and isinstance(tokens[j], str) and tokens[j].startswith("  "):
+                j += 1  # 续行
+            if lines is not None and tokens[i:j] != lines:
+                out += lines
+                changed = True
+            else:
+                out += tokens[i:j]
+            i = j
+            if drop_images:
+                k = i
+                while k < n and not isinstance(tokens[k], str):
+                    k += 1
+                if k > i and k < n and tokens[k] == images_after:
+                    i = k + 1
+                    changed = True
+            continue
+        if drop_notes and tok.startswith(note_head) and _EDIT_NOTE_MARK in tok:
+            i += 1  # 编辑后附的那句（里面有改过的内容）
+            changed = True
+            continue
+        if drop_docs and tok.startswith(doc_heads):
+            j = i + 1
+            if j < n and tokens[j] == "<<<":
+                while j < n and tokens[j] != ">>>":
+                    j += 1
+                j = min(j + 1, n)
+            k = j
+            while k < n and not isinstance(tokens[k], str):
+                k += 1
+            if k > j and k < n and isinstance(tokens[k], str) and tokens[k].startswith(doc_after):
+                j = k + 1
+            i = j
+            changed = True
+            continue
+        out.append(tok)
+        i += 1
+    if not changed:
+        return content, False
+    return _untokens(out), True
 
 
 def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str) -> str:
@@ -303,6 +484,9 @@ _FILE_HEAD = re.compile(r"^【\S+ 的(?:文件|链接)「")
 _GALLERY_START = GALLERY_HEAD.split("「", 1)[0]  # “（你找了”
 _WHO_START = WHO_HEAD.split("「", 1)[0]  # “（你查了”
 _WHO_NONE_START, _WHO_NONE_END = WHO_NONE.split("{name}")
+# 点歌的结果、“现在在放什么”：里面的歌名是 B站上来的，和搜索结果一样不进摘要和整理记忆（它点了什么歌，它自己的动作里有）
+_MUSIC_NOW_START = MUSIC_NOW.split("{", 1)[0] + "语音频道"  # “（现在语音频道”（MUSIC_IDLE 也是这样开头）
+_MUSIC_LINES = (MUSIC_RESULT.split("{", 1)[0], _MUSIC_NOW_START)
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
@@ -335,8 +519,28 @@ def last_listed(turns: list[Any]) -> tuple[str, ...] | None:
     return None
 
 
+def last_music_line(turns: list[Any]) -> str | None:
+    """记录里最后一次写的“现在在放什么”（停了、没写过都是 None）。重新载入记录时用：写过在放歌的话，
+    下次被叫到时要更新一下（重启之后已经不在放了）。"""
+    for turn in reversed(turns):
+        if getattr(turn, "role", None) != "user":
+            continue
+        found: str | None = None
+        seen = fenced = False
+        for line in content_text(turn.content).split("\n"):
+            if fenced:
+                fenced = line != ">>>"  # 文件、链接的内容里写的不算
+            elif line == "<<<":
+                fenced = True
+            elif line.startswith(_MUSIC_NOW_START):
+                found, seen = (None if line == MUSIC_IDLE else line), True
+        if seen:
+            return found
+    return None
+
+
 def own_text(content: Any) -> str:
-    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录、搜索结果、找图的候选图和人设卡。
+    """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录、搜索结果、找图的候选图、人设卡和点歌的结果。
 
     群友发的文件和链接打开后的内容算这个频道自己的，留着。
 
@@ -377,7 +581,9 @@ def own_text(content: Any) -> str:
             after_search = line.startswith("（你搜了")
         elif line == WHO_OFF or (line.startswith(_WHO_NONE_START) and line.endswith(_WHO_NONE_END)):
             continue
-        elif line != LIST_EMPTY and line != GALLERY_FOOT:
+        elif line.startswith(_MUSIC_LINES):
+            continue
+        elif line != LIST_EMPTY and line != GALLERY_FOOT and not is_deleted_line(line):
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
     return "\n".join(out)
@@ -424,12 +630,14 @@ def history_lines(turns: list[tuple[str, Any]], bot_name: str) -> list[str]:
             elif _STAMP_LINE.match(line):
                 out.append(_STAMP_LINE.match(line).group(0))
                 continuing = False
+            elif is_deleted_line(line):
+                continuing = False
             elif _MSG_LINE.match(line):
                 text = _REPLY_REF.sub("", _MSG_LINE.sub("", line, count=1)).replace(" 〔@你〕", "").replace(" 〔dsowner〕", "", 1)
-                out.append(text)
+                out.append(text.replace(EDITED_MARK, ""))
                 continuing = True
             elif continuing and line.startswith("  "):
-                out[-1] = (out[-1] + " " + line.strip()).replace(" 〔@你〕", "")
+                out[-1] = (out[-1] + " " + line.strip()).replace(" 〔@你〕", "").replace(EDITED_MARK, "")
             else:
                 continuing = False  # 提示、文件头、别的频道的近况之类
     return out
@@ -513,7 +721,30 @@ def assistant_text(content: str, name: str) -> str:
                 out.append(f"{name} 删了第 {a.get('delete')} 条长期记忆")
         elif a.get("type") == "who":
             out.append(f"{name} 查了「{a.get('name', '')}」的人设卡")
+        elif a.get("type") == "music":
+            op = a.get("op")
+            if op == "play":
+                out.append(f"{name} 点了歌「{a.get('query', '')}」")
+            elif op == "remove":
+                if a.get("query"):
+                    out.append(f"{name} 从播放队列里删了「{a.get('query')}」")
+                elif a.get("index") is not None:
+                    out.append(f"{name} 从播放队列里删了第 {a.get('index')} 首")
+                else:
+                    out.append(f"{name} 从播放队列里删了刚点的歌")
+            elif op in _MUSIC_DONE:
+                out.append(f"{name} {_MUSIC_DONE[op]}")
     return "\n".join(out)
+
+
+_MUSIC_DONE = {
+    "skip": "切了歌",
+    "pause": "暂停了放歌",
+    "resume": "继续放歌",
+    "stop": "停止放歌",
+    "queue": "看了播放队列",
+    "clear": "清空了播放队列",
+}
 
 
 def review_bot_lines(content: Any, name: str) -> list[str]:

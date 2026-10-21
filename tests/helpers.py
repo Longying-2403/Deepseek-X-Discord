@@ -89,6 +89,10 @@ class FakeTransport:
         # 频道 id -> 位置；没登记的频道当成 GUILD 里的公开频道
         self.places: dict[int, ChannelPlace] = {}
         self.names = {CHANNEL: "闲聊"}
+        self.channel_map: dict[str, set[int]] = {}  # 服务器里的频道名 -> 频道（#频道名 换成链接用）
+        self.members: dict[str, set[int]] = {}  # 按名字找人能找到的（名字 -> 用户）
+        self.member_searches: list[list[str]] = []
+        self.mentions: list[tuple[int, ...]] = []  # 每条发出去的文字真的提醒了谁（和 sent 一一对应）
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
         return ChannelInfo(
@@ -104,12 +108,20 @@ class FakeTransport:
             return self.places[channel_id]
         return ChannelPlace(guild_id=GUILD, name=self.names.get(channel_id, f"频道{channel_id}"), public=True)
 
-    async def send(self, channel_id, text, *, reply_to, ping):
+    async def send(self, channel_id, text, *, reply_to, ping, mentions=()):
         if not self.can_send:
             return None
         self._next_id += 1
         self.sent.append((channel_id, text, reply_to, ping))
+        self.mentions.append(tuple(mentions))
         return self._next_id
+
+    def channel_names(self, guild_id):
+        return {name: set(ids) for name, ids in self.channel_map.items()}
+
+    async def find_members(self, guild_id, starts):
+        self.member_searches.append(list(starts))
+        return {name: set(ids) for name, ids in self.members.items() if any(s.startswith(name[:2]) for s in starts)}
 
     async def send_sticker(self, channel_id, name, *, reply_to, ping):
         if not self.can_send:

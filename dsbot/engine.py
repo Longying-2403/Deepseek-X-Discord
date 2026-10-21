@@ -18,7 +18,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import Any, AsyncContextManager, Awaitable, Callable, Protocol
+from typing import Any, AsyncContextManager, Awaitable, Callable, Iterable, Protocol, Sequence
 
 from .actions import dump_actions, parse_actions
 from .config import AppConfig
@@ -46,6 +46,8 @@ from .models import (
 )
 from .prompts import (
     DEFAULT_PERSONA,
+    EDIT_NOTE,
+    EDITED_MARK,
     IMAGE_BLOCKED,
     IMAGE_BUDGET,
     IMAGE_COOLDOWN,
@@ -53,6 +55,11 @@ from .prompts import (
     IMAGE_LIMIT,
     IMAGE_NONE,
     IMAGE_OFF,
+    MUSIC_IDLE,
+    MUSIC_NOW,
+    MUSIC_OFF,
+    MUSIC_RESULT,
+    MUSIC_UNANSWERED,
     PERSONA_DONE,
     PERSONA_MAX_CHARS,
     PERSONA_NO_ASKER,
@@ -65,25 +72,33 @@ from .prompts import (
     PERSONA_UNCHANGED,
     PERSONA_UNDONE,
     SUMMARY_SYSTEM,
+    TOOL_FAILED,
     WHO_NONE,
     WHO_OFF,
     build_review_prompt,
     build_system_prompt,
     clean_persona,
 )
+from .mentions import link, merge_tiers, name_forms
+from .music import pick_link
 from .quota import QuotaBucket, SlidingWindow, TurnTracker
 from .search import today_text
 from .render import (
     Gallery,
     assistant_text,
     content_tokens,
+    deleted_line,
     history_lines,
     last_listed,
+    last_music_line,
+    message_block,
+    message_line,
     neutralize,
     neutralize_record,
     own_text,
     render_cards,
     render_channel_list,
+    render_line,
     render_recall,
     render_review_input,
     render_round,
@@ -92,10 +107,11 @@ from .render import (
     render_who,
     review_bot_lines,
     review_text,
+    rewrite_message,
 )
 from .settings import Settings, View
-from .store import Conversation, Store
-from .textutil import one_line, split_for_discord, typing_delay
+from .store import Conversation, Store, Turn
+from .textutil import DISCORD_LIMIT, one_line, split_for_discord, typing_delay
 
 log = logging.getLogger(__name__)
 
@@ -118,17 +134,33 @@ MAX_PASTE_PREVIEWS = 3
 KEEP_RECENT_TURNS = 12  # 压缩记忆时，最近 6 轮（12 条）不动
 DOWNLOAD_TIMEOUT = 60.0  # 下载一个附件最多等多久
 FORCE_COMPACT_TOKENS = 100_000  # 上下文超过预算两倍、也超过这么多时，不等旧记录攒够就压缩
-# 用完要再问一次模型的动作。read / search / recall / persona 只在被叫到时能用；image 主动聊天时也能用
-TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who")
+
+
+def _queue_view(action: Action) -> bool:
+    """看播放队列：查资料那一步里放在最后办，看到的是这一轮都办完之后的队列（它回话时说的也是那时候的）。"""
+    return action.kind == "music" and action.op == "queue"
+
+
+# 用完要再问一次模型的动作。read / search / recall / persona / who / music 只在被叫到时能用；image 主动聊天时也能用
+TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who", "music")
 MEMORY_KINDS = ("card", "memory")  # 改人设卡、长期记忆：和回话放在一起，不用再问一次模型
 MAX_WHO = 2
 MAX_REVIEW_CHUNKS = 4  # 一次整理最多分几段问模型（聊天记录太长时）
 MAX_REVIEW_CARDS = 3  # 一次整理最多改几张人设卡（每张都要整段重写，太多了输出会很长）
 MAX_REVIEW_MEMORY_OPS = 10
 MAX_REVIEW_FAILURES = 3  # 同一批聊天连着整理失败几次就放弃
+DELETED_KEEP = 1000  # 每个频道记住最近多少条被删掉的消息
+PEOPLE_KEEP = 300  # 每个频道记住最近多少个说过话、被 @ 过的人（它 @ 人时按名字找）
+MAX_PINGS_PER_ROUND = 3  # 它一次回话（一轮，可能分几条发）最多真的提醒几个人
+PING_COOLDOWN = 300.0  # 同一个人这么久之内最多被它提醒一次（之后的 @ 只显示，不发通知）
+GUILD_PINGS = 10  # 每个服务器 10 分钟内它最多提醒几次（免得被人叫着到处 @ 人）
+GUILD_PING_WINDOW = 600.0
+RECENT_EDIT_TURNS = 8  # 最近这么多条记录里的消息被编辑：直接改记录；更早的只在下一轮附一句（改旧记录会让后面的缓存全失效）
+MEMBER_SEARCHES_PER_MINUTE = 20  # 按名字在服务器成员里找人，全部服务器加起来每分钟最多几次
 REVIEW_TIMEOUT_SCALE = 2.0  # 整理记忆在后台跑、没人在等：最多等两倍的 timeout_seconds
 REVIEW_MAX_TOKENS = 6000
 _SID_LINE = re.compile(r"^#(\d{1,9}) ")
+_MUSIC_RESULT_HEAD = MUSIC_RESULT.split("{", 1)[0]  # “（点歌：”
 SEND_KINDS = ("sticker", "meme", "pick")  # 发出去的是一张图：和说话一样算“开口了”
 RECENT_LINKS_KEEP = 30  # 每个频道记住最近多少条带链接的消息（模型可以用 read 要求打开）
 MAX_RECALLS = 2
@@ -140,7 +172,9 @@ INTERACTIONS_PER_PERSON = 3  # 每个人记住最近几次跟它的对话（跨�
 class Transport(Protocol):
     def channel_info(self, channel_id: int) -> ChannelInfo: ...
 
-    async def send(self, channel_id: int, text: str, *, reply_to: int | None, ping: bool) -> int | None: ...
+    async def send(
+        self, channel_id: int, text: str, *, reply_to: int | None, ping: bool, mentions: Sequence[int] = ()
+    ) -> int | None: ...  # mentions：这条消息里真的要提醒（ping）的人
 
     async def react(self, channel_id: int, message_id: int, emoji: str) -> bool: ...
 
@@ -153,6 +187,10 @@ class Transport(Protocol):
     def typing(self, channel_id: int) -> AsyncContextManager[Any]: ...
 
     def locate(self, channel_id: int) -> ChannelPlace | None: ...
+
+    def channel_names(self, guild_id: int) -> dict[str, set[int]]: ...  # 频道名 -> 频道（它看得到的）
+
+    async def find_members(self, guild_id: int, starts: list[str]) -> dict[str, set[int]]: ...  # 按名字开头找人
 
 
 class Searcher(Protocol):
@@ -179,6 +217,42 @@ class MemeStore(Protocol):
     def load(self, meme: Any) -> tuple[bytes, str] | None: ...  # (内容, 文件名)
 
     def counts(self, guild_id: int) -> tuple[int, int]: ...
+
+
+class Jukebox(Protocol):
+    """点歌（music.MusicPlayer）。"""
+
+    async def play(
+        self,
+        guild_id: int,
+        text_channel_id: int,
+        user_id: int,
+        user_name: str,
+        query: str,
+        *,
+        can_search: Callable[[], str | None] | None = None,
+        state: Any = None,
+    ) -> str: ...
+
+    async def skip(self, guild_id: int, user_id: int, *, state: Any = None) -> str: ...
+
+    async def pause(self, guild_id: int, user_id: int) -> str: ...
+
+    async def resume(self, guild_id: int, user_id: int) -> str: ...
+
+    async def stop(self, guild_id: int, user_id: int) -> str: ...
+
+    async def remove(self, guild_id: int, user_id: int, targets: Sequence[str] = (), *, state: Any = None) -> str: ...
+
+    async def clear(self, guild_id: int, user_id: int, *, state: Any = None) -> str: ...
+
+    def round_state(self, guild_id: int) -> Any: ...  # 一轮点歌动作共用的记录（music.RoundState）
+
+    def queue_text(self, guild_id: int, sep: str = "\n") -> str: ...
+
+    def status(self, guild_id: int) -> str | None: ...
+
+    async def tick(self) -> None: ...
 
 
 class LLM(Protocol):
@@ -394,6 +468,7 @@ class Interaction:
     at: float
     seq: int  # 记下的先后（慢的轮次后记，就排在后面，不会因为开始得早被当成“已经带过”）
     lines: list[str]
+    message_id: int = 0  # 这个人说的那条（被删了就不再带到别的频道；被编辑了就换成新的）
 
 
 @dataclass
@@ -435,6 +510,12 @@ class ChannelState:
     last_review_at: float = 0.0
     review_failures: int = 0  # 连着整理失败了几次（越失败等得越久）
     review_bad: int = 0  # 其中模型输出不能用的次数（连着几次就放弃这批聊天）
+    deleted: dict[int, None] = field(default_factory=dict)  # 最近被删掉的消息（有序：太多了从最早的忘）
+    fixes: dict[int, IncomingMessage | None] = field(default_factory=dict)  # 要改写进记录的：消息 -> 改过的样子（None = 删了）
+    fixing: bool = False
+    people: dict[int, str] = field(default_factory=dict)  # 最近说过话、被 @ 过的人 -> 名字（有序：最近的在后）
+    edit_notes: dict[int, tuple[int, IncomingMessage]] = field(default_factory=dict)  # 很早的消息被编辑：消息 -> (编号, 改过的样子)
+    music_seen: str | None = None  # 上次告诉它“语音频道里正在放什么”的那一行（变了才再写；没在放是 None）
 
 
 class Engine:
@@ -459,8 +540,10 @@ class Engine:
         memes: MemeStore | None = None,
         cards: CardStore | None = None,
         memory: MemoryStore | None = None,
+        music: Jukebox | None = None,
     ):
         self.cfg = cfg
+        self.music = music  # 点歌（没开、或者缺 yt-dlp / ffmpeg / 语音库时是 None）
         self.cards = cards  # 人设卡（data/cards.sqlite3）
         self.memory = memory  # 长期记忆（data/memory.sqlite3）
         self.link_reader = link_reader  # 打开链接（推文走 FxTwitter，网页走 Tavily）
@@ -479,6 +562,7 @@ class Engine:
         self.image_loader = image_loader or self._load_image
         self.file_reader = file_reader or self._read_file
         self._file_slots = asyncio.Semaphore(2)  # 同时最多解析 2 个文件
+        self._decode_slots = asyncio.Semaphore(2)  # 同时最多解码 2 张图（大图解码很吃内存）
         self.tz = cfg.bot.timezone
         self.pricing = cfg.pricing
         self.states: dict[int, ChannelState] = {}
@@ -488,7 +572,10 @@ class Engine:
         self._tasks: set[asyncio.Task[Any]] = set()
         self.searcher = searcher
         self.interactions: dict[tuple[int, int], deque[Interaction]] = {}  # (服务器, 人) -> 最近跟它的几次对话
+        self.pinged: dict[tuple[int, int], float] = {}  # (服务器, 人) -> 上次在话里 @ 提醒他的时间
+        self.ping_window = SlidingWindow()  # 每个服务器 10 分钟内提醒了几次（窗口比 limiter 的长，分开清理）
         self._interaction_seq = 0
+        self._music_tick: asyncio.Task[Any] | None = None
 
     # ------------------------------------------------------------------ 输入
 
@@ -535,6 +622,7 @@ class Engine:
         view = self.view(st)
 
         st.pending.append(msg)
+        self._note_people(st, msg)
         if msg.files:
             st.recent_files[msg.message_id] = FileEntry(msg)
         if msg.links:
@@ -557,6 +645,16 @@ class Engine:
             else:
                 log.info("频道 %s：%s 点名太频繁，这次不立刻回应", st.channel_id, msg.author_name)
 
+    def _note_people(self, st: ChannelState, msg: IncomingMessage) -> None:
+        """记下说话的人、被 @ 的人和他们现在的名字（它在话里 @ 人时按名字找）。"""
+        found = [] if msg.is_bot else [(msg.author_id, msg.author_name)]
+        for uid, name in found + list(msg.mentioned):
+            if name:
+                st.people.pop(uid, None)
+                st.people[uid] = name
+        while len(st.people) > PEOPLE_KEEP:
+            del st.people[next(iter(st.people))]
+
     def handle_typing(self, channel_id: int) -> None:
         st = self.states.get(channel_id)
         if st is not None:
@@ -573,29 +671,231 @@ class Engine:
         return None
 
     def refresh_message(self, updated: IncomingMessage) -> bool:
-        """消息被编辑、或 Discord 补上了链接预览：更新还没处理的那条。点名状态保持不变。"""
+        """消息被编辑、或 Discord 补上了链接预览：更新还没处理完的那条（返回 False = 不是还没处理完的）。
+
+        还在缓冲区里的：改的时候补上了 @它就算叫它，把 @ 删掉就不回了。正在处理的那一批不改点名状态。"""
         m = self.find_message(updated.channel_id, updated.message_id)
         if m is None:
             return False
+        was_addressed = m.addressed
         m.text = updated.text
         m.images = updated.images
         m.files = updated.files
         m.stickers = updated.stickers
         m.links = updated.links  # 预览到了之后，链接多了标题
         m.awaiting_embeds = updated.awaiting_embeds
+        m.mentions_bot = updated.mentions_bot
         st = self.states.get(m.channel_id)
-        if st is not None and m.links and m.message_id not in st.recent_links:
-            st.recent_links[m.message_id] = LinkEntry(m)
+        if st is None:
+            return True
+        self._refresh_entries(st, m)
+        if any(x is m for x in st.inflight):
+            return True
+        if m.addressed and not was_addressed and not m.trigger:
+            view = self.view(st)
+            if self.limiter.allow((m.guild_id, m.author_id), view.mention_rate_limit, 60.0, self.clock()):
+                m.trigger = True
+                st.mention_due = True
+                self._kick(st)
+        elif not m.addressed and m.trigger:
+            m.trigger = False
+            st.mention_due = any(x.trigger for x in st.pending)
         return True
 
+    def _refresh_entries(self, st: ChannelState, m: IncomingMessage) -> None:
+        """消息改了：带文件、带链接的缓存也换成新的样子（删掉的链接、附件就打不开了）。"""
+        fentry = st.recent_files.get(m.message_id)
+        if fentry is not None:
+            if m.files:
+                fentry.message = m
+            else:
+                del st.recent_files[m.message_id]
+        elif m.files:
+            st.recent_files[m.message_id] = FileEntry(m)
+        lentry = st.recent_links.get(m.message_id)
+        if lentry is not None:
+            if m.links:
+                lentry.message = m
+            else:
+                del st.recent_links[m.message_id]
+        elif m.links:
+            st.recent_links[m.message_id] = LinkEntry(m)
+
+    def handle_edit(self, updated: IncomingMessage, *, edited: bool) -> None:
+        """消息有更新。edited：是本人改了内容（不只是 Discord 补上了链接预览）。
+
+        还没处理的直接更新（见 refresh_message）；已经写进记录的，把记录里那一行换成新内容，标上〔已编辑〕。"""
+        st = self.states.get(updated.channel_id)
+        if st is not None and updated.message_id in st.deleted:
+            return  # 已经删了
+        updated.from_owner = self._is_owner(updated)
+        if updated.is_bot:
+            # 别的 bot 常常一直在改自己的消息（播放进度、投票、倒计时……）：还没处理的照样更新，记录不跟着改，
+            # 不然每改一次后面的缓存就全失效
+            self.refresh_message(updated)
+            return
+        if self.refresh_message(updated):
+            if edited and st is not None and any(m.message_id == updated.message_id for m in st.inflight):
+                self._queue_fix(st, updated.message_id, updated)  # 模型看到的是旧的：这一轮写进记录后再改
+            return
+        if not edited:
+            return  # 处理过的消息只是补上了预览：记录不用动
+        st = self._state_with_history(updated.guild_id, updated.channel_id, [updated.message_id])
+        if st is None:
+            return
+        fentry = st.recent_files.get(updated.message_id)
+        lentry = st.recent_links.get(updated.message_id)
+        if fentry is not None or lentry is not None:
+            self._refresh_entries(st, updated)
+        self._edit_interactions(st.guild_id, updated)
+        self._queue_fix(st, updated.message_id, updated)
+
+    def handle_delete(self, guild_id: int, channel_id: int, message_ids: Iterable[int]) -> None:
+        """消息被删了（包括管理员一次删很多条）：缓冲区里的拿掉；正在处理的，结果回来后不回复它；
+        已经写进记录的，记录里那一行改成“已删除”，它的图、文件和链接内容也一起拿掉。"""
+        ids = set(message_ids)
+        if not ids:
+            return
+        st = self._state_with_history(guild_id, channel_id, ids)
+        if st is None:
+            return
+        for mid in ids:
+            st.deleted[mid] = None
+        while len(st.deleted) > DELETED_KEEP:
+            del st.deleted[next(iter(st.deleted))]
+        kept = [m for m in st.pending if m.message_id not in ids]
+        if len(kept) != len(st.pending):
+            st.pending = kept
+            st.first_human_at = next((m.received_at for m in st.pending if not m.is_bot), None)
+            st.mention_due = st.mention_due and any(m.trigger for m in st.pending)
+        for mid in ids:
+            st.recent_files.pop(mid, None)
+            st.recent_links.pop(mid, None)
+            st.edit_notes.pop(mid, None)
+        self._forget_interactions(st.guild_id, ids)
+        for mid in ids:
+            self._queue_fix(st, mid, None)
+
+    def _state_with_history(self, guild_id: int, channel_id: int, message_ids: Iterable[int]) -> ChannelState | None:
+        """这个频道的状态；还没载入过（比如刚重启）的，只有记录里有这几条消息时才建。"""
+        st = self.states.get(channel_id)
+        if st is not None:
+            return st
+        if not self.store.message_rows(channel_id, message_ids):
+            return None
+        place = self.transport.locate(channel_id)
+        return self.state(channel_id, guild_id, place.parent_id if place else None, place.category_id if place else None)
+
+    def _queue_fix(self, st: ChannelState, message_id: int, updated: IncomingMessage | None) -> None:
+        if st.fixes.get(message_id, 0) is None and updated is not None:
+            return  # 已经删了：之后的编辑不算
+        st.fixes[message_id] = updated
+        if st.fixing:
+            return
+        st.fixing = True
+        task = asyncio.get_running_loop().create_task(self._fix_task(st))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _fix_task(self, st: ChannelState) -> None:
+        """把删除、编辑改写进记录。要等这个频道正在跑的那一轮写完记录（拿到锁）再改。"""
+        try:
+            while st.fixes:
+                async with st.lock:
+                    self._flush_fixes(st, self._conversation(st))
+        finally:
+            st.fixing = False
+        if st.mention_due and st.pending:
+            self._kick(st)  # 改记录的时候有人叫它：轮到它了
+
+    def _flush_fixes(self, st: ChannelState, conv: Conversation) -> None:
+        """把还没改写进记录的删除、编辑先改掉（调用方拿着锁）。开始新的一轮、压缩、整理记忆之前都先做一次，
+        免得模型、摘要、整理记忆看到刚删掉的内容。"""
+        if not st.fixes:
+            return
+        fixes, st.fixes = st.fixes, {}
+        try:
+            self._apply_fixes(st, conv, fixes)
+        except Exception:
+            log.exception("频道 %s：同步删除、编辑出错", st.channel_id)
+
+    def _apply_fixes(self, st: ChannelState, conv: Conversation, fixes: dict[int, IncomingMessage | None]) -> None:
+        rows = self.store.message_rows(st.channel_id, fixes.keys())
+        changed: dict[int, Turn] = {}
+        recent_from = len(conv.turns) - RECENT_EDIT_TURNS
+        for mid, updated in fixes.items():
+            for sid, name in rows.get(mid, []):
+                if updated is None:
+                    lines: list[str] | None = None
+                    drop_images = drop_docs = True
+                else:
+                    block = render_line(updated, sid, st.sid_by_msg, self.ec.max_chars_per_message).split("\n")
+                    where = next(
+                        ((i, old) for i, t in enumerate(conv.turns) if t.role == "user" and (old := message_block(t.content, sid)) is not None),
+                        None,
+                    )
+                    if where is None:
+                        continue  # 已经压进摘要了
+                    index, old = where
+                    if old[:-1] + [old[-1].removesuffix(EDITED_MARK)] == block:
+                        continue  # 内容其实没变（比如只是补上了预览）
+                    if index < recent_from:
+                        st.edit_notes[mid] = (sid, updated)  # 很早的消息：下一轮附一句改成了什么，旧记录不动
+                        continue
+                    lines = block[:-1] + [block[-1] + EDITED_MARK]
+                    drop_images = not updated.images  # 图都删掉了：给它看过的图也拿掉（删了一部分的分不出是哪张，留着）
+                    drop_docs = not updated.files and not updated.links
+                for turn in conv.turns:
+                    if turn.role != "user":
+                        continue
+                    new_lines = lines
+                    if updated is None:
+                        old = message_line(turn.content, sid)
+                        new_lines = [deleted_line(sid, name, old or "")] if old is not None else None
+                    content, did = rewrite_message(
+                        turn.content, sid, new_lines, drop_images=drop_images, drop_docs=drop_docs, drop_notes=updated is None
+                    )
+                    if did:
+                        turn.content = content
+                        changed[turn.id] = turn
+        for turn in changed.values():
+            self.store.update_turn(turn.id, turn.content)
+        if changed:
+            deleted = sum(1 for u in fixes.values() if u is None)
+            log.info(
+                "频道 %s：同步了 %d 条删除、%d 条编辑，改写了 %d 条记录",
+                st.channel_id,
+                deleted,
+                len(fixes) - deleted,
+                len(changed),
+            )
+
+    def _forget_interactions(self, guild_id: int, message_ids: set[int]) -> None:
+        """被删掉的消息不再当成“刚才在别的频道聊过”带到别处。"""
+        for (g, _), log_ in self.interactions.items():
+            if g != guild_id:
+                continue
+            for item in [i for i in log_ if i.message_id in message_ids]:
+                log_.remove(item)
+
+    def _edit_interactions(self, guild_id: int, updated: IncomingMessage) -> None:
+        log_ = self.interactions.get((guild_id, updated.author_id))
+        for item in log_ or ():
+            if item.message_id == updated.message_id and item.lines:
+                said = one_line(updated.text, 150) if updated.text.strip() else "（发了图片或文件）"
+                item.lines[0] = f"{one_line(updated.author_name, 32)}：{said}"
+
     def _prune(self, st: ChannelState, now: float) -> None:
-        """丢掉缓冲区里太旧的消息，以及超出上限的部分。"""
+        """丢掉缓冲区里太旧的消息，以及超出上限的部分（从最早的丢，在叫它的留着）。"""
         cutoff = now - self.ec.pending_max_age_seconds
         fresh = [m for m in st.pending if m.received_at >= cutoff]
         overflow = len(fresh) - self.ec.max_pending_messages
         if overflow > 0:
             st.omitted += overflow
-            fresh = fresh[overflow:]
+            drop = {id(m) for m in [m for m in fresh if not m.trigger][:overflow]}
+            if len(drop) < overflow:  # 全是点名（几乎不可能）：只好从最早的丢
+                drop |= {id(m) for m in [m for m in fresh if id(m) not in drop][: overflow - len(drop)]}
+            fresh = [m for m in fresh if id(m) not in drop]
         if len(fresh) != len(st.pending):
             st.pending = fresh
             st.first_human_at = next((m.received_at for m in st.pending if not m.is_bot), None)
@@ -624,9 +924,24 @@ class Engine:
         if now - self._last_housekeep >= HOUSEKEEP_EVERY:
             self._last_housekeep = now
             self._housekeep(now)
+        if self.music is not None and (self._music_tick is None or self._music_tick.done()):
+            # 断线、没人听、放完很久：离开语音频道。单独跑：离开语音频道要等 Discord 回应，别耽误各频道的定时检查
+            self._music_tick = asyncio.get_running_loop().create_task(self._tick_music())
+            self._tasks.add(self._music_tick)
+            self._music_tick.add_done_callback(self._tasks.discard)
+
+    async def _tick_music(self) -> None:
+        assert self.music is not None
+        try:
+            await self.music.tick()
+        except Exception:
+            log.exception("点歌的定时检查出错")
 
     def _housekeep(self, now: float) -> None:
         self.limiter.prune(60.0, now)
+        for key in [k for k, at in self.pinged.items() if now - at >= PING_COOLDOWN]:
+            del self.pinged[key]
+        self.ping_window.prune(GUILD_PING_WINDOW, now)
         ttl = self.ec.share_recent_hours * 3600
         for key, log_ in list(self.interactions.items()):
             while log_ and now - log_[0].at > ttl:
@@ -719,6 +1034,10 @@ class Engine:
             for sid, mid in self.store.load_msgmap(st.channel_id).items():
                 st.msg_by_sid.setdefault(sid, mid)
                 st.sid_by_msg.setdefault(mid, sid)
+            older = [(uid, name) for uid, name in reversed(self.store.recent_authors(st.channel_id, PEOPLE_KEEP)) if uid not in st.people]
+            st.people = {**dict(older), **st.people}  # 记录里的在前，刚收到的（更新的名字）在后
+            # 记录里最后写的“正在放什么”（重启之后已经不在放了：下次被叫到时要告诉它）
+            st.music_seen = last_music_line(st.conversation.turns)
         return st.conversation
 
     def _number(self, st: ChannelState, conv: Conversation, shown: list[IncomingMessage]) -> list[tuple[int, IncomingMessage]]:
@@ -766,6 +1085,13 @@ class Engine:
             now = self.clock()
 
         conv = self._conversation(st)
+        self._flush_fixes(st, conv)
+        if any(m.message_id in st.deleted for m in batch):
+            # 准备这一轮的时候（比如等链接预览）被删掉的：不给模型看，也不写进记录
+            batch = [m for m in batch if m.message_id not in st.deleted]
+            triggers = [m for m in triggers if m.message_id not in st.deleted]
+            if not batch or (kind == "mention" and not triggers):
+                return  # 叫它的消息都删了：这一轮不跑，剩下的消息留着以后看
         shown = self._select(batch)
         omitted = st.omitted + len(batch) - len(shown)
         numbered = self._number(st, conv, shown)
@@ -787,6 +1113,17 @@ class Engine:
         info = self.transport.channel_info(st.channel_id)
         system = self._system_prompt(st, view, conv, info)
         context, digest_marks, listed = self._shared_context(st, view, triggers, now) if kind == "mention" else ([], {}, None)
+        noted = dict(st.edit_notes)
+        context = [
+            EDIT_NOTE.format(sid=sid, name=neutralize(one_line(m.author_name or "某人")), text=neutralize(one_line(m.text, 300)))
+            for sid, m in noted.values()
+        ] + context
+        playing = st.music_seen  # 写进记录的那一行（没在放是 None）
+        if kind == "mention":
+            status = self.music.status(st.guild_id) if self.music is not None else None
+            playing = MUSIC_NOW.format(text=neutralize(one_line(status, 300))) if status is not None else None
+            if playing != st.music_seen:  # 换了歌、停了：告诉它一声（只写在这一轮里，system prompt 不变）
+                context.append(playing or MUSIC_IDLE)
         card_lines, card_marks = self._card_context(st, view, conv, numbered, triggers)
 
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
@@ -840,6 +1177,10 @@ class Engine:
         self._mark_read(conv, planned)
         self._mark_links(conv, opened)
         self._mark_cards(st, conv, card_marks)
+        for mid in noted:
+            if st.edit_notes.get(mid) is noted[mid]:
+                del st.edit_notes[mid]  # 已经告诉它了
+        st.music_seen = playing
         st.unreviewed_rounds += 1
         st.digest_seen.update(digest_marks)
         if listed is not None:
@@ -850,7 +1191,10 @@ class Engine:
             # 模型要先看文件 / 打开链接 / 上网搜 / 找图 / 翻别的频道 / 改人设：办完再问它一次（第二步不能再用这些，
             # 只有第一步没改人设时，第二步还能改一次人设，比如看完角色卡再照着改）
             self.store.set_outcome(row, "+".join(sorted({a.kind for a in tools})))
-            st.last_decision = "被点名，先去查资料" if kind == "mention" else "想发图，先去找"
+            if kind != "mention":
+                st.last_decision = "想发图，先去找"
+            else:
+                st.last_decision = "被点名，先去点歌" if all(a.kind == "music" for a in tools) else "被点名，先去查资料"
             allow_persona = any(m.from_owner for m in triggers) and any(a.kind == "read" for a in tools)
             step = await self._tool_step(
                 st, conv, tools, targets, view, info, system, generation, budget, numbered, allow_persona, max_tokens, kind=kind
@@ -870,6 +1214,7 @@ class Engine:
 
         # 改人设卡、记长期记忆：先办（只是写进数据库），再发消息
         actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind)
+        actions = self._live_actions(st, actions, kind, targets)  # 冲着已经删掉的消息的：不发，也不算开口
         actions, dropped = self._check_stickers(st, actions, info)
         actions, dropped_media = self._check_media(st, view, actions)
         if (dropped or dropped_media) and kind == "mention" and targets and not any(
@@ -898,7 +1243,8 @@ class Engine:
             self.store.set_outcome(row, outcome)
             # 对话里附着人设卡时不给管理员看模型的“想法”（里面可能引用了别人的卡）
             st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=bool(st.cards_shown or card_lines))
-        decided_text = any(a.kind == "reply" and a.messages for a in actions)
+        # 发的时候才被删掉的那几条没发出去，不算“发不出消息”
+        decided_text = any(a.kind == "reply" and a.messages for a in self._live_actions(st, actions, kind, targets))
         uploads = {"meme", "pick"}  # 要“附加文件”权限的那两种
         self._note_media(st, bool(failed_media & uploads), any(a.kind in uploads for a in actions))
         if failed_media and not spoke and not reacted and kind == "mention" and targets:
@@ -981,7 +1327,8 @@ class Engine:
             shown = "（附着人设卡，内容略）" if st.cards_shown or cards_here else one_line(completion.content, 200)
             log.warning("频道 %s：模型输出不是合法 JSON：%s", st.channel_id, shown)
             text = completion.content.strip()
-            if kind == "mention" and text and not text.startswith(("{", "[")):
+            # 不像 JSON 的才当成直接说的话发出去；用 ``` 框起来的是写坏了的 JSON，别把它发到频道里
+            if kind == "mention" and text and not text.startswith(("{", "[", "```")):
                 actions = [Action("reply", targets[-1] if targets else None, [text[:1800]])]
             return actions, dump_actions(actions)
         tools = [a for a in actions if a.kind in TOOL_KINDS]
@@ -997,6 +1344,7 @@ class Engine:
                 + [a for a in tools if a.kind == "recall"][:MAX_RECALLS]
                 + [a for a in tools if a.kind == "who"][:MAX_WHO]
                 + [a for a in tools if a.kind == "image"][:1]
+                + [a for a in tools if a.kind == "music"]  # 解析时已经限过数量
             )
             if not picked:
                 # 改人设要单独来：和看文件放在一起时先不改（看完文件那一步还能改），和搜索、翻记录一起时不改，
@@ -1034,8 +1382,32 @@ class Engine:
             nonlocal gallery
             results = await self._read_planned(st, plan, budget)
             opened = await self._read_links(st, link_plan, budget, now)
-            for action in tools:
-                if action.kind == "search":
+            # 点歌的动作照模型写的顺序一个一个办（“放 X，然后删掉”就是先放再删；看队列放在最后），同一轮共用一份记录
+            # （music.RoundState）：编号按这一轮开始时的队列算，切歌只切那时正在放的那首，清空只清那时排着的。
+            # 同一个人接连写的几个删歌一起删
+            ordered = [a for a in tools if not _queue_view(a)] + [a for a in tools if _queue_view(a)]
+            music_round: Any = None
+            i = 0
+            while i < len(ordered):
+                action = ordered[i]
+                i += 1
+                if action.kind == "music":
+                    if music_round is None and self.music is not None:
+                        music_round = self.music.round_state(st.guild_id)
+                    also: list[Action] = []
+                    while (
+                        action.op == "remove"
+                        and i < len(ordered)
+                        and ordered[i].kind == "music"
+                        and ordered[i].op == "remove"
+                        and self._music_to(ordered[i], targets) == self._music_to(action, targets)
+                    ):
+                        also.append(ordered[i])
+                        i += 1
+                    sections.append(
+                        await self._music_section(st, view, action, numbered, targets, also=also, state=music_round)
+                    )
+                elif action.kind == "search":
                     sections.append(await self._search_section(st, view, action, now))
                 elif action.kind == "recall":
                     sections.append(self._recall_section(st, view, action, info))
@@ -1095,6 +1467,14 @@ class Engine:
             )
         except LLMError as exc:
             await self._on_error(st, kind, exc, now, [], targets, conv, info)
+            if st.generation == generation and st.conversation is conv and conv.turns and conv.turns[-1].role == "assistant":
+                # 上一步记下的是“要去查”：补一句没查成，免得下一轮它以为还在等结果、又去查一次。
+                # 点歌是真的办了的（歌已经在放、在排队）：把结果也记上，免得它以为没点上、又点一次
+                played = [s for s in sections if s.startswith(_MUSIC_RESULT_HEAD)]
+                lines = [TOOL_FAILED] if any(a.kind != "music" for a in tools) else []
+                if played:
+                    lines += [MUSIC_UNANSWERED, *played]
+                self.store.append_round(conv, "\n".join(lines) or TOOL_FAILED, dump_actions([]), [], now=now)
             return None
         extra = ("persona",) if allow_persona else ()
         actions, stored = self._interpret(
@@ -1204,6 +1584,122 @@ class Engine:
         self._finish_search(st, row, result.usage, "search")
         log.info("频道 %s：搜了「%s」（%s，%d 个来源）", st.channel_id, one_line(query, 60), result.provider, len(result.sources))
         return render_search(query, result.summary, result.sources, self.ec.search_max_chars)
+
+    # ------------------------------------------------------------------ 点歌
+
+    @staticmethod
+    def _music_to(action: Action, targets: list[int]) -> int | None:
+        """music 动作替谁办：写了 to（而且那条消息在叫它）就是那条消息的人，没写就是最后一个叫它的。"""
+        return action.to if action.to in targets else (targets[-1] if targets else None)
+
+    def _music_who(
+        self, st: ChannelState, action: Action, numbered: list[tuple[int, IncomingMessage]], targets: list[int]
+    ) -> IncomingMessage | None:
+        """替谁点歌（那条消息被删了、是 bot 发的就是 None）。"""
+        to = self._music_to(action, targets)
+        m = dict(numbered).get(to) if to is not None else None
+        return None if m is None or m.is_bot or m.message_id in st.deleted else m
+
+    async def _music_section(
+        self,
+        st: ChannelState,
+        view: View,
+        action: Action,
+        numbered: list[tuple[int, IncomingMessage]],
+        targets: list[int],
+        also: Sequence[Action] = (),
+        state: Any = None,
+    ) -> str:
+        """模型的 music 动作：替叫它的那个人点歌、切歌、删歌……also：同一个人接着写的别的删歌（和 action 一起删）；
+        state：这一轮的点歌动作共用的记录（music.RoundState）。"""
+        if self.music is None:
+            return MUSIC_OFF
+        m = self._music_who(st, action, numbered, targets)
+        if m is None:
+            return MUSIC_RESULT.format(text="不知道是谁要点歌，这次没点")
+        op = action.op or "play"
+        query = action.query or ""
+        if op == "play":
+            query = pick_link(query, m.text)  # 它抄的链接可能抄错：消息里正好有一个 B站链接就用消息里的
+        wanted = [str(a.index) if a.index is not None else (a.query or "") for a in (action, *also)] if op == "remove" else []
+        text = await self.music_request(
+            st.guild_id,
+            st.channel_id,
+            m.author_id,
+            m.author_name,
+            op,
+            "" if op == "remove" else query,
+            view=view,
+            sep="；",
+            targets=wanted,
+            state=state,
+        )
+        what = "、".join(w or "他最近点的" for w in wanted) if op == "remove" else one_line(action.query or "", 40)
+        log.info("频道 %s：%s 点歌（%s %s）→ %s", st.channel_id, m.author_name, op, what, one_line(text, 80))
+        return MUSIC_RESULT.format(text=neutralize(one_line(text, 800)))
+
+    async def music_request(
+        self,
+        guild_id: int,
+        channel_id: int,
+        user_id: int,
+        user_name: str,
+        op: str,
+        query: str = "",
+        *,
+        view: View,
+        sep: str = "\n",
+        targets: Sequence[str] = (),
+        state: Any = None,
+    ) -> str:
+        """点歌、切歌、暂停、继续、停止、删歌、清空、看队列（模型的 music 动作和 /ds-music 都走这里）。返回给人看的结果。
+        view：点歌的那个频道的设置（按歌名找歌要算搜索次数）。targets：删歌时要删的几首（不写就看 query）。
+        state：模型这一轮的点歌动作共用的记录（music.RoundState；/ds-music 不用）。"""
+        music = self.music
+        if music is None:
+            return "点歌没有启用"
+        try:
+            if op == "play":
+                return await music.play(
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    user_name,
+                    query,
+                    can_search=lambda: self._music_search(guild_id, channel_id, user_id, view),
+                    state=state,
+                )
+            if op == "skip":
+                return await music.skip(guild_id, user_id, state=state)
+            if op == "pause":
+                return await music.pause(guild_id, user_id)
+            if op == "resume":
+                return await music.resume(guild_id, user_id)
+            if op == "stop":
+                return await music.stop(guild_id, user_id)
+            if op == "remove":
+                return await music.remove(guild_id, user_id, list(targets) or ([query] if query else []), state=state)
+            if op == "clear":
+                return await music.clear(guild_id, user_id, state=state)
+            return music.queue_text(guild_id, sep=sep)
+        except Exception:
+            log.exception("服务器 %s：点歌（%s）出错", guild_id, op)
+            return "点歌的时候出错了"
+
+    def _music_search(self, guild_id: int, channel_id: int, user_id: int, view: View) -> str | None:
+        """按歌名找歌算一次联网搜索（和 search 共用每日次数）。能搜就记一次、返回 None；不能搜返回原因。
+        每人每分钟最多按歌名找“每人每分钟点名”那么多次（/ds-music 不经过点名限速，免得一个人一下子把全服务器的次数用光）。"""
+        limit = int(view.daily_search_limit)
+        if limit <= 0:
+            return "这里不能按歌名找歌（每日搜索次数上限是 0）；直接贴 B站链接还能放"
+        now = self.clock()
+        day = self.ledger.day(now)
+        if self.store.count_usage(day, guild_id=guild_id, kind="search") >= limit:
+            return f"今天这个服务器的搜索次数用完了（{limit} 次），按歌名找不了；直接贴 B站链接还能放"
+        if not self.limiter.allow(("music-search", guild_id, user_id), max(1, int(view.mention_rate_limit)), 60.0, now):
+            return "按歌名点歌太频繁了，过一分钟再点；直接贴 B站链接不受影响"
+        self.store.record_usage(ts=now, day=day, guild_id=guild_id, channel_id=channel_id, kind="search", outcome="music")
+        return None
 
     def _finish_search(self, st: ChannelState, row: int, usage: Usage, outcome: str) -> None:
         now = self.clock()
@@ -1651,6 +2147,9 @@ class Engine:
         if m is None or m.is_bot or not m.addressed:
             log.info("频道 %s：#%s 不是本人这一轮叫它的消息，没改人设卡", st.channel_id, action.to)
             return None
+        if m.message_id in st.deleted:
+            log.info("频道 %s：要它记的那条（#%s）已经删了，没改人设卡", st.channel_id, action.to)
+            return None
         text = clean_card(action.text or "")
         if len(text) > self.ec.card_max_chars:
             log.info("频道 %s：%s 的新人设卡太长（%d 字，最多 %d），没改", st.channel_id, m.author_name, len(text), self.ec.card_max_chars)
@@ -1672,14 +2171,15 @@ class Engine:
         self, st: ChannelState, view: View, action: Action, targets: list[int], kind: str, now: float
     ) -> int | None:
         """改长期记忆：只在被叫到的那一轮（有人要它记）。返回要加 📝 的消息。"""
-        if not self._memory_on(view) or kind != "mention" or not targets:
+        live = [t for t in targets if st.msg_by_sid.get(t) not in st.deleted]  # 叫它的消息被删了：当成不要它记了
+        if not self._memory_on(view) or kind != "mention" or not live:
             log.info("频道 %s：没人叫它要记，或者这里没开长期记忆，没改", st.channel_id)
             return None
         if not self._memory_op(st.guild_id, action.op or "", action.index, action.text, via="chat", now=now):
             log.info("频道 %s：长期记忆没改成（%s %s）", st.channel_id, action.op, action.index or "")
             return None
         log.info("频道 %s：长期记忆 %s %s", st.channel_id, action.op, one_line(action.text or str(action.index or ""), 80))
-        return st.msg_by_sid.get(targets[-1])
+        return st.msg_by_sid.get(live[-1])
 
     def _memory_op(self, guild_id: int, op: str, no: int | None, text: str | None, *, via: str, now: float) -> bool:
         """记一条 / 改一条 / 删一条长期记忆。超出条数、字数，或者编号不存在时不改，返回 False。"""
@@ -1728,6 +2228,7 @@ class Engine:
         try:
             async with st.lock:
                 conv = self._conversation(st)
+                self._flush_fixes(st, conv)
                 info = self.transport.channel_info(st.channel_id)
                 generation = st.generation
                 plan = self._review_plan(st, conv, info)
@@ -1792,6 +2293,7 @@ class Engine:
         sids: list[int] = []
         size = 0
         start = 0.0
+        prev_id = 0  # 上一条记录（lines 不空时一定已经有了）
         for t in turns:
             if t.role == "user":
                 turn_lines = review_text(t.content)
@@ -1971,6 +2473,8 @@ class Engine:
                 who = authors.get(to) if to in chunk.sids else None
                 if who is None or who[0] not in people or who[0] in done:
                     continue  # 只能改这段记录里说过话的人自己的卡
+                if st.msg_by_sid.get(to) in st.deleted:
+                    continue  # 整理的时候这条被删了
                 if name is not None and not _same_name(name, people[who[0]][0], numbers.get(who[0])):
                     log.info("频道 %s：整理记忆时 #%s 和名字「%s」对不上，没改", st.channel_id, to, one_line(name, 32))
                     continue
@@ -2107,6 +2611,7 @@ class Engine:
             memory_max=self.ec.memory_max_entries,
             card_max=self.ec.card_max_chars,
             entry_max=self.ec.memory_entry_chars,
+            music=self.music is not None,
         )
 
     def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:
@@ -2171,7 +2676,8 @@ class Engine:
         if to is None:
             # 没写是哪条：这一轮 dsowner 只叫了它一次，就是那条
             owners = [sid for sid in targets if sid in by_sid and self._is_owner(by_sid[sid]) and by_sid[sid].addressed]
-            if len(owners) != 1:
+            others = [sid for sid in targets if sid in by_sid and not self._is_owner(by_sid[sid])]
+            if len(owners) != 1 or others:  # 同一批里还有别人在叫它：分不清是谁要改，不猜
                 return PERSONA_NO_ASKER
             to = owners[0]
         asker = by_sid.get(to)
@@ -2326,12 +2832,14 @@ class Engine:
         for m in triggers:
             talks.setdefault(id(m), (m, []))
         for m, replies in talks.values():
+            if m.message_id in st.deleted:
+                continue  # 刚被删掉的
             said = one_line(m.text, 150) if m.text.strip() else "（发了图片或文件）"
             lines = [f"{one_line(m.author_name, 32)}：{said}"] + [f"你：{one_line(r, 150)}" for r in replies[:3]]
             key = (st.guild_id, m.author_id)
             self._interaction_seq += 1
             self.interactions.setdefault(key, deque(maxlen=INTERACTIONS_PER_PERSON)).append(
-                Interaction(st.channel_id, self.clock(), self._interaction_seq, lines)
+                Interaction(st.channel_id, self.clock(), self._interaction_seq, lines, m.message_id)
             )
 
     # ------------------------------------------------------------------ 文件
@@ -2432,7 +2940,7 @@ class Engine:
                 else:
                     cap = min(item.max_chars, budget.chars)
                     result = await self.file_reader(item.att, cap)
-                    if not item.preview:
+                    if not item.preview and not result.error:  # 读不了的不占名额
                         budget.files -= 1
                     budget.chars -= len(result.text)
                     result, trimmed = self._fit_images(result, budget)
@@ -2562,7 +3070,8 @@ class Engine:
             log.error("频道 %s：这批消息被 DeepSeek 拒绝，已丢弃：%s", st.channel_id, exc)
             self._consume(st, batch, now)
             text = str(exc).lower()
-            too_big = exc.status == 413 or any(word in text for word in ("context", "length", "token", "too large", "too many"))
+            # 只有真的是上下文太长才压缩（max_tokens 填错之类的报错里也有 token 字样，别误判）
+            too_big = exc.status == 413 or any(word in text for word in ("context", "too long", "too large", "maximum length"))
             if too_big and st.conversation is conv:
                 await self._compact(st, conv, info, force=True)
         else:
@@ -2588,6 +3097,24 @@ class Engine:
             log.exception("频道 %s：加表情出错", st.channel_id)
             return False
 
+    def _live_actions(self, st: ChannelState, actions: list[Action], kind: str, targets: list[int]) -> list[Action]:
+        """去掉冲着已经删掉的消息的回复、表情、发图（没写回复谁、叫它的消息又全删了的回复也去掉）。"""
+        if not st.deleted:
+            return actions
+        live_targets = [t for t in targets if st.msg_by_sid.get(t) not in st.deleted]
+        out = []
+        for a in actions:
+            if a.kind in ("reply", "react", *SEND_KINDS):
+                to = a.to
+                if to is None and kind == "mention" and a.kind != "react":
+                    if targets and not live_targets:
+                        continue
+                    to = live_targets[-1] if live_targets else None
+                if to is not None and st.msg_by_sid.get(to) in st.deleted:
+                    continue
+            out.append(a)
+        return out
+
     async def _execute(
         self, st: ChannelState, actions: list[Action], kind: str, targets: list[int], elapsed: float
     ) -> tuple[bool, bool, set[str]]:
@@ -2596,17 +3123,24 @@ class Engine:
         failed: set[str] = set()
         sent_count = 0
         pinged: set[int] = set()  # 同一条消息只提醒一次（比如又回话又发贴图）
+        directory: dict[str, Any] = {"pings_left": MAX_PINGS_PER_ROUND}  # 能 @ 的人、能链接的频道（第一次要用时才查）
         for action in actions:
             if action.kind == "react":
                 mid = st.msg_by_sid.get(action.to) if action.to is not None else None
-                if mid is not None and action.emoji:
+                if mid is not None and action.emoji and mid not in st.deleted:
                     reacted = await self._safe_react(st, mid, action.emoji) or reacted
                 continue
 
             to = action.to
             if to is None and kind == "mention" and targets:
-                to = targets[-1]
+                live = [t for t in targets if st.msg_by_sid.get(t) not in st.deleted]
+                if not live:
+                    continue  # 叫它的消息都被删了：不回
+                to = live[-1]
             reply_mid = st.msg_by_sid.get(to) if to is not None else None
+            if reply_mid is not None and reply_mid in st.deleted:
+                log.info("频道 %s：#%s 在它回话之前被删了，不回它", st.channel_id, to)
+                continue
             ping = kind == "mention" and to in targets and reply_mid not in pinged
             if ping and reply_mid is not None:
                 pinged.add(reply_mid)
@@ -2639,11 +3173,13 @@ class Engine:
                     delay = max(0.5, delay - elapsed)  # 模型生成的时间也算在“打字”里
                 async with self.transport.typing(st.channel_id):
                     await self.sleep(delay)
+                people, channels = await self._directory(st, text, kind, directory)
                 for j, chunk in enumerate(split_for_discord(text)):
                     first = i == 0 and j == 0
+                    chunk, pings = self._link_mentions(st, chunk, people, channels, kind, directory)
                     try:
                         sent = await self.transport.send(
-                            st.channel_id, chunk, reply_to=reply_mid if first else None, ping=ping and first
+                            st.channel_id, chunk, reply_to=reply_mid if first else None, ping=ping and first, mentions=pings
                         )
                     except Exception:
                         log.exception("频道 %s：发消息出错", st.channel_id)
@@ -2652,6 +3188,71 @@ class Engine:
                         spoke = True
                 sent_count += 1
         return spoke, reacted, failed
+
+    async def _directory(
+        self, st: ChannelState, text: str, kind: str, cache: dict[str, Any]
+    ) -> tuple[dict[str, frozenset[int]], dict[str, frozenset[int]]]:
+        """它在话里能 @ 的人和能链接的频道。人按名字找：最近在这个频道说过话、被 @ 过的人，其次是有人设卡的人；
+        有人叫它的时候，还对不上的名字再按名字开头到服务器成员里找一次。"""
+        if "people" not in cache:
+            recent: dict[str, set[int]] = {}
+            for uid, name in st.people.items():
+                for form in name_forms(name):
+                    recent.setdefault(form, set()).add(uid)
+            cards: dict[str, set[int]] = {}
+            if self.cards is not None:
+                for uid, name in self.cards.owners(st.guild_id):
+                    for form in name_forms(name):
+                        cards.setdefault(form, set()).add(uid)
+            cache["tiers"] = [recent, cards]
+            cache["people"] = merge_tiers(cache["tiers"])
+            cache["channels"] = {name: frozenset(ids) for name, ids in self.transport.channel_names(st.guild_id).items()}
+            cache["searched"] = set()
+        if kind == "mention" and ("@" in text or "＠" in text):
+            _, _, unknown = link(text, cache["people"], {})
+            starts = [u for u in unknown if u[:2] not in cache["searched"]][:3]
+            if starts and self.limiter.allow(("member-search", 0), MEMBER_SEARCHES_PER_MINUTE, 60.0, self.clock()):
+                cache["searched"].update(u[:2] for u in starts)
+                try:
+                    found = await self.transport.find_members(st.guild_id, starts)
+                except Exception:
+                    log.exception("频道 %s：按名字找人出错", st.channel_id)
+                    found = {}
+                if found:
+                    cache["tiers"].append(found)
+                    cache["people"] = merge_tiers(cache["tiers"])
+        return cache["people"], cache["channels"]
+
+    def _link_mentions(
+        self,
+        st: ChannelState,
+        chunk: str,
+        people: dict[str, frozenset[int]],
+        channels: dict[str, frozenset[int]],
+        kind: str,
+        cache: dict[str, Any],
+    ) -> tuple[str, list[int]]:
+        """把一段话里的 @名字、#频道名 换成真的。返回 (换好的话, 要提醒的人)。只有有人叫它的时候才提醒：
+        这一轮最多 MAX_PINGS_PER_ROUND 个人，同一个人 PING_COOLDOWN 之内只提醒一次，每个服务器 10 分钟内最多
+        GUILD_PINGS 次；其他的只显示成 @，不发通知。"""
+        linked, users, _ = link(chunk, people, channels)
+        if len(linked) > DISCORD_LIMIT:
+            return chunk, []  # 换完太长了：原样发
+        if kind != "mention" or not users:
+            return linked, []
+        now = self.clock()
+        pings: list[int] = []
+        for uid in dict.fromkeys(users):
+            if cache["pings_left"] <= 0:
+                break
+            if now - self.pinged.get((st.guild_id, uid), float("-inf")) < PING_COOLDOWN:
+                continue
+            if not self.ping_window.allow(st.guild_id, GUILD_PINGS, GUILD_PING_WINDOW, now):
+                break
+            pings.append(uid)
+            cache["pings_left"] -= 1
+            self.pinged[(st.guild_id, uid)] = now  # 发出去之前就记上：同一轮后面几条里再 @ 他也不再提醒
+        return linked, pings
 
     async def _images(
         self, shown: list[IncomingMessage], triggers: list[IncomingMessage]
@@ -2684,10 +3285,12 @@ class Engine:
         except Exception as exc:
             log.info("下载图片失败：%r", exc)
             return None
-        return await asyncio.to_thread(to_data_uri, raw, max_side)
+        async with self._decode_slots:
+            return await asyncio.to_thread(to_data_uri, raw, max_side)
 
     async def _compact(self, st: ChannelState, conv: Conversation, info: ChannelInfo, *, force: bool = False) -> None:
         """把最早的一部分对话压成摘要。只在这一次会让缓存 miss。"""
+        self._flush_fixes(st, conv)  # 刚删掉、改过的先改进记录，别压进摘要里
         remove = plan_compaction([t.content for t in conv.turns], force=force)
         if remove < 2:
             return
@@ -2761,6 +3364,8 @@ class Engine:
             link_entry.read_turns = {k: v for k, v in link_entry.read_turns.items() if v > last_removed}
         # 附过人设卡的那条记录压掉了：那个人下次说话时再附一次
         st.cards_shown = {uid: v for uid, v in st.cards_shown.items() if v[0] > last_removed}
+        if last_music_line(conv.turns) is None:
+            st.music_seen = None  # “正在放什么”那句压掉了：下次被叫到时再写一次
         log.info("频道 %s：已把 %d 条旧记录压成摘要", st.channel_id, remove)
 
     @staticmethod
@@ -2800,6 +3405,9 @@ class Engine:
             st.listed = None
             st.cards_shown.clear()
             st.unreviewed_rounds = 0  # 清空的记录不再整理
+            st.edit_notes.clear()  # 旧消息被编辑的那几句：记录都清了，别带进新的对话
+            st.fixes.clear()
+            st.music_seen = None  # 告诉过它在放什么的那句也清掉了
         for key, log_ in list(self.interactions.items()):
             # 清空了这个频道的记忆，别的频道也不该再“想起”这里聊过的事
             kept = [item for item in log_ if item.channel_id != channel_id]
@@ -2843,4 +3451,6 @@ class Engine:
             "memory_max": self.ec.memory_max_entries,
             "review_here": self.implicit_ok(channel_id, "cards") or self.implicit_ok(channel_id, "long_memory"),
             "last_review_ago": (now - st.last_review_at) if st and st.last_review_at else None,
+            "music_on": self.music is not None,
+            "playing": self.music.status(guild_id) if self.music is not None else None,
         }

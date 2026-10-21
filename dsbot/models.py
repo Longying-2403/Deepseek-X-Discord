@@ -13,7 +13,7 @@ class ImageAttachment:
     size: int  # 0 = 不知道（链接预览、贴图）
     # 下载原图的协程函数（Discord 层传 attachment.read），测试里可以塞假的
     fetch: Callable[[], Awaitable[bytes]] | None = field(default=None, repr=False, compare=False)
-    kind: str = "image"  # image（上传的图）/ gif（GIF 链接的预览帧）/ sticker（贴图）
+    kind: str = "image"  # image（上传的图）/ gif（GIF 链接的预览帧）/ preview（链接预览的图）/ sticker（贴图）
 
 
 @dataclass
@@ -122,6 +122,7 @@ class IncomingMessage:
     trigger: bool = False  # 引擎设置：这条点名通过了限速，需要立刻回应
     awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
     from_owner: bool = False  # 引擎设置：发言的是 OWNER_ID（dsowner）本人
+    mentioned: list[tuple[int, str]] = field(default_factory=list)  # 这条消息 @ 到的人（不含 bot）：(用户 ID, 显示的名字)
 
     @property
     def addressed(self) -> bool:
@@ -132,20 +133,20 @@ class IncomingMessage:
 @dataclass
 class Action:
     # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
-    # | "card" | "memory" | "who"
+    # | "card" | "memory" | "who" | "music"
     kind: str
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
     emoji: str | None = None
-    query: str | None = None  # search / image：要搜什么；recall：想找的关键词（可以没有）
+    query: str | None = None  # search / image：要搜什么；recall：想找的关键词（可以没有）；music：歌名或 B站链接（remove：要删的歌名）
     channel: str | None = None  # recall：哪个频道
     name: str | None = None  # sticker：贴图名；meme：表情包名；who：要查谁的人设卡
     text: str | None = None  # persona：改好之后的完整人设（"" = 恢复默认；None = 没写）；card：完整的新人设卡；memory：内容
     scope: str | None = None  # persona：None = 改这里现在用的那份；"server" = 全服务器；"channel" = 这个频道
     undo: bool = False  # persona：撤销上一次修改
     image: int | None = None  # pick：发找到的第几张图（从 1 开始）
-    op: str | None = None  # memory：add / edit / delete
-    index: int | None = None  # memory：改、删第几条（长期记忆的编号）
+    op: str | None = None  # memory：add / edit / delete；music：play / skip / pause / resume / stop / queue / remove / clear
+    index: int | None = None  # memory：改、删第几条（长期记忆的编号）；music remove：队列里的第几首
 
     def to_json(self) -> dict[str, Any]:
         if self.kind == "card":
@@ -158,6 +159,15 @@ class Action:
             return {"type": "memory", "delete": self.index}
         if self.kind == "who":
             return {"type": "who", "name": self.name}
+        if self.kind == "music":
+            d = {"type": "music", "op": self.op}
+            if self.to is not None:
+                d["to"] = self.to
+            if self.op == "play" or (self.op == "remove" and self.query):
+                d["query"] = self.query
+            if self.op == "remove" and self.index is not None:
+                return {**d, "index": self.index}
+            return d
         if self.kind in ("sticker", "meme"):
             d: dict[str, Any] = {"type": self.kind}
             if self.to is not None:

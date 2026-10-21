@@ -1,6 +1,6 @@
-"""Tavily：打开网页（extract）、上网找图（search 带图片）。都要 .env 里的 TAVILY_API_KEY。
+"""Tavily：打开网页（extract）、上网找图（search 带图片）、点歌时找 B站链接（search）。都要 .env 里的 TAVILY_API_KEY。
 
-额度（免费每月 1000）：打开网页每 5 个算 1 次，找一次图算 1 次。DeepSeek 自带的搜索用不了时，
+额度（免费每月 1000）：打开网页每 5 个算 1 次，找一次图、找一次歌各算 1 次。DeepSeek 自带的搜索用不了时，
 联网搜索也会改用 Tavily（那部分在 search.py 里）。
 """
 
@@ -80,6 +80,20 @@ def parse_images(data: Any) -> list[tuple[str, str]]:
     return found[:MAX_IMAGE_RESULTS]
 
 
+def parse_results(data: Any) -> list[tuple[str, str]]:
+    """search 的结果 → [(网址, 标题)]。"""
+    if not isinstance(data, dict):
+        return []
+    out: list[tuple[str, str]] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        url, title = item.get("url"), item.get("title")
+        if isinstance(url, str) and url.startswith(("http://", "https://")) and not any(c.isspace() for c in url):
+            out.append((url, clean_text(one_line(str(title or ""), 200))))
+    return out
+
+
 class Tavily:
     def __init__(self, http: HttpClient, api_key: str):
         self.http = http
@@ -128,3 +142,14 @@ class Tavily:
             payload.pop("safe_search")
             data = await self._post("/search", payload, timeout=30)
         return parse_images(data)
+
+    async def links(self, query: str, *, domains: list[str], max_results: int = 8) -> list[tuple[str, str]]:
+        """只在这几个网站里搜（点歌时搜 bilibili.com），返回 [(网址, 标题)]。算 1 次额度。"""
+        payload: dict[str, Any] = {
+            "query": query,
+            "search_depth": "basic",
+            "max_results": max_results,
+            "include_domains": domains,
+            "include_answer": False,
+        }
+        return parse_results(await self._post("/search", payload, timeout=30))

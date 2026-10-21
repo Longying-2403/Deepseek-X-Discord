@@ -22,6 +22,7 @@ meme_dir = "data/表情包"           # 通用表情包库：在 NAS 上自己�
 server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的（bot 自己管）
 cards_database = "data/cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
 memory_database = "data/memory.sqlite3"   # 长期记忆
+music = true                      # 点歌：在语音频道里放 B站视频的声音（/ds-music，或者 @它“放首歌”）；false = 关掉
 
 [pricing]
 # 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
