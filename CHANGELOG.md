@@ -2,6 +2,77 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.2.3] - 2026-10-23
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**修复**
+
+- **B站点歌放不了**：B站这几天改版，很多视频（多半是新视频）的网页里不再直接带视频信息，yt-dlp（2026.10.21，当时的最新版）解析不了，点歌时会说“B站的页面解析不了”，更新 yt-dlp 也没用（[yt-dlp#17894](https://github.com/yt-dlp/yt-dlp/issues/17894)）。现在遇到这种视频，改用 B站的视频详情接口拿标题、UP主这些信息（不用登录），拿音频、下载还是照旧交给 yt-dlp；网页里有信息的视频不受影响。
+- 认得带语言的 B站链接：`bilibili.com/en/video/…`、`bilibili.com/zh-Hans/video/…`（有的地区会跳到这种网址），以前会被当成“不是单个视频”拒掉。读链接时这种也算 B站视频，只看 Discord 的预览。
+- BV 号写错时，点歌会说“这个视频不存在，或者已经被删了”，不再是一串英文报错。
+- 请求超时、响应传到一半断了时拿不到用量（对方多半照样算了钱），现在按估算算进每日预算；请求根本没发到 DeepSeek（比如连接时就超时了），或者对方回的是错误，不算钱。
+- 整理记忆的时候又压缩了摘要：压掉的那部分原话排着队接着整理，不再直接丢掉（快要压成摘要的那部分只试一次，没整理成就跳过）。关机过程中不再压缩。
+- 关机更稳：关机过程中哪一步出错，最后都会断开和 Discord 的连接。
+
+**改进**
+
+- **人设卡不照念原文**：别人问起某个人是什么设定，它可以用自己的话、照自己的口吻大概说说，但不会照念卡上的原文（以前是完全不说）。现在由代码检查，不只靠提示词：要发的话里有一长段和卡上一模一样（编号列出来、调换顺序、换成繁体、拆成几条消息发都认得出来），被叫到时让它用自己的话重说一次，还是照念就不发，只在那条消息上加个 🤐；主动插话时直接不发。群友自己在频道里说过的话、发过的文件，它照着说不算；用卡上的称呼和口头禅也不算。卡上的原话也不会被抄进长期记忆（拆成几条也一样）、人设和别人的卡。
+- `/ds 状态` 多了“照念人设卡被拦下”的次数；`/ds-rp` 窗口里的说明跟着新规则改了。
+- 还是拦不住的：换个说法、翻译成别的语言、分好几次慢慢说，以及很短的卡（详见 README 的“十一、人设卡和长期记忆”）。太私密的事还是别写进卡里。
+
+**升级须知**
+
+- 这次只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。`Dockerfile`、`requirements.txt`、`config.toml`、`.env` 和数据库都不用动。
+- 确认新版生效：日志里有 `dsbot 2.2.3 启动中`。
+- 点歌的这次修复在 bot 自己的代码里，不用为了它更新 yt-dlp、不用加 `--no-cache` 重新构建。
+- **人设卡的规则变了**：以前别人问起时完全不说，现在会用自己的话大概说说（原文还是只有本人能看）。已有的卡是按旧规则写的，最好跟群友说一声。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新模块 `dsbot/hanzi.py`：繁体→简体的一对一字表，照念检查时把繁体、简体当成同一个字。字表来自 [OpenCC](https://github.com/BYVoid/OpenCC)（Apache License 2.0）的 TSCharacters 和 TWVariantsRev。
+- 照念检查是 `textutil.py` 的 `quotes_card`，`engine.py` 在发消息、写记忆之前调用。
+- `music.py` 给 yt-dlp 的 B站解析器加了一层退路：网页里找不到视频信息时才去问接口。yt-dlp 修好以后这层不碍事，也可以删掉。
+- 新测试 `test_card_quotes.py`、`test_timeout_billing.py`、`test_review_race.py`；`test_music.py` 加了 B站退路的测试（装了 yt-dlp 时也拿真的 yt-dlp 测，不连网）。测试增加到 788 个。
+- CONTRIBUTING.md：“人设卡只属于本人”写明别人问起时只能用自己的话说，照念原文由代码拦下，改提示词、改发消息的流程时别绕过它。
+
+### English
+
+**Fixed**
+
+- **Music from Bilibili stopped working**: Bilibili changed its site in the last few days, and for many videos (mostly new ones) the page no longer carries the video's details, so yt-dlp (2026.10.21, the latest release at the time) can't read it. Requests failed with "B站的页面解析不了" (Bilibili's page couldn't be parsed), and updating yt-dlp didn't help ([yt-dlp#17894](https://github.com/yt-dlp/yt-dlp/issues/17894)). For those videos it now gets the title, uploader and so on from Bilibili's video-details API instead (no login needed); getting the audio and downloading still go through yt-dlp as before. Videos whose page still has the details aren't affected.
+- Bilibili links with a language in the path, like `bilibili.com/en/video/…` or `bilibili.com/zh-Hans/video/…` (some regions get redirected to these), are now recognized; before, they were rejected as "not a single video". When opening links, these count as Bilibili videos too and only get Discord's preview.
+- A mistyped BV number now gets "this video doesn't exist or was deleted" instead of a raw English error.
+- When a request times out or the response is cut off mid-transfer, there's no usage report (but it was most likely billed anyway); the cost is now estimated and counted against the daily budget. Requests that never reached DeepSeek (say, a timeout while connecting) and error responses aren't counted.
+- If the history gets compacted while a memory review is running, the compacted messages now wait in line for the next review instead of being dropped (the part about to be compacted gets one try and is skipped if it doesn't make it). It no longer compacts while shutting down.
+- Sturdier shutdown: whichever step fails during shutdown, it still disconnects from Discord at the end.
+
+**Changed**
+
+- **Profile cards aren't read out**: when someone asks what another member's character is like, it can sum it up roughly in its own words and its usual tone, but it won't read out the card's original text (before, it said nothing at all). This is now checked in code, not just in the prompt: if what it's about to send contains a long stretch identical to a card (numbered lists, reordering, switching to traditional characters and splitting across several messages are all caught), when it was called it gets one chance to say it in its own words, and if it still reads the card out, nothing is sent and it just reacts 🤐 to the message; when it speaks up on its own, the message is simply dropped. Repeating what members said themselves in the channel, or files they posted, doesn't count, and neither does using the nicknames and catchphrases on a card. Card text also isn't copied into long-term memory (not even split into several entries), its persona, or other people's cards.
+- `/ds 状态` (status) shows how many times reading out a profile card was blocked, and the explanation in the `/ds-rp` window matches the new rule.
+- Still not caught: paraphrasing, translating into another language, revealing it bit by bit over several messages, and very short cards (see "十一、人设卡和长期记忆" in the README). Keep anything really private off the card.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed this time: replace it, then run `sudo docker compose up -d --build`. `Dockerfile`, `requirements.txt`, `config.toml`, `.env` and the database stay as they are.
+- To check that the new version took effect: the log shows `dsbot 2.2.3 启动中`.
+- The music fix lives in the bot's own code, so there's no need to update yt-dlp or rebuild with `--no-cache` for it.
+- **The profile-card rule changed**: before, it said nothing when others asked; now it gives a rough summary in its own words (the original text is still only visible to its owner). Existing cards were written under the old rule, so it's worth letting your members know.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New module `dsbot/hanzi.py`: a one-to-one traditional-to-simplified character table, so the read-out check treats traditional and simplified forms as the same character. The table comes from [OpenCC](https://github.com/BYVoid/OpenCC)'s TSCharacters and TWVariantsRev (Apache License 2.0).
+- The read-out check is `quotes_card` in `textutil.py`; `engine.py` runs it before sending messages and writing memory.
+- `music.py` wraps yt-dlp's Bilibili extractor with a fallback that only asks the API when the page has no video details. It does no harm once yt-dlp is fixed, and can be removed then.
+- New tests `test_card_quotes.py`, `test_timeout_billing.py` and `test_review_race.py`; `test_music.py` covers the Bilibili fallback (also against the real yt-dlp when it's installed, without network access). There are now 788 tests.
+- CONTRIBUTING.md: "profile cards belong to their owner" now says that when others ask, it may only use its own words, that reading out the original text is blocked in code, and that changes to the prompts or the sending flow mustn't get around that check.
+
 ## [2.2.2] - 2026-10-21
 
 > 2.1.0、2.2.0 和 2.2.1 没有单独发布，它们的改动也都包含在这个版本里。英文版这次没有更新，还是 2.0.0。
