@@ -1,5 +1,6 @@
 """1.4.0：读链接（推文走 FxTwitter、网页走 Tavily）、上网找图（模型先审核再发）、表情包库。"""
 
+import asyncio
 import io
 import json
 import os
@@ -1387,8 +1388,86 @@ class DiscordLayer(unittest.TestCase):
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
             if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self"
         }
-        reserved = {"http", "ws", "loop", "user", "_connection", "_closed", "_ready", "shard_id", "shard_count", "intents", "application_id", "application"}
+        reserved = {"http", "ws", "loop", "user", "_connection", "_closed", "_closing_task", "_ready", "shard_id", "shard_count", "intents", "application_id", "application"}
         self.assertEqual(assigned & reserved, set())
+
+
+class Shutdown(unittest.IsolatedAsyncioTestCase):
+    async def test_sigterm_keeps_the_closing_task(self):
+        """收到 SIGTERM 时开始的关闭任务要留着引用（事件循环只弱引用任务）；连着收到几次只关一次。"""
+        try:
+            from dsbot.discord_app import DSBot
+        except ImportError:
+            self.skipTest("没装 discord.py")
+        bot = DSBot.__new__(DSBot)  # 不连 Discord，只测这一个方法
+        bot._closing = None
+        calls = []
+
+        async def close():
+            calls.append(1)
+
+        bot.close = close
+        bot._on_sigterm()
+        first = bot._closing
+        bot._on_sigterm()
+        self.assertIsInstance(first, asyncio.Task)
+        self.assertIs(bot._closing, first)
+        await first
+        self.assertEqual(calls, [1])
+
+    def test_setup_hook_uses_the_handler(self):
+        """setup_hook 装的就是 _on_sigterm（不是又写回 lambda: create_task(...)）。没装 discord.py 也能查：看源码。"""
+        import ast
+
+        source = (Path(__file__).resolve().parents[1] / "dsbot" / "discord_app.py").read_text(encoding="utf-8")
+        hook = next(
+            n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.AsyncFunctionDef) and n.name == "setup_hook"
+        )
+        calls = [n for n in ast.walk(hook) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "add_signal_handler"]
+        self.assertEqual([ast.unparse(c.args[1]) for c in calls], ["self._on_sigterm"])
+
+    async def test_close_always_disconnects(self):
+        """关闭时前面哪一步出错，也照样断开和 Discord 的连接（不然进程退不出去，只能等 docker 强杀）；整理记忆先停下。"""
+        try:
+            import discord
+
+            from dsbot.discord_app import DSBot
+        except ImportError:
+            self.skipTest("没装 discord.py")
+        from unittest import mock
+
+        bot = DSBot.__new__(DSBot)
+        drained = []
+
+        async def drain():
+            drained.append(bot.engine.closing)
+
+        async def broken():
+            raise RuntimeError("关不掉")
+
+        bot._ticker = None
+        bot.music = None
+        bot.engine = NS(closing=False, drain=drain)
+        bot.llm = NS(close=broken)
+        with mock.patch.object(discord.Client, "close", new=mock.AsyncMock()) as client_close:
+            with self.assertRaises(RuntimeError):
+                await bot.close()
+        client_close.assert_awaited_once()
+        self.assertEqual(drained, [True])  # 等轮次跑完之前就告诉整理记忆别再接着问
+
+    async def test_close_error_is_logged(self):
+        try:
+            from dsbot.discord_app import _log_close_error
+        except ImportError:
+            self.skipTest("没装 discord.py")
+
+        async def broken():
+            raise RuntimeError("关不掉")
+
+        task = asyncio.get_running_loop().create_task(broken())
+        await asyncio.gather(task, return_exceptions=True)
+        with self.assertLogs("dsbot.discord_app", "ERROR"):
+            _log_close_error(task)
 
 
 class Status(unittest.IsolatedAsyncioTestCase):

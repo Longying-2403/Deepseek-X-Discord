@@ -63,6 +63,12 @@ BOT_PERMISSIONS = discord.Permissions(
 MUSIC_BITRATE = 128  # 放歌的码率（kbps）
 
 
+def _log_close_error(task: asyncio.Task[Any]) -> None:
+    """收到 SIGTERM 后的关闭出错了：写进日志（没人 await 这个任务，不然错误就悄悄没了）。"""
+    if not task.cancelled() and task.exception() is not None:
+        log.error("关闭时出错", exc_info=task.exception())
+
+
 def _off(value: Any) -> bool:
     """config.toml 里的开关是不是关着（写成字符串的 "false" 也算关）。"""
     return value is False or str(value).strip().lower() in ("false", "0", "no", "off", "")
@@ -472,6 +478,7 @@ class DSBot(discord.Client):
             memory=memory,
         )
         self._ticker: asyncio.Task[None] | None = None
+        self._closing: asyncio.Task[None] | None = None  # 收到 SIGTERM 后开始的关闭
         self._cdn: Any = None  # 下载预览图、贴图用的 aiohttp 会话（第一次用时才建）
         self.music: MusicPlayer | None = None  # 点歌：登录时才启用（--check 不会去动下载目录）
         self.music_problem = "还没启动"  # 点歌用不了的原因
@@ -486,7 +493,7 @@ class DSBot(discord.Client):
         # docker stop 发的是 SIGTERM；Python 在容器里当 1 号进程时默认会忽略它，这里接住并正常关闭。
         # 最先装上：后面同步斜杠命令可能被限速、等很久，这期间 docker stop 也要能马上停
         try:
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(self.close()))
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, self._on_sigterm)
         except (NotImplementedError, RuntimeError):
             pass  # Windows 不支持
         self._start_music()
@@ -503,6 +510,12 @@ class DSBot(discord.Client):
                 except discord.HTTPException as exc:
                     log.error("在 CONTROL_GUILD_ID 注册主人命令失败（bot 在那个服务器里吗？）：%s", exc)
         self._ticker = asyncio.create_task(self._tick_loop())
+
+    def _on_sigterm(self) -> None:
+        # 任务要留着引用：事件循环只弱引用任务，没人引用的关闭任务可能关到一半被回收。连着收到几次只关一次
+        if self._closing is None:
+            self._closing = asyncio.get_running_loop().create_task(self.close())
+            self._closing.add_done_callback(_log_close_error)
 
     def _start_music(self) -> None:
         if _off(self.cfg.bot.music):
@@ -546,28 +559,31 @@ class DSBot(discord.Client):
             await asyncio.sleep(self.cfg.bot.tick_seconds)
 
     async def close(self) -> None:
-        if self._ticker is not None:
-            self._ticker.cancel()
-        if self.music is not None:
-            self.music.closing()  # 先停掉下载、不再接新的点歌（下载线程不停的话进程退不出去）
         try:
-            await asyncio.wait_for(self.engine.drain(), timeout=20)
-        except asyncio.TimeoutError:
-            log.warning("关闭时还有没跑完的轮次，直接退出")
-        if self.music is not None:
+            if self._ticker is not None:
+                self._ticker.cancel()
+            if self.music is not None:
+                self.music.closing()  # 先停掉下载、不再接新的点歌（下载线程不停的话进程退不出去）
+            self.engine.closing = True  # 整理记忆问完手上这一段就停，不再接着问
             try:
-                await asyncio.wait_for(self.music.close(), timeout=5)  # 离开语音频道
-            except Exception as exc:
-                log.warning("关闭点歌出错：%r", exc)
-        await self.llm.close()
-        await self.searcher.close()
-        await self.web.close()
-        if self._cdn is not None:
-            await self._cdn.close()
-        for db in (self.cards, self.memory):
-            if db is not None:
-                db.close()
-        await super().close()
+                await asyncio.wait_for(self.engine.drain(), timeout=20)
+            except asyncio.TimeoutError:
+                log.warning("关闭时还有没跑完的轮次，直接退出")
+            if self.music is not None:
+                try:
+                    await asyncio.wait_for(self.music.close(), timeout=5)  # 离开语音频道
+                except Exception as exc:
+                    log.warning("关闭点歌出错：%r", exc)
+            await self.llm.close()
+            await self.searcher.close()
+            await self.web.close()
+            if self._cdn is not None:
+                await self._cdn.close()
+            for db in (self.cards, self.memory):
+                if db is not None:
+                    db.close()
+        finally:
+            await super().close()  # 前面哪一步出错也要断开和 Discord 的连接，不然进程退不出去
 
     # ---------------------------------------------------------------- 事件
 

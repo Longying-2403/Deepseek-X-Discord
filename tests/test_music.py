@@ -1,6 +1,7 @@
 """2.2.0：B站点歌（找歌、排队、切歌、暂停、自动离开），以及模型的 music 动作、/ds-music 共用的那一套。"""
 
 import asyncio
+import importlib.util
 import json
 import os
 import sys
@@ -896,6 +897,112 @@ class ShortLinks(BilibiliCase):
         self.assertEqual(str(caught.exception), "这是很老的分段视频，放不了")
 
 
+DETAIL = {  # B站视频详情接口（x/web-interface/wbi/view/detail）的回答，只留用得到的
+    "code": 0,
+    "data": {
+        "View": {"bvid": BV, "aid": 170001, "title": "晴天", "cid": 123, "pages": [{"cid": 123, "page": 1}], "owner": {"mid": 9, "name": "UP"}},
+        "Card": {"card": {"mid": "1", "name": "周杰伦"}},
+        "Tags": [{"tag_name": "音乐"}],
+    },
+}
+
+
+class FakeExtractorError(Exception):
+    def __init__(self, msg, **kwargs):
+        super().__init__(msg)
+
+
+class FakeBiliIE:
+    """假的 yt-dlp B站解析器：只有 _state_from_api 用到的几样。"""
+
+    _HEADERS = {"Referer": "https://www.bilibili.com/"}
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def _sign_wbi(self, query, video_id):
+        return {**query, "w_rid": "x"}
+
+    def _download_json(self, url, video_id, **kwargs):
+        self.calls.append((url, kwargs["query"]))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return json.loads(json.dumps(self.answer))
+
+
+class BilibiliFallback(BilibiliCase):
+    """B站改版后网页里没有视频信息：改用视频详情接口（music._state_from_api）。"""
+
+    def setUp(self):
+        super().setUp()
+        sys.modules["yt_dlp"].utils.ExtractorError = FakeExtractorError
+
+    def test_builds_the_page_state(self):
+        ie = FakeBiliIE(DETAIL)
+        state = music._state_from_api(ie, "BV", BV[2:])
+        self.assertEqual(state["videoData"]["title"], "晴天")
+        self.assertEqual(state["upData"], {"mid": "1", "name": "周杰伦"})
+        self.assertEqual(state["tags"], [{"tag_name": "音乐"}])
+        self.assertEqual(ie.calls, [(music._DETAIL_API, {"platform": "web", "bvid": BV, "w_rid": "x"})])
+        ie = FakeBiliIE({"code": 0, "data": {"View": DETAIL["data"]["View"]}})  # 没有 Card：用 View 里的 owner
+        self.assertEqual(music._state_from_api(ie, "av", "170001")["upData"], {"mid": 9, "name": "UP"})
+        self.assertEqual(ie.calls[0][1]["aid"], "170001")
+
+    def test_errors_and_fallthrough(self):
+        redirect = json.loads(json.dumps(DETAIL))
+        redirect["data"]["View"]["redirect_url"] = "https://www.bilibili.com/bangumi/play/ep1"
+        cases = [
+            ({"code": -404, "message": "啥都木有"}, {"error": {"trueCode": -404}}),  # yt-dlp 会说可能被删了
+            ({"code": -400, "message": "请求错误"}, {"error": {"trueCode": -404}}),  # BV 号不对
+            ({"code": -403, "message": "访问权限不足"}, {"error": {"trueCode": -403}}),  # 要登录
+            (redirect, None),  # 跳到番剧：交给 yt-dlp 自己
+            ({"code": 0, "data": None}, None),
+            (False, None),  # 请求失败（fatal=False 时 yt-dlp 返回 False）
+            (ValueError("yt-dlp 改了写法"), None),
+        ]
+        for answer, want in cases:
+            self.assertEqual(music._state_from_api(FakeBiliIE(answer), "BV", BV[2:]), want, answer)
+        with self.assertRaises(FakeExtractorError) as caught:
+            music._state_from_api(FakeBiliIE({"code": -352, "message": "风控校验失败"}), "BV", BV[2:])
+        self.assertIn("风控", str(explain(caught.exception)))
+
+    async def test_fake_ytdlp_still_works(self):
+        FakeYDL.infos[LINK] = {"id": BV, "title": "晴天"}
+        self.assertEqual((await self.source.resolve(LINK)).title, "晴天")  # 假的 YoutubeDL 没有 add_info_extractor：照常用
+
+
+@unittest.skipUnless(importlib.util.find_spec("yt_dlp"), "没装 yt-dlp")
+class BilibiliFallbackRealYtdlp(unittest.TestCase):
+    """真的 yt-dlp：补过的解析器替换掉原来的，网页里没有信息时才去问接口。"""
+
+    def test_replaces_the_extractor(self):
+        import yt_dlp
+
+        ydl = music._youtube_dl(yt_dlp, music._options())
+        ie = ydl.get_info_extractor("BiliBili")
+        self.assertIs(type(ie), music._bilibili_ie())
+        self.assertEqual((ie.ie_key(), ie.IE_NAME), ("BiliBili", "BiliBili"))
+        self.assertIs(ydl._ies["BiliBili"], ie)
+        self.assertTrue(ie.suitable(LINK))
+
+    def test_only_asks_the_api_when_the_page_has_no_state(self):
+        import yt_dlp
+
+        ie = music._youtube_dl(yt_dlp, music._options()).get_info_extractor("BiliBili")
+        fake = FakeBiliIE(DETAIL)
+        ie._sign_wbi, ie._download_json = fake._sign_wbi, fake._download_json
+        ie._wanted = ("BV", BV[2:])
+        pattern = r"window\.__INITIAL_STATE__\s*="
+        page = '<script>window.__INITIAL_STATE__={"videoData":{"bvid":"BV1from_page"}};</script>'
+        self.assertEqual(ie._search_json(pattern, page, "initial state", BV[2:], default=None), {"videoData": {"bvid": "BV1from_page"}})
+        self.assertEqual(fake.calls, [])
+        shell = '<script>try{window.__INITIAL_STATE__&&(window.x=1)}catch(w){}</script>'  # 改版后的网页
+        self.assertEqual(ie._search_json(pattern, shell, "initial state", BV[2:], default=None)["videoData"]["title"], "晴天")
+        self.assertIsNone(ie._search_json(r"window\._riskdata_\s*=", shell, "risk", BV[2:], default=None))  # 别的不管
+        self.assertEqual(len(fake.calls), 1)
+
+
 class MoreHelpers(unittest.TestCase):
     def test_links_without_https(self):
         cases = {
@@ -904,6 +1011,8 @@ class MoreHelpers(unittest.TestCase):
             "www.bilibili.com/video/av170001": "https://www.bilibili.com/video/av170001",
             "b23.tv/AbC12 这个": "https://b23.tv/AbC12",
             "https://www.bilibili.com/festival/2021bnj?bvid=BV1Do4y1d7K7&spm=1": "https://www.bilibili.com/video/BV1Do4y1d7K7",
+            f"https://www.bilibili.com/en/video/{BV}/?spm_id_from=1": LINK,  # 有的地区会跳到带语言的网址
+            f"放 bilibili.com/zh-Hans/video/{BV}?p=2": f"{LINK}?p=2",
         }
         for text, want in cases.items():
             self.assertEqual(find_link(text), want, text)
@@ -916,6 +1025,8 @@ class MoreHelpers(unittest.TestCase):
         self.assertEqual(music.pick_link(LINK.replace("mD", "mX"), f"放 {LINK} 吧"), LINK)  # 抄错的 BV 号：用消息里的
         self.assertEqual(music.pick_link("周杰伦 晴天", f"{LINK}"), "周杰伦 晴天")
         self.assertIn("风控", str(explain(Exception("ERROR: [BiliBili] 1: code: -352, message: 风控校验失败"))))
+        bad_id = "ERROR: 1xx411c7mX: An extractor error has occurred. (caused by KeyError('bvid')); please report this issue"
+        self.assertEqual(str(explain(Exception(bad_id))), "这个视频不存在，或者已经被删了")  # BV 号写错了
 
     def test_prompt_examples_match_real_results(self):
         label = Track(url=LINK, title="周杰伦 - 晴天", uploader="周杰伦", duration=270).label()
@@ -941,6 +1052,8 @@ class MoreHelpers(unittest.TestCase):
         self.assertFalse(openable(LINK))
         self.assertFalse(openable("https://b23.tv/AbC12"))
         self.assertTrue(openable("https://www.bilibili.com/read/cv123"))
+        self.assertFalse(openable(f"https://www.bilibili.com/zh-Hans/video/{BV}/"))
+        self.assertTrue(openable("https://www.bilibili.com/en/read/cv123"))
         store = Store(":memory:")
         store.record_usage(ts=1.0, day="d", guild_id=GUILD, channel_id=CHANNEL, kind="search", outcome="music")
         store.record_usage(ts=1.0, day="d", guild_id=GUILD, channel_id=CHANNEL, kind="search", outcome="search")

@@ -49,17 +49,19 @@ _ASCII_DIGITS = re.compile(r"[0-9]{1,18}")
 
 
 def _coerce_id(value: Any) -> int | None:
+    """消息编号、图和歌的序号：都是不大的数。大得离谱的不认（存不进 SQLite，写进记录后每一轮都会出错）。"""
     if isinstance(value, bool):
         return None
+    number: int | None = None
     if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
+        number = value
+    elif isinstance(value, float) and value.is_integer():
+        number = int(value)
+    elif isinstance(value, str):
         digits = value.strip().lstrip("#")
         if _ASCII_DIGITS.fullmatch(digits):  # str.isdigit() 会放过 "①" "²" 之类，int() 却转不了
-            return int(digits)
-    return None
+            number = int(digits)
+    return number if number is not None and abs(number) < 2**31 else None
 
 
 def _coerce_index(value: Any) -> int | None:

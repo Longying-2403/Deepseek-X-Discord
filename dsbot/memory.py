@@ -225,6 +225,20 @@ class CardStore:
     def count(self, guild_id: int) -> int:
         return int(self.db.execute("SELECT COUNT(*) AS n FROM cards WHERE guild_id = ?", (guild_id,)).fetchone()["n"])
 
+    def own_texts(self, guild_id: int, user_id: int) -> list[str]:
+        """这个人自己的卡：现在这张和留着的旧版本（改自己的卡时，本来就在自己卡上的话不算抄别人的）。"""
+        rows = self.db.execute(
+            "SELECT text FROM cards WHERE guild_id = ? AND user_id = ? "
+            "UNION ALL SELECT text FROM card_versions WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id, guild_id, user_id),
+        ).fetchall()
+        return [r["text"] for r in rows]
+
+    def others(self, guild_id: int, user_id: int) -> list[str]:
+        """这个服务器里别人的人设卡原文（写某个人的卡时核对：别把别人的卡抄进来，抄进来本人用 /ds-rp 就能看到）。"""
+        rows = self.db.execute("SELECT text FROM cards WHERE guild_id = ? AND user_id != ?", (guild_id, user_id)).fetchall()
+        return [r["text"] for r in rows]
+
     def owners(self, guild_id: int) -> list[tuple[int, str]]:
         """这个服务器里有人设卡的人：[(用户 ID, 卡上记的名字)]（它在话里 @ 人时用）。"""
         rows = self.db.execute("SELECT user_id, name FROM cards WHERE guild_id = ? AND name != ''", (guild_id,)).fetchall()
@@ -310,15 +324,16 @@ def coerce_no(value: Any) -> int | None:
     """长期记忆的编号：7、"7"、"(7)"、"（7）"、"#7"、"第7条" 都认。"""
     if isinstance(value, bool):
         return None
+    number: int | None = None
     if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
+        number = value
+    elif isinstance(value, float) and value.is_integer():
+        number = int(value)
+    elif isinstance(value, str):
         text = value.strip().strip("()（）#＃").removeprefix("第").removesuffix("条").strip()
         if _INDEX.fullmatch(text):
-            return int(text)
-    return None
+            number = int(text)
+    return number if number is not None and abs(number) < 2**31 else None  # 大得离谱的存不进 SQLite
 
 
 @dataclass

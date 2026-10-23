@@ -45,6 +45,7 @@ from .models import (
     Usage,
 )
 from .prompts import (
+    CARD_QUOTED,
     DEFAULT_PERSONA,
     EDIT_NOTE,
     EDITED_MARK,
@@ -60,6 +61,7 @@ from .prompts import (
     MUSIC_OFF,
     MUSIC_RESULT,
     MUSIC_UNANSWERED,
+    PERSONA_CARD,
     PERSONA_DONE,
     PERSONA_MAX_CHARS,
     PERSONA_NO_ASKER,
@@ -86,6 +88,7 @@ from .search import today_text
 from .render import (
     Gallery,
     assistant_text,
+    card_texts,
     content_tokens,
     deleted_line,
     history_lines,
@@ -96,6 +99,7 @@ from .render import (
     neutralize,
     neutralize_record,
     own_text,
+    public_lines,
     render_cards,
     render_channel_list,
     render_line,
@@ -111,7 +115,7 @@ from .render import (
 )
 from .settings import Settings, View
 from .store import Conversation, Store, Turn
-from .textutil import DISCORD_LIMIT, one_line, split_for_discord, typing_delay
+from .textutil import DISCORD_LIMIT, Said, one_line, quoted_cards, quotes_card, split_for_discord, touches_card, typing_delay
 
 log = logging.getLogger(__name__)
 
@@ -160,8 +164,26 @@ MEMBER_SEARCHES_PER_MINUTE = 20  # 按名字在服务器成员里找人，全部
 REVIEW_TIMEOUT_SCALE = 2.0  # 整理记忆在后台跑、没人在等：最多等两倍的 timeout_seconds
 REVIEW_MAX_TOKENS = 6000
 _SID_LINE = re.compile(r"^#(\d{1,9}) ")
+
+
+def _member_blocks(lines: list[str]) -> list[str]:
+    """整理记忆的聊天里群友自己说的：一条消息连同续行合成一段（跨行的片段也算他们说过的）。"""
+    out: list[str] = []
+    member = False  # 上一行是群友的消息（或者它的续行）
+    for line in lines:
+        if _SID_LINE.match(line):
+            out.append(line)
+            member = True
+        elif member and line.startswith("  "):
+            out[-1] += "\n" + line
+        else:
+            member = False
+    return out
+
+
 _MUSIC_RESULT_HEAD = MUSIC_RESULT.split("{", 1)[0]  # “（点歌：”
 SEND_KINDS = ("sticker", "meme", "pick")  # 发出去的是一张图：和说话一样算“开口了”
+CHAT_KINDS = ("reply", "react", *SEND_KINDS)  # 群里看得到的动作（照念了人设卡、让它重说时，换掉的是这些）
 RECENT_LINKS_KEEP = 30  # 每个频道记住最近多少条带链接的消息（模型可以用 read 要求打开）
 MAX_RECALLS = 2
 OWNER_EXTRA_TOKENS = 4000  # dsowner 叫它的那一轮：可能要整段重写人设（最多 4000 字），输出上限多给一些
@@ -332,6 +354,16 @@ class _ReviewPlan:
     cards_ok: bool
     memory_ok: bool
     last_id: int
+
+
+@dataclass
+class _ReviewJob:
+    """压缩前挑出来、排着队等整理的一批（原话已经挑出来了，记录里已经没有了）。"""
+
+    conv: Conversation
+    info: ChannelInfo
+    plan: _ReviewPlan
+    generation: int
 
 
 _SAME_NAME_SUFFIX = re.compile(r"\s*[（(]\s*同名的第\s*(\d+)\s*位\s*[)）]\s*$")
@@ -510,6 +542,8 @@ class ChannelState:
     last_review_at: float = 0.0
     review_failures: int = 0  # 连着整理失败了几次（越失败等得越久）
     review_bad: int = 0  # 其中模型输出不能用的次数（连着几次就放弃这批聊天）
+    review_jobs: list[_ReviewJob] = field(default_factory=list)  # 整理的时候又压缩了：压掉的原话排在这里，按先后接着整理
+    review_held: int = 0  # 安静时整理的那批正在问的那一段到哪条记录（压缩时只挑这之后的；压缩挑走了后面的，它问完这段就停）
     deleted: dict[int, None] = field(default_factory=dict)  # 最近被删掉的消息（有序：太多了从最早的忘）
     fixes: dict[int, IncomingMessage | None] = field(default_factory=dict)  # 要改写进记录的：消息 -> 改过的样子（None = 删了）
     fixing: bool = False
@@ -576,6 +610,8 @@ class Engine:
         self.ping_window = SlidingWindow()  # 每个服务器 10 分钟内提醒了几次（窗口比 limiter 的长，分开清理）
         self._interaction_seq = 0
         self._music_tick: asyncio.Task[Any] | None = None
+        self.closing = False  # 正在关机：整理记忆不再接着问下一段（关机时只等聊天的轮次跑完）
+        self._recited_rows: set[int] = set()  # 照念人设卡被拦下的那几笔用量记录（结果记成 recited）
 
     # ------------------------------------------------------------------ 输入
 
@@ -958,6 +994,8 @@ class Engine:
                 st.conversation = None
 
     def _kick(self, st: ChannelState) -> None:
+        if self.closing:
+            return  # 关机了：不再开新的一轮（攒着的消息退出时反正也没了）
         if st.scheduled or st.lock.locked():
             return  # 正在跑的那一轮结束后会再检查
         st.scheduled = True
@@ -1161,8 +1199,23 @@ class Engine:
         # 主动聊天时也能上网找图（发图是群友的日常）；其他要查资料的动作只在被叫到时用。
         # 主动聊天时找不了（冷却中、次数用完）就当它没说要找图，不为它多问一次模型
         extra = ("image",) if kind == "proactive" and self._image_ready(st, view, now) else ()
+        seen = self._seen_cards(conv, user_content)  # 这次请求里它看得到的人设卡（从记录里认：重启之后也算）
         actions, stored = self._interpret(
-            st, completion, kind, targets, allow_tools=kind == "mention", extra_tools=extra, cards_here=bool(card_lines)
+            st, completion, kind, targets, allow_tools=kind == "mention", extra_tools=extra, cards_here=bool(card_lines or seen)
+        )
+        completion, cost, row, actions, stored = await self._no_card_quotes(
+            st,
+            conv,
+            system,
+            user_content,
+            kind,
+            targets,
+            numbered,
+            seen,
+            (completion, cost, row, actions, stored),
+            thinking=thinking,
+            generation=generation,
+            max_tokens=max_tokens,
         )
         if st.generation != generation:
             log.info("频道 %s：这一轮进行中记忆被清空，丢弃结果", st.channel_id)
@@ -1172,6 +1225,7 @@ class Engine:
 
         # 先把这一轮写进历史（只追加），再消费缓冲区。消息编号连同发消息的人一起记下（整理记忆时要知道是谁说的）
         assigned = [(sid, m.message_id, None if m.is_bot else m.author_id, m.author_name) for sid, m in numbered]
+        before = len(conv.turns)  # 这一轮之前的记录（核对写卡时：它这一轮自己写的不算“以前替他写过的”）
         self.store.append_round(conv, user_content, stored, assigned, now=now)
         self._consume(st, batch, now)
         self._mark_read(conv, planned)
@@ -1201,7 +1255,7 @@ class Engine:
             )
             if step is None:
                 return
-            completion, cost, row, actions = step
+            completion, cost, row, actions, seen = step
             late = [a for a in actions if a.kind == "persona"]
             if late:
                 self.store.set_outcome(row, "persona")
@@ -1210,10 +1264,10 @@ class Engine:
                 )
                 if step is None:
                     return
-                completion, cost, row, actions = step
+                completion, cost, row, actions, seen = step
 
         # 改人设卡、记长期记忆：先办（只是写进数据库），再发消息
-        actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind)
+        actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind, seen, conv.turns[:before])
         actions = self._live_actions(st, actions, kind, targets)  # 冲着已经删掉的消息的：不发，也不算开口
         actions, dropped = self._check_stickers(st, actions, info)
         actions, dropped_media = self._check_media(st, view, actions)
@@ -1240,9 +1294,10 @@ class Engine:
                     st.bucket.spend(1.0)
                 elif decided_react:
                     st.bucket.spend(self.ec.react_cost)
-            self.store.set_outcome(row, outcome)
+            self.store.set_outcome(row, "recited" if row in self._recited_rows else outcome)
+            self._recited_rows.discard(row)
             # 对话里附着人设卡时不给管理员看模型的“想法”（里面可能引用了别人的卡）
-            st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=bool(st.cards_shown or card_lines))
+            st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=bool(st.cards_shown or card_lines or seen))
         # 发的时候才被删掉的那几条没发出去，不算“发不出消息”
         decided_text = any(a.kind == "reply" and a.messages for a in self._live_actions(st, actions, kind, targets))
         uploads = {"meme", "pick"}  # 要“附加文件”权限的那两种
@@ -1272,7 +1327,7 @@ class Engine:
             u.hit,
             u.output,
             cost,
-            "（附着人设卡，想法略）" if st.cards_shown or card_lines else one_line(completion.reasoning or "", 160),
+            "（附着人设卡，想法略）" if st.cards_shown or card_lines or seen else one_line(completion.reasoning or "", 160),
         )
         if u.prompt_tokens > view.context_budget_tokens and st.generation == generation:
             # 平时等旧记录攒够一半再压（少让缓存失效）。实在太长（比如连着读了好几个大文件）就不等了：
@@ -1370,7 +1425,7 @@ class Engine:
         max_tokens: int | None = None,
         *,
         kind: str = "mention",
-    ) -> tuple[Completion, float, int, list[Action]] | None:
+    ) -> tuple[Completion, float, int, list[Action], list[str]] | None:
         now = self.clock()
         reads = [a for a in tools if a.kind == "read"]
         plan, link_plan, file_notes, wanted = self._plan_reads(st, view, reads)
@@ -1412,7 +1467,7 @@ class Engine:
                 elif action.kind == "recall":
                     sections.append(self._recall_section(st, view, action, info))
                 elif action.kind == "persona":
-                    sections.append(await self._persona_section(st, action, numbered, targets))
+                    sections.append(await self._persona_section(st, action, numbered, targets, self._seen_cards(conv)))
                 elif action.kind == "who":
                     sections.append(self._who_section(st, view, action, who_marks))
                 elif action.kind == "image":
@@ -1477,8 +1532,23 @@ class Engine:
                 self.store.append_round(conv, "\n".join(lines) or TOOL_FAILED, dump_actions([]), [], now=now)
             return None
         extra = ("persona",) if allow_persona else ()
+        seen = self._seen_cards(conv, content)  # 记录里已经有第一步那一轮；who 查到的卡在 content 里
         actions, stored = self._interpret(
-            st, completion, kind, targets, allow_tools=False, extra_tools=extra, cards_here=bool(who_marks)
+            st, completion, kind, targets, allow_tools=False, extra_tools=extra, cards_here=bool(who_marks or seen)
+        )
+        completion, cost, row, actions, stored = await self._no_card_quotes(
+            st,
+            conv,
+            system,
+            content,
+            kind,
+            targets,
+            numbered,
+            seen,
+            (completion, cost, row, actions, stored),
+            thinking=thinking,
+            generation=generation,
+            max_tokens=max_tokens,
         )
         if st.generation != generation:
             self.store.set_outcome(row, "discarded")
@@ -1487,7 +1557,7 @@ class Engine:
         self._mark_read(conv, [(item, result) for _, _, item, result in results])
         self._mark_links(conv, opened)
         self._mark_cards(st, conv, who_marks)
-        return completion, cost, row, actions
+        return completion, cost, row, actions, seen
 
     def _plan_reads(
         self, st: ChannelState, view: View, reads: list[Action]
@@ -1705,7 +1775,10 @@ class Engine:
         now = self.clock()
         cost = self.pricing.cost(usage, now)
         self.ledger.add(st.guild_id, cost, now)
-        self.store.update_usage(row, outcome=outcome, hit=usage.hit, miss=usage.miss, output=usage.output, cost=cost)
+        # 记录也挪到搜完的这一刻：搜的时候跨过了午夜，账本和数据库也记在同一天（重启后从库里读的预算才对得上）
+        self.store.update_usage(
+            row, outcome=outcome, hit=usage.hit, miss=usage.miss, output=usage.output, cost=cost, ts=now, day=self.ledger.day(now)
+        )
 
     # ------------------------------------------------------------------ 链接
 
@@ -2109,6 +2182,155 @@ class Engine:
         log.info("频道 %s：查了「%s」的人设卡（%d 张）", st.channel_id, one_line(name, 32), len(found))
         return render_who(name, [(card.name, card.text) for card in found])
 
+    def _seen_cards(self, conv: Conversation, content: Any = None) -> list[str]:
+        """这次请求里它看得到的人设卡原文：记录里附过的、who 查到的、它自己用 card 动作写过的（记录在数据库里，
+        重启之后、卡删掉之后还留在记录里的也算；压缩掉的它就看不到了），加上这一次刚附上的（content）。"""
+        texts: list[str] = []
+        for t in conv.turns:
+            if t.role == "user":
+                texts += card_texts(t.content)
+                continue
+            raw = t.content if isinstance(t.content, str) else json.dumps(t.content, ensure_ascii=False)
+            if "card" in raw.lower() or "人设卡" in raw:  # card、set_card……这几种写法都算改人设卡
+                texts += [a.text for a in parse_actions(raw)[0] if a.kind == "card" and a.text]
+        texts += card_texts(content)
+        return list(dict.fromkeys(texts))
+
+    @staticmethod
+    def _said(conv: Conversation | None, *groups: Iterable[str], content: Any = None) -> Said:
+        """群友公开说过的话：groups（这一批的消息之类）加上记录里（和这一次的 content 里）群友自己说的、发的文件和链接。
+        bot 加的提示（模型自己写的搜索词、频道名）、附着的人设卡、别的频道带来的都不算（不然人设卡的原文能借它们“洗白”）。"""
+        first = [text for group in groups for text in group]
+
+        def make() -> list[str]:
+            lines = list(first)
+            for t in conv.turns if conv is not None else ():
+                if t.role == "user":
+                    lines += public_lines(t.content)
+            return lines + public_lines(content)
+
+        return Said(make)
+
+    def _drafts(self, st: ChannelState, turns: Sequence[Turn], author_id: int) -> set[str]:
+        """这一轮之前的记录里它替这个人写过的卡：是他自己的（以前的版本），不是“别人的卡”。
+        记录里留着的 card 动作都是写成了的：没写成的（太长、照抄别人的卡……）当时就从记录里拿掉了。"""
+        writes: list[tuple[int, str]] = []
+        for t in turns:
+            if t.role != "user":
+                raw = t.content if isinstance(t.content, str) else json.dumps(t.content, ensure_ascii=False)
+                if "card" in raw.lower() or "人设卡" in raw:
+                    writes += [(a.to, a.text) for a in parse_actions(raw)[0] if a.kind == "card" and a.text and a.to is not None]
+        if not writes:
+            return set()
+        authors = self.store.load_authors(st.channel_id, [to for to, _ in writes if 0 < to < 2**31])
+        return {text for to, text in writes if authors.get(to, (None, ""))[0] == author_id}
+
+    @staticmethod
+    def _copies_card(text: str, others: Sequence[str], mine: Sequence[str], said: Iterable[str] | Said) -> bool:
+        """新写的卡有没有照抄别人的卡。本来就在他自己卡上的那几段（几个人的卡里都有的一段，比如公会的规矩）不算抄，
+        只对这种“本来就和他的卡重了”的卡放宽；别的卡照常查（一轮一轮一点点抄进自己的卡，加起来也会被拦）。"""
+        shared = quoted_cards("\n".join(mine), others)
+        plain = [c for c in others if c not in shared]
+        public = said if isinstance(said, Said) else Said(lambda lines=list(said): lines)
+        return quotes_card(text, plain, said=public) or quotes_card(text, shared, said=public.plus(mine))
+
+    def _screen_memory(self, guild_id: int, items: list[Any], text_of: Callable[[Any], str | None], cards: list[str], said: Iterable[str]) -> list[Any]:
+        """要记进长期记忆的几条：和已经记着的连起来照抄了人设卡的不记（一张卡拆成几条分开记，拼起来还是原文）。
+        长期记忆每个频道的提示词里都有、管理员也看得到。text_of 返回 None 的不是要记的话，原样留着。"""
+        if not cards or not any(text_of(item) for item in items):
+            return items
+        base = [m.text for m in self.memory.entries(guild_id)] if self.memory is not None else []
+        # 以前就记着照抄了某张卡的（这个功能之前记的）：那张卡只看新的这条自己；别的卡照常连起来查
+        stale = quoted_cards("\n".join(base), cards, said=said)
+        fresh = [c for c in cards if c not in stale]
+        public = said if isinstance(said, Said) else Said(lambda lines=list(said): lines)
+        # 那张卡已经有一大块在长期记忆里了：已经记着的那几段不算，但再记它的原话，哪怕一小段（连着 8 个词）也不行
+        old = public.plus(base)
+        out = []
+        for item in items:
+            text = text_of(item)
+            if text:
+                if touches_card(text, stale, said=old) or quotes_card("\n".join([*base, text]), fresh, said=public):
+                    continue
+                base.append(text)
+            out.append(item)
+        return out
+
+    async def _no_card_quotes(
+        self,
+        st: ChannelState,
+        conv: Conversation,
+        system: str,
+        content: Any,
+        kind: str,
+        targets: list[int],
+        numbered: list[tuple[int, IncomingMessage]],
+        seen: list[str],
+        step: tuple[Completion, float, int, list[Action], str],
+        *,
+        thinking: str,
+        generation: int,
+        max_tokens: int | None,
+    ) -> tuple[Completion, float, int, list[Action], str]:
+        """人设卡的原文不照念：要发的话里有一长段和它看得到的卡一模一样，被叫到时把刚才的输出和一句提醒接在后面，
+        让它用自己的话重说一次（前面和刚才那次请求一样，缓存命中），群里看得到的动作换成重说的，记卡、记长期记忆照旧；
+        还是照念、重说出错，或者是主动聊天（没人在等，不多花钱），就不发这些话（被叫到了加个 🤐）。
+        要记进长期记忆的话照抄了卡的不记（长期记忆每个频道、管理员都看得到）。
+        写进记录的是最后真的要做的：照念的那份和提醒都不进记录。日志里不写卡和话的内容。"""
+        completion, cost, row, actions, stored = step
+        if not seen:
+            return step
+        heard = self._said(conv, (m.text for _, m in numbered), content=content)  # 群友自己公开说过、发过的：照着说不算泄露
+
+        def copied(text: str) -> bool:
+            return quotes_card(text, seen, said=heard)
+
+        def recited(acts: list[Action]) -> bool:
+            return copied("\n".join(t for a in acts if a.kind == "reply" for t in a.messages))
+
+        memo = self._screen_memory(st.guild_id, actions, lambda a: a.text if a.kind == "memory" else None, seen, heard)
+        if len(memo) != len(actions):
+            log.info("频道 %s：要记的长期记忆照抄了人设卡的原文，没记", st.channel_id)
+            actions, stored = memo, dump_actions(memo)
+        if not recited(actions):
+            return completion, cost, row, actions, stored
+        self.store.set_outcome(row, "recited")
+        now = self.clock()
+        retry = (
+            kind == "mention"
+            and st.generation == generation
+            and now >= self.paused_until
+            and not self._over_budget(st, self.view(st), now)[1]
+        )
+        log.warning("频道 %s：要说的话照念了人设卡的原文，%s", st.channel_id, "让它用自己的话重说" if retry else "不发")
+        redone = False
+        if retry:
+            messages = self._messages(system, conv, content) + [
+                {"role": "assistant", "content": completion.content},
+                {"role": "user", "content": CARD_QUOTED},
+            ]
+            try:
+                again, more, again_row = await self._ask(st, kind, messages, thinking, generation, max_tokens)
+            except LLMError as exc:
+                # 不走 _on_error：这批消息已经答过了（不用冷却、不加 ⚠️）；超时的照样记账，余额不足、key 不对照样暂停
+                log.warning("频道 %s：让它重说时 DeepSeek 调用失败：%s", st.channel_id, exc)
+                self._pause_on(exc, self.clock())
+                self._record_error(st.guild_id, st.channel_id, kind, exc)
+            else:
+                completion, cost, row = again, cost + more, again_row
+                redo, _ = self._interpret(st, again, kind, targets, allow_tools=False, cards_here=True)
+                redone = not recited(redo)
+                if redone:
+                    actions = [a for a in actions if a.kind not in CHAT_KINDS] + [a for a in redo if a.kind in CHAT_KINDS]
+                else:
+                    log.warning("频道 %s：重说的还是照念了人设卡的原文，不发", st.channel_id)
+        if not redone:
+            actions = [a for a in actions if a.kind != "reply"]
+            self._recited_rows.add(row)  # 最后记结果时还是 recited
+        if kind == "mention" and targets and not any(a.kind in CHAT_KINDS for a in actions):
+            actions.append(Action("react", targets[-1], emoji="🤐"))  # 被叫到了总得有点回应
+        return completion, cost, row, actions, dump_actions(actions)
+
     async def _apply_memory_actions(
         self,
         st: ChannelState,
@@ -2117,26 +2339,67 @@ class Engine:
         numbered: list[tuple[int, IncomingMessage]],
         targets: list[int],
         kind: str,
+        seen: Sequence[str] = (),
+        history: Sequence[Turn] = (),
     ) -> list[Action]:
-        """改人设卡、长期记忆（只是写进数据库）。改成了就在要求的那条消息上加 📝。返回剩下要执行的动作。"""
+        """改人设卡、长期记忆（只是写进数据库）。改成了就在要求的那条消息上加 📝。返回剩下要执行的动作。
+        seen：这次请求里它看得到的人设卡（不含它这次自己写的）。history：这一轮之前的记录。"""
         mine = [a for a in actions if a.kind in MEMORY_KINDS]
         if not mine:
             return actions
         by_sid = dict(numbered)
         now = self.clock()
         marked: set[int] = set()
+        refused: list[Action] = []
         for action in mine:
             if action.kind == "card":
-                mid = self._apply_card(st, view, action, by_sid, now)
+                mid = self._apply_card(st, view, action, by_sid, now, seen, history)
+                if mid is None and not self._card_is(st, action, by_sid):
+                    refused.append(action)
             else:
                 mid = self._apply_memory(st, view, action, targets, kind, now)
             if mid is not None and mid not in marked:
                 marked.add(mid)
                 await self._safe_react(st, mid, "📝")  # 让人一眼看到真的记下了
+        if refused:
+            self._drop_from_record(st, refused)
         return [a for a in actions if a.kind not in MEMORY_KINDS]
 
+    def _card_is(self, st: ChannelState, action: Action, by_sid: dict[int, IncomingMessage]) -> bool:
+        """card 动作要写的，本来就是那个人现在的卡（没写是因为没有变化，不算没写成）。"""
+        m = by_sid.get(action.to) if action.to is not None else None
+        if m is None or self.cards is None:
+            return False
+        card = self.cards.get(st.guild_id, m.author_id)
+        return (card.text if card is not None else "") == clean_card(action.text or "")
+
+    def _drop_from_record(self, st: ChannelState, refused: list[Action]) -> None:
+        """没写成的 card 动作从这一轮记下的输出里拿掉：记录里留着的都是真的写成了的（以后核对写卡时，记录里替某人写过的卡
+        都算他自己的）；照抄别人的卡被拦下的那份，也不会留在记录里让它下次接着抄。"""
+        conv = st.conversation
+        if conv is None or not conv.turns or conv.turns[-1].role != "assistant":
+            return
+        turn = conv.turns[-1]
+        raw = turn.content if isinstance(turn.content, str) else json.dumps(turn.content, ensure_ascii=False)
+        actions, ok = parse_actions(raw)
+        if not ok:
+            return
+        gone = {(a.to, a.text) for a in refused}
+        kept = [a for a in actions if not (a.kind == "card" and (a.to, a.text) in gone)]
+        if len(kept) == len(actions):
+            return
+        turn.content = dump_actions(kept)
+        self.store.update_turn(turn.id, turn.content)
+
     def _apply_card(
-        self, st: ChannelState, view: View, action: Action, by_sid: dict[int, IncomingMessage], now: float
+        self,
+        st: ChannelState,
+        view: View,
+        action: Action,
+        by_sid: dict[int, IncomingMessage],
+        now: float,
+        seen: Sequence[str] = (),
+        history: Sequence[Turn] = (),
     ) -> int | None:
         """改人设卡：只认这一轮里本人叫它的那条消息，卡的主人就是那条消息的作者。返回要加 📝 的消息。"""
         if not self._cards_on(view):
@@ -2153,6 +2416,14 @@ class Engine:
         text = clean_card(action.text or "")
         if len(text) > self.ec.card_max_chars:
             log.info("频道 %s：%s 的新人设卡太长（%d 字，最多 %d），没改", st.channel_id, m.author_name, len(text), self.ec.card_max_chars)
+            return None
+        # 抄进自己的卡，本人用 /ds-rp 就能看到别人的原文了：别人现在的卡，加上这次请求里它看得到的（删掉的、改之前的也算；
+        # 它以前替他写成过的卡是他自己的，不算）。大家公开说过的、本来就在他自己卡上的不算
+        drafts = self._drafts(st, history, m.author_id)
+        others = [*self.cards.others(st.guild_id, m.author_id), *(t for t in seen if t not in drafts)]
+        mine = self.cards.own_texts(st.guild_id, m.author_id)
+        if self._copies_card(text, others, mine, self._said(st.conversation, (x.text for x in by_sid.values()))):
+            log.info("频道 %s：%s 的新人设卡照抄了别人的人设卡，没改", st.channel_id, m.author_name)
             return None
         # 它是照着对话里附着的那份改的：那份在这期间被本人改了、删了（/ds-rp、bot 主人删卡），就不写
         seen = st.cards_shown.get(m.author_id)
@@ -2218,37 +2489,57 @@ class Engine:
         return now - max(st.last_activity_at, st.last_eval_at) >= self.ec.review_idle_seconds
 
     def _kick_review(self, st: ChannelState) -> None:
+        if self.closing:
+            return
         st.reviewing = True
         task = asyncio.get_running_loop().create_task(self._review_task(st))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def _review_task(self, st: ChannelState) -> None:
-        """安静时整理记忆。只在挑要整理的聊天时占着这个频道；问模型的时候不占，有人叫它照样马上回。"""
+        """安静时整理记忆。只在挑要整理的聊天时占着这个频道；问模型的时候不占，有人叫它照样马上回。
+        整理的时候又压缩了旧记录：压掉的那部分排着队，整理完这批接着整理。"""
         try:
-            async with st.lock:
-                conv = self._conversation(st)
-                self._flush_fixes(st, conv)
-                info = self.transport.channel_info(st.channel_id)
-                generation = st.generation
-                plan = self._review_plan(st, conv, info)
-            if plan is not None:
-                await self._run_review(st, conv, info, plan, generation, before_compact=False)
-        except Exception:
-            log.exception("频道 %s：整理记忆出错", st.channel_id)
+            try:
+                async with st.lock:
+                    conv = self._conversation(st)
+                    self._flush_fixes(st, conv)
+                    info = self.transport.channel_info(st.channel_id)
+                    generation = st.generation
+                    plan = self._review_plan(st, conv, info)
+                if plan is not None:
+                    await self._run_review(st, conv, info, plan, generation, before_compact=False)
+            except Exception:
+                log.exception("频道 %s：整理记忆出错", st.channel_id)
+            st.review_held = 0  # 这批完了：没整理成、还在记录里的，压缩时再挑出来
+            await self._review_queued(st)
         finally:
-            st.reviewing = False
+            self._review_done(st)
 
-    async def _compact_review(
-        self, st: ChannelState, conv: Conversation, info: ChannelInfo, plan: _ReviewPlan, generation: int
-    ) -> None:
-        """压缩旧记录之前挑出来的那部分聊天：在后台整理。"""
+    async def _compact_review(self, st: ChannelState) -> None:
+        """压缩旧记录之前挑出来的那部分聊天：在后台整理（整理的时候又压缩了，压掉的也接着整理）。"""
         try:
-            await self._run_review(st, conv, info, plan, generation, before_compact=True)
-        except Exception:
-            log.exception("频道 %s：压缩前整理记忆出错", st.channel_id)
+            await self._review_queued(st)
         finally:
-            st.reviewing = False
+            self._review_done(st)
+
+    async def _review_queued(self, st: ChannelState) -> None:
+        """按先后整理排着队的几批（压缩前挑出来的原话）。"""
+        while st.review_jobs and not self.closing:
+            job = st.review_jobs.pop(0)
+            if job.generation != st.generation:
+                continue  # 排队的时候清空过记忆
+            try:
+                await self._run_review(st, job.conv, job.info, job.plan, job.generation, before_compact=True)
+            except Exception:
+                log.exception("频道 %s：压缩前整理记忆出错", st.channel_id)
+
+    @staticmethod
+    def _review_done(st: ChannelState) -> None:
+        # 和上面最后一次检查队列之间不能有 await：不然这中间压缩时排进来的那批没人整理
+        st.reviewing = False
+        st.review_held = 0
+        st.review_jobs.clear()  # 被取消（关机）时剩下的就不整理了
 
     def _set_reviewed(self, st: ChannelState, conv: Conversation, turn_id: int) -> None:
         self.store.set_reviewed(conv, turn_id)
@@ -2256,14 +2547,16 @@ class Engine:
             st.conversation.reviewed_upto = max(st.conversation.reviewed_upto, turn_id)  # 中途重新载入过
 
     def _review_plan(
-        self, st: ChannelState, conv: Conversation, info: ChannelInfo, upto: int | None = None
+        self, st: ChannelState, conv: Conversation, info: ChannelInfo, upto: int | None = None, after: int = 0
     ) -> _ReviewPlan | None:
         """挑出还没整理过的聊天，分成几段。不用整理（关掉了、私密频道、没人说话）时把进度记到最后，返回 None。
 
-        upto：只挑到这条记录（压缩旧记录之前：那部分马上要压成摘要，原话就看不到了）。"""
+        upto：只挑到这条记录（压缩旧记录之前：那部分马上要压成摘要，原话就看不到了）。
+        after：这条之前的不挑（正在整理的那一段已经挑走了）。"""
         now = self.clock()
         view = self.view(st)
-        turns = [t for t in conv.turns if t.id > conv.reviewed_upto and (upto is None or t.id <= upto)]
+        start = max(conv.reviewed_upto, after)
+        turns = [t for t in conv.turns if t.id > start and (upto is None or t.id <= upto)]
         if not turns:
             if upto is None:
                 st.unreviewed_rounds = 0
@@ -2335,7 +2628,13 @@ class Engine:
     ) -> None:
         """一段一段问模型、照着改，每整理完一段就记下进度。连着失败几次就放弃这一批（免得一直花钱）。"""
         st.last_review_at = self.clock()
-        for chunk in plan.chunks[:MAX_REVIEW_CHUNKS]:
+        for i, chunk in enumerate(plan.chunks[:MAX_REVIEW_CHUNKS]):
+            if self.closing:
+                return  # 关机了：剩下的下次启动再整理（压缩前挑出来的就不整理了）
+            if not before_compact:
+                if i and st.review_held > plan.chunks[i - 1].last_turn:
+                    return  # 问模型的时候压缩了旧记录：后面的原话已经挑出来排着队了（没压掉的下次再整理）
+                st.review_held = max(st.review_held, chunk.last_turn)  # 这一段归这次整理：压缩时不再挑
             if chunk.sids:
                 result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation)
                 if st.generation != generation:
@@ -2431,9 +2730,7 @@ class Engine:
             )
         except LLMError as exc:
             log.warning("频道 %s：整理记忆失败：%s", st.channel_id, exc)
-            self.store.record_usage(
-                ts=now, day=self.ledger.day(now), guild_id=guild, channel_id=st.channel_id, kind="review", outcome="error"
-            )
+            self._record_error(guild, st.channel_id, "review", exc)
             if exc.timeout:
                 return "failed"  # 等了很久也没写完：多半是这段要写的太多，再试多半还是一样（对方可能还照样算钱）
             transient = exc.status is None or exc.status in (401, 402, 408, 429) or exc.status >= 500
@@ -2465,6 +2762,7 @@ class Engine:
             log.warning("频道 %s：整理记忆的输出不是合法 JSON", st.channel_id)
             return "ok"  # 当成没东西要记，不重试（免得一直花钱）
         updates, ops = parsed
+        heard = _member_blocks(chunk.lines)  # 群友自己说的（一条消息连同续行算一整段）
         cards_changed = 0
         if do_cards:
             assert self.cards is not None
@@ -2481,6 +2779,10 @@ class Engine:
                 text = clean_card(text)
                 if not text or len(text) > self.ec.card_max_chars:
                     continue
+                # 别把别人的卡抄进这个人的卡（本人用 /ds-rp 就看得到）；本来就在他自己卡上的不算
+                if self._copies_card(text, self.cards.others(guild, who[0]), self.cards.own_texts(guild, who[0]), heard):
+                    log.info("频道 %s：整理记忆时 #%s 的新人设卡照抄了别人的卡，没改", st.channel_id, to)  # 不写内容
+                    continue
                 deleted = self.cards.deleted_at(guild, who[0])
                 if deleted is not None and deleted >= chunk.start:
                     continue  # 问模型的时候被删掉了
@@ -2491,7 +2793,12 @@ class Engine:
                     break
         memory_changed = 0
         if memory_ok:
-            for op in ops[:MAX_REVIEW_MEMORY_OPS]:
+            listed_cards = [card for _, _, card in listed or [] if card]  # 给它看过的人设卡
+            wanted = ops[:MAX_REVIEW_MEMORY_OPS]
+            kept = self._screen_memory(guild, wanted, lambda op: op.text, listed_cards, heard)
+            if len(kept) != len(wanted):
+                log.info("频道 %s：整理记忆时要记的照抄了人设卡的原文，没记", st.channel_id)  # 不写内容
+            for op in kept:
                 if self._memory_op(guild, op.op, op.no, op.text, via="review", now=now):
                     memory_changed += 1
         log.info(
@@ -2668,9 +2975,15 @@ class Engine:
         return clean_persona(value or "") or DEFAULT_PERSONA
 
     async def _persona_section(
-        self, st: ChannelState, action: Action, numbered: list[tuple[int, IncomingMessage]], targets: list[int]
+        self,
+        st: ChannelState,
+        action: Action,
+        numbered: list[tuple[int, IncomingMessage]],
+        targets: list[int],
+        cards: Sequence[str] = (),
     ) -> str:
-        """改人设：只认这一轮里 dsowner 本人叫它的那条消息。改完（或没改成）的结果告诉模型，它再回话。"""
+        """改人设：只认这一轮里 dsowner 本人叫它的那条消息。改完（或没改成）的结果告诉模型，它再回话。
+        cards：它看得到的人设卡原文（新人设照抄了的不改：人设管理员看得到，卡是本人的隐私）。"""
         by_sid = dict(numbered)
         to = action.to
         if to is None:
@@ -2711,7 +3024,13 @@ class Engine:
             if isinstance(target, str):
                 return target
             scope, scope_id, where = target
-            if not text or text == self._inherited_persona(st, scope, scope_id):
+            inherited = self._inherited_persona(st, scope, scope_id)
+            # 人设管理员看得到：别把人设卡的原文搬进来。本来就在人设里的、dsowner 自己说的不算
+            current = self.settings.overrides(scope, scope_id).get("persona") or ""
+            if quotes_card(text, cards, said=[asker.text, current, inherited]):
+                log.warning("频道 %s：dsowner 要改的人设照抄了人设卡的原文，没改", st.channel_id)  # 不写内容
+                return PERSONA_CARD
+            if not text or text == inherited:
                 # 和上一级一样就不单独存，以后上一级改了这里也会跟着变
                 restored = None
                 what = "恢复了默认人设（全服务器）" if scope == "guild" else f"让{where}改回沿用上一级的人设"
@@ -3059,12 +3378,8 @@ class Engine:
         st.last_eval_at = now
         for m in batch:
             m.trigger = False  # 只清这一批的点名；调用期间新来的点名照常处理
-        if exc.status == 402:
-            self.paused_until = now + 600
-            log.error("DeepSeek 余额不足，暂停 10 分钟。请到 platform.deepseek.com 充值。")
-        elif exc.status == 401:
-            self.paused_until = now + 3600
-            log.error("DeepSeek API key 无效，暂停 1 小时。请检查 .env 里的 DEEPSEEK_API_KEY。")
+        if self._pause_on(exc, now):
+            pass
         elif exc.status in BAD_REQUEST:
             # 这批消息本身被拒（比如内容审核）：丢掉它，别卡住整个频道
             log.error("频道 %s：这批消息被 DeepSeek 拒绝，已丢弃：%s", st.channel_id, exc)
@@ -3076,19 +3391,48 @@ class Engine:
                 await self._compact(st, conv, info, force=True)
         else:
             st.error_until = now + ERROR_BACKOFF
-        self.store.record_usage(
-            ts=now,
-            day=self.ledger.day(now),
-            guild_id=st.guild_id,
-            channel_id=st.channel_id,
-            kind=kind,
-            outcome="error",
-        )
+        self._record_error(st.guild_id, st.channel_id, kind, exc)
         st.last_decision = f"出错：{exc}"
         if kind == "mention" and targets:
             mid = st.msg_by_sid.get(targets[-1])
             if mid is not None:
                 await self._safe_react(st, mid, "⚠️")
+
+    def _pause_on(self, exc: LLMError, now: float) -> bool:
+        """余额不足、key 不对：全局暂停一阵（返回是不是这两种）。"""
+        if exc.status == 402:
+            self.paused_until = now + 600
+            log.error("DeepSeek 余额不足，暂停 10 分钟。请到 platform.deepseek.com 充值。")
+        elif exc.status == 401:
+            self.paused_until = now + 3600
+            log.error("DeepSeek API key 无效，暂停 1 小时。请检查 .env 里的 DEEPSEEK_API_KEY。")
+        else:
+            return False
+        return True
+
+    def _record_error(self, guild_id: int, channel_id: int, kind: str, exc: LLMError) -> None:
+        """调用失败也记一笔 error。超时、响应传到一半断了的带着估出来的用量（exc.usage）：对方多半照样算了钱，
+        按估算记进账本和数据库，每日预算才拦得住。"""
+        now = self.clock()
+        u = exc.usage or Usage()
+        cost = self.pricing.cost(u, now)
+        if cost:
+            # 先记内存账本再写库（和 _call 一样）：跨天时账本会从库里重读，顺序反了这笔会算两遍
+            self.ledger.add(guild_id, cost, now)
+            log.info("频道 %s：%s 没拿到结果，按估算记了 $%.5f（输入约 %d、输出约 %d token）", channel_id, kind, cost, u.prompt_tokens, u.output)
+        self.store.record_usage(
+            ts=now,
+            day=self.ledger.day(now),
+            guild_id=guild_id,
+            channel_id=channel_id,
+            kind=kind,
+            outcome="error",
+            hit=u.hit,
+            miss=u.miss,
+            output=u.output,
+            reasoning=u.reasoning,
+            cost=cost,
+        )
 
     async def _safe_react(self, st: ChannelState, message_id: int, emoji: str) -> bool:
         try:
@@ -3288,30 +3632,38 @@ class Engine:
         async with self._decode_slots:
             return await asyncio.to_thread(to_data_uri, raw, max_side)
 
+    def _review_before_compact(self, st: ChannelState, conv: Conversation, info: ChannelInfo, upto: int, generation: int) -> None:
+        """要压掉的那部分（到 upto 为止）还没整理过记忆的：把原话挑出来，排队在后台整理（压成摘要之后就看不到原话了）。
+        正在整理的话，它正在问的那一段不再挑，挑出来的排在它后面。不等它：压缩照常做，有人叫它也不用多等。"""
+        if self.cards is None and self.memory is None:
+            return
+        if max(conv.reviewed_upto, st.review_held) >= upto:
+            return  # 都整理过了，或者正在问的那一段会整理到
+        try:
+            plan = self._review_plan(st, conv, info, upto=upto, after=st.review_held)
+        except Exception:
+            log.exception("频道 %s：压缩前整理记忆出错", st.channel_id)
+            return
+        if plan is None:
+            return
+        st.review_jobs.append(_ReviewJob(conv, info, plan, generation))
+        if st.reviewing:
+            st.review_held = upto  # 安静时整理的那批：问完手上这一段就停，后面的归这一批
+            return  # 它整理完手上的会接着整理这批
+        st.reviewing = True
+        task = asyncio.get_running_loop().create_task(self._compact_review(st))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     async def _compact(self, st: ChannelState, conv: Conversation, info: ChannelInfo, *, force: bool = False) -> None:
         """把最早的一部分对话压成摘要。只在这一次会让缓存 miss。"""
+        if self.closing:
+            return  # 关机了：压掉的那部分来不及整理记忆，留到下次启动再压
         self._flush_fixes(st, conv)  # 刚删掉、改过的先改进记录，别压进摘要里
         remove = plan_compaction([t.content for t in conv.turns], force=force)
         if remove < 2:
             return
         generation = st.generation
-        if (
-            conv.reviewed_upto < conv.turns[remove - 1].id
-            and (self.cards is not None or self.memory is not None)
-            and not st.reviewing  # 正在整理（会整理到这些）
-        ):
-            # 要压掉的那部分还没整理过记忆：先把原话挑出来，放到后台整理（压成摘要之后就看不到原话了）。
-            # 不等它：压缩照常做，有人叫它也不用多等
-            try:
-                plan = self._review_plan(st, conv, info, upto=conv.turns[remove - 1].id)
-            except Exception:
-                log.exception("频道 %s：压缩前整理记忆出错", st.channel_id)
-                plan = None
-            if plan is not None:
-                st.reviewing = True
-                task = asyncio.get_running_loop().create_task(self._compact_review(st, conv, info, plan, generation))
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
         lines = []
         for t in conv.turns[:remove]:
             if t.role == "user":
@@ -3336,6 +3688,8 @@ class Engine:
             )
         except LLMError as exc:
             log.warning("频道 %s：压缩摘要失败：%s", st.channel_id, exc)
+            if exc.usage is not None:  # 超时、传到一半断了：对方多半照样算了钱，记一笔（别的错误照旧不记）
+                self._record_error(st.guild_id, st.channel_id, "summary", exc)
             return
         cost = self.pricing.cost(completion.usage, now)
         self.ledger.add(st.guild_id, cost, now)
@@ -3352,9 +3706,11 @@ class Engine:
             cost=cost,
         )
         summary = completion.content.strip()
-        if not summary or st.generation != generation:
-            return
+        if not summary or st.generation != generation or self.closing:
+            return  # 关机了：压掉的那部分来不及整理记忆，留到下次启动再压
         last_removed = conv.turns[remove - 1].id
+        # 和下面的压缩之间不能有 await：挑出来的正好是压掉的那些
+        self._review_before_compact(st, conv, info, last_removed, generation)
         self.store.compact(conv, summary[: self.ec.summary_max_chars * 2], remove)
         st.listed = last_listed(conv.turns)  # 名单可能在被压掉的那部分里，那样下次被叫到时重新写
         for entry in st.recent_files.values():
@@ -3405,6 +3761,8 @@ class Engine:
             st.listed = None
             st.cards_shown.clear()
             st.unreviewed_rounds = 0  # 清空的记录不再整理
+            st.review_jobs.clear()  # 排着队的是清空前的原话：不整理了（正在问的那一段问完会自己作废）
+            st.review_held = 0
             st.edit_notes.clear()  # 旧消息被编辑的那几句：记录都清了，别带进新的对话
             st.fixes.clear()
             st.music_seen = None  # 告诉过它在放什么的那句也清掉了

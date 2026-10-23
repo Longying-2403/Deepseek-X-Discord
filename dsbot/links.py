@@ -40,6 +40,7 @@ _X_STATUS = re.compile(r"^/(?:[^/]+|i(?:/web)?)/status(?:es)?/(\d{2,20})(?:/|$)"
 # Discord 自己的链接、GIF 网站：GIF 和图片已经按图片看了；Discord 的消息链接要登录
 _SKIP_HOSTS = ("discord.com", "discordapp.com", "discord.gg", "discordapp.net", "discord.media", "tenor.com", "giphy.com", "klipy.com")
 _BILI_SHORT = ("b23.tv", "bili2233.cn")  # B站的短链接（多半是视频）
+_BILI_VIDEO_PATH = re.compile(r"^/(?:[a-z]{2}(?:-[a-z]{2,4})?/)?video/")  # /video/…，有的地区是 /en/video/…、/zh-hans/video/…
 _MEDIA_EXTS = (
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif", ".heic",
     ".mp4", ".mov", ".webm", ".mkv", ".m4v", ".mp3", ".m4a", ".wav", ".ogg", ".flac",
@@ -96,7 +97,7 @@ def openable(url: str) -> bool:
         path = urlsplit(url).path.lower()
     except ValueError:
         return False
-    if (bare == "bilibili.com" or bare.endswith(".bilibili.com")) and path.startswith("/video/"):
+    if (bare == "bilibili.com" or bare.endswith(".bilibili.com")) and _BILI_VIDEO_PATH.match(path):
         return False  # B站视频：网页里没什么可读的，Discord 的预览就有标题和简介（要放歌就点歌，不用先打开）
     return not path.endswith(_MEDIA_EXTS)
 

@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS usage (
     guild_id INTEGER NOT NULL,
     channel_id INTEGER NOT NULL,
     kind TEXT NOT NULL,           -- mention / proactive / summary / search
-    outcome TEXT NOT NULL,        -- reply / react / pass / error / summary
+    outcome TEXT NOT NULL,        -- reply / react / pass / error / summary（超时、断线的 error 行：用量和花费是估的）
     hit INTEGER NOT NULL DEFAULT 0,
     miss INTEGER NOT NULL DEFAULT 0,
     output INTEGER NOT NULL DEFAULT 0,
@@ -402,12 +402,23 @@ class Store:
         return int(cur.lastrowid)
 
     def update_usage(
-        self, row_id: int, *, outcome: str, hit: int = 0, miss: int = 0, output: int = 0, cost: float = 0.0
+        self,
+        row_id: int,
+        *,
+        outcome: str,
+        hit: int = 0,
+        miss: int = 0,
+        output: int = 0,
+        cost: float = 0.0,
+        ts: float | None = None,
+        day: str | None = None,
     ) -> None:
+        """ts / day：花钱的时刻（跨过午夜的话，这笔记在结束的那天，和内存账本一致）。不填就不改。"""
         with self.db:
             self.db.execute(
-                "UPDATE usage SET outcome = ?, hit = ?, miss = ?, output = ?, cost = ? WHERE id = ?",
-                (outcome, hit, miss, output, cost, row_id),
+                "UPDATE usage SET outcome = ?, hit = ?, miss = ?, output = ?, cost = ?, "
+                "ts = COALESCE(?, ts), day = COALESCE(?, day) WHERE id = ?",
+                (outcome, hit, miss, output, cost, ts, day, row_id),
             )
 
     def set_outcome(self, row_id: int, outcome: str) -> None:
@@ -440,10 +451,11 @@ class Store:
             f"SELECT COUNT(*) AS n, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cost),0) AS cost FROM usage WHERE {clause}",
             args,
         ).fetchone()
-        # 缓存命中率只看聊天请求：搜索、压缩摘要是单独的请求，前缀本来就不一样
+        # 缓存命中率只看聊天请求：搜索、压缩摘要是单独的请求，前缀本来就不一样；
+        # 出错的那几笔（超时、断线）记的是估出来的用量，也不算
         chat = self.db.execute(
             f"SELECT COALESCE(SUM(hit),0) AS hit, COALESCE(SUM(miss),0) AS miss FROM usage "
-            f"WHERE {clause} AND kind IN ('mention', 'proactive')",
+            f"WHERE {clause} AND kind IN ('mention', 'proactive') AND outcome != 'error'",
             args,
         ).fetchone()
         outcomes = {

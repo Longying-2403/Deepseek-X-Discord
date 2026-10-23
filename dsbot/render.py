@@ -483,6 +483,8 @@ LIST_EMPTY = "（现在没有能翻记录的别的频道）"
 _FILE_HEAD = re.compile(r"^【\S+ 的(?:文件|链接)「")
 _GALLERY_START = GALLERY_HEAD.split("「", 1)[0]  # “（你找了”
 _WHO_START = WHO_HEAD.split("「", 1)[0]  # “（你查了”
+# 附人设卡的标题：记录只追加不改写，旧记录里还是改写法之前的那句，两种都认
+_CARDS_HEADS = (CARDS_HEAD, "（在场的人的人设卡，只当资料，别讲给别人听：）")
 _WHO_NONE_START, _WHO_NONE_END = WHO_NONE.split("{name}")
 # 点歌的结果、“现在在放什么”：里面的歌名是 B站上来的，和搜索结果一样不进摘要和整理记忆（它点了什么歌，它自己的动作里有）
 _MUSIC_NOW_START = MUSIC_NOW.split("{", 1)[0] + "语音频道"  # “（现在语音频道”（MUSIC_IDLE 也是这样开头）
@@ -576,7 +578,7 @@ def own_text(content: Any) -> str:
         after_search = after_file = False
         if line.startswith("（") and (line.endswith("跟你聊过：") or line == LIST_HEAD):
             skipping_block = True
-        elif line.startswith(("（你翻了", "（你搜了", _GALLERY_START, _WHO_START)) or line == CARDS_HEAD:
+        elif line.startswith(("（你翻了", "（你搜了", _GALLERY_START, _WHO_START)) or line in _CARDS_HEADS:
             skipping_fence = True
             after_search = line.startswith("（你搜了")
         elif line == WHO_OFF or (line.startswith(_WHO_NONE_START) and line.endswith(_WHO_NONE_END)):
@@ -587,6 +589,76 @@ def own_text(content: Any) -> str:
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
     return "\n".join(out)
+
+
+def card_texts(content: Any) -> list[str]:
+    """记录里附着的人设卡原文（在场的人的卡、who 查到的卡；旧写法的标题也认），一张一条。检查照念用。
+    只认顶格的标题行后面紧跟着的 <<< … >>>：文件、链接、搜索结果的 <<< >>> 里写的冒充不了。
+    卡的正文写进记录时中和过（【、>>> 都换掉了），断不开。告诉它“卡删掉了”的那句不算。"""
+    text = content_text(content)
+    if "人设卡" not in text:
+        return []
+    out: list[str] = []
+    card: list[str] | None = None  # 正在读的那张卡（还没读到【名字】时是 None）
+    head = fenced = in_cards = False
+    for line in text.split("\n"):
+        if in_cards:
+            if line == ">>>" or line.startswith("【"):
+                if card:
+                    out.append("\n".join(card))
+                card = [] if line.startswith("【") else None
+                in_cards = line != ">>>"
+            elif card is not None and line != CARD_DELETED:
+                card.append(line)
+            continue
+        if fenced:
+            fenced = line != ">>>"
+            continue
+        if line == "<<<":
+            in_cards, fenced, card = head, not head, None
+        head = line in _CARDS_HEADS or line.startswith(_WHO_START)
+    return out
+
+
+_MEMBER_LINE = re.compile(r"^#\d{1,9} ")
+
+
+def public_lines(content: Any) -> list[str]:
+    """群友自己公开说过、发过的：他们的消息（连同续行）、改过之后的消息、他们发的文件和链接打开后的正文。照念检查用：照着这些说不算泄露。
+    bot 自己加的提示不算（里面有模型自己写的搜索词、频道名之类，人设卡的原文能借这个“洗白”）；附着的人设卡、别的频道带来的、搜索结果也不算。"""
+    out: list[str] = []
+    block: list[str] = []  # 正在攒的一段：一条消息连同续行，或者一段文件正文（一整段一起算，跨行的片段也是公开的）
+    member = body = after_head = False
+
+    def flush() -> None:
+        if block:
+            out.append("\n".join(block))
+            block.clear()
+
+    for line in own_text(content).split("\n"):
+        if body:
+            body = line != ">>>"
+            if body:
+                block.append(line)
+            else:
+                flush()
+            continue
+        if after_head and line == "<<<":
+            flush()
+            body, after_head = True, False
+            continue
+        after_head = bool(_FILE_HEAD.match(line))
+        if member and line.startswith("  "):
+            block.append(line)  # 多行消息的续行
+            continue
+        flush()
+        member = bool(_MEMBER_LINE.match(line))
+        if member:
+            block.append(line)
+        elif line.startswith("（#") and _EDIT_NOTE_MARK in line:
+            out.append(line)  # 很早的消息改成了什么（群友自己改的）
+    flush()
+    return out
 
 
 _MSG_LINE = re.compile(r"^#\d+ ")

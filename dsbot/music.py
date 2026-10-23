@@ -54,7 +54,8 @@ SHORT_HOSTS = ("b23.tv", "bili2233.cn")
 
 _BV = r"[Bb][Vv][0-9A-Za-z]{10}"
 _LEFT = r"(?<![A-Za-z0-9._@/-])"  # 前面不能紧挨着字母、数字、点之类：不是别的网址、别的域名的一部分（中文可以）
-_VIDEO_LINK = re.compile(rf"{_LEFT}(?:https?://)?(?:www\.|m\.)?bilibili\.com/video/(?:{_BV}|av\d+)[^\s<>\"'）)】」]*", re.I)
+_LANG = r"[a-z]{2}(?:-[a-z]{2,4})?"  # 网址里的语言（bilibili.com/en/video/…、/zh-Hans/video/…，有的地区会跳到这种网址）
+_VIDEO_LINK = re.compile(rf"{_LEFT}(?:https?://)?(?:www\.|m\.)?bilibili\.com/(?:{_LANG}/)?video/(?:{_BV}|av\d+)[^\s<>\"'）)】」]*", re.I)
 _FESTIVAL_LINK = re.compile(rf"{_LEFT}(?:https?://)?(?:www\.)?bilibili\.com/festival/[^\s<>\"']*?[?&]bvid=({_BV})", re.I)
 _SHORT_LINK = re.compile(rf"{_LEFT}(?:https?://)?(?:b23\.tv|bili2233\.cn)/([0-9A-Za-z]+)", re.I)
 _BARE_ID = re.compile(rf"(?<![0-9A-Za-z/=])(?:{_BV}|av\d{{5,12}})(?![0-9A-Za-z])", re.I)
@@ -345,7 +346,7 @@ def load_ytdlp() -> Any:
 
 
 _RISK = re.compile(r"\b412\b|precondition failed|rate limit|\(352\)|(?<![\d])-352(?![\d])")
-_GONE = re.compile(r"\b404\b|not found|不存在|已失效")
+_GONE = re.compile(r"\b404\b|not found|不存在|已失效|keyerror\('bvid'\)")  # BV 号不对时 yt-dlp 报 KeyError('bvid')
 
 
 def explain(error: BaseException, *, searching: bool = False) -> MusicError:
@@ -410,6 +411,89 @@ def _options(**extra: Any) -> dict[str, Any]:
         "allowed_extractors": EXTRACTORS,
         **extra,
     }
+
+
+# B站改版的退路：2026-10 起，B站很多视频（多半是新视频）的网页不再直接带视频信息（window.__INITIAL_STATE__），
+# yt-dlp（2026.10.21）就解析不了，报 “Unable to extract initial state”（yt-dlp 的 issue #17894，写这段时还没修）。
+# 这时改用 B站的视频详情接口拿同样的信息交给 yt-dlp；后面拿音频地址、下载还是 yt-dlp 原来的做法（本来就走接口）。
+# 网页里有信息的视频照旧不用它；yt-dlp 修好以后这段也不碍事，可以删掉。
+_DETAIL_API = "https://api.bilibili.com/x/web-interface/wbi/view/detail"
+_GONE_CODES = frozenset({-400, -404, 62002, 62004, 62012})  # 不存在（BV 号不对）、被删了、审核中、只有 UP 主自己能看
+_RISK_CODES = frozenset({-352, -412, -799})  # 风控、请求太频繁
+_patched_ie: Any = None
+
+
+def _state_from_api(ie: Any, prefix: str, vid: str) -> dict[str, Any] | None:
+    """用 B站的视频详情接口拼出 yt-dlp 要从网页里找的信息（videoData、upData、tags 这几样）。
+
+    ie：yt-dlp 的 B站解析器（用它签名、发请求）。prefix、vid：BV / av 和后面的部分。
+    拿不到、或者视频要跳到番剧页的（yt-dlp 自己会处理）返回 None，照原来的流程走。
+    视频不存在、要登录：照网页的写法放 error.trueCode，yt-dlp 会报对应的错；被风控拦下来：直接抛错。"""
+    query = {"platform": "web", **({"bvid": "BV" + vid} if prefix.upper() == "BV" else {"aid": vid})}
+    try:
+        detail = ie._download_json(
+            _DETAIL_API, vid, note="Downloading video details", query=ie._sign_wbi(query, vid), headers=ie._HEADERS, fatal=False
+        )
+    except Exception as exc:  # yt-dlp 改了里面的写法之类：当成没拿到
+        log.debug("B站视频详情接口出错：%s", exc)
+        return None
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("code")
+    if code in _RISK_CODES:
+        raise load_ytdlp().utils.ExtractorError("You have exceeded the rate limit. Try again later", expected=True)
+    if code == -403:
+        return {"error": {"trueCode": -403}}
+    if code in _GONE_CODES:
+        return {"error": {"trueCode": -404}}
+    data = detail.get("data") if isinstance(detail.get("data"), dict) else {}
+    view = data.get("View")
+    if code != 0 or not isinstance(view, dict) or not view.get("bvid") or view.get("redirect_url"):
+        return None
+    card = data.get("Card") if isinstance(data.get("Card"), dict) else {}
+    up = card.get("card") if isinstance(card.get("card"), dict) else view.get("owner")
+    log.info("B站 %s%s 的网页里没有视频信息，改用视频详情接口", prefix, vid)
+    return {
+        "videoData": view,
+        "upData": up if isinstance(up, dict) else {},
+        "tags": data.get("Tags") if isinstance(data.get("Tags"), list) else [],
+    }
+
+
+def _bilibili_ie() -> Any:
+    """yt-dlp 的 B站视频解析器加上上面的退路。测试里的假 yt-dlp、或者 yt-dlp 改了结构：返回 None，用原来的。"""
+    global _patched_ie
+    if _patched_ie is None:
+        try:
+            from yt_dlp.extractor.bilibili import BiliBiliIE as Base  # type: ignore[import-not-found]
+        except Exception:
+            return None
+
+        class BiliBiliIE(Base):  # type: ignore[misc,valid-type]  # 类名一样：yt-dlp 按类名认解析器，替换掉原来那个
+            _wanted: tuple[str, str] | None = None
+
+            def _real_extract(self, url: str) -> Any:
+                found = self._match_valid_url(url)
+                self._wanted = (found.group("prefix"), found.group("id")) if found else None
+                return super()._real_extract(url)
+
+            def _search_json(self, start_pattern: Any, string: Any, name: Any, video_id: Any, *args: Any, **kwargs: Any) -> Any:
+                found = super()._search_json(start_pattern, string, name, video_id, *args, **kwargs)
+                if found or name != "initial state" or not self._wanted:
+                    return found
+                return _state_from_api(self, *self._wanted) or found
+
+        _patched_ie = BiliBiliIE
+    return _patched_ie
+
+
+def _youtube_dl(yt_dlp: Any, opts: dict[str, Any]) -> Any:
+    """建一个 YoutubeDL，B站视频用加了退路的解析器（_bilibili_ie）。"""
+    ydl = yt_dlp.YoutubeDL(opts)
+    patched = _bilibili_ie()
+    if patched is not None and hasattr(ydl, "add_info_extractor"):
+        ydl.add_info_extractor(patched())  # 同名的解析器会被换掉
+    return ydl
 
 
 def _track(info: Any, url: str) -> Track:
@@ -536,7 +620,7 @@ class BiliSource:
         yt_dlp = load_ytdlp()
         try:
             # extract_flat：链接是合集之类的话，别把里面每个视频都去拿一遍信息
-            with yt_dlp.YoutubeDL(_options(format=FORMAT, extract_flat="in_playlist")) as ydl:
+            with _youtube_dl(yt_dlp, _options(format=FORMAT, extract_flat="in_playlist")) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception as exc:
             raise explain(exc) from None

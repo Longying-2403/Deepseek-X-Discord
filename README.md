@@ -13,7 +13,7 @@
 - **跟着删改**：群友删掉的消息，它的聊天记录里也跟着删掉；编辑过的消息，它会以改过之后的内容为准。
 - **会用服务器的表情和贴图**：知道这个服务器有哪些自定义表情和贴图，回复里、加表情反应、单独发一张贴图都行。
 - **能陪着演**：群友拉它角色扮演时，照设定演、跟着剧情走，动作写在斜体括号里；戏散了自动回到平时的样子。
-- **记得每个人**：每个群友一张人设卡（他自己说的称呼、设定比如自称猫娘、喜好和雷点），聊天时自然地用上；还有一份这个服务器的长期记忆（约定、大事、长期的梗和剧情）。说“记住……”当场记下，平时它会趁聊天安静下来时自己整理。人设卡只有本人能看、能改（`/ds-rp`），管理员也看不到。
+- **记得每个人**：每个群友一张人设卡（他自己说的称呼、设定比如自称猫娘、喜好和雷点），聊天时自然地用上；还有一份这个服务器的长期记忆（约定、大事、长期的梗和剧情）。说“记住……”当场记下，平时它会趁聊天安静下来时自己整理。人设卡的原文只有本人能看、能改（`/ds-rp`），管理员也看不到；别人问起时它只会用自己的话大概说说，不会照念原文。
 - **dsowner 能在聊天里改人设**：`OWNER_ID` 本人叫它说“以后说话毒舌一点”，它会把人设改好并存进设置，说“改回去”还能撤销；别人这么说，它会让对方找 dsowner。
 - **话量可控**：主动发言额度按群里的消息量恢复，群越热闹恢复越快；档位和各项参数都能在 Discord 里调。
 - **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
@@ -37,7 +37,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Keeps up with deletes and edits**: when someone deletes a message, it's deleted from its chat history too; for an edited message, it goes by the edited version.
 - **Uses the server's emoji and stickers**: it knows which custom emoji and stickers this server has, and can use them in replies, as reactions, or send a sticker on its own.
 - **Plays along**: when people pull it into a roleplay, it plays the part they set up and follows the story, with actions in italic parentheses; once the scene is over, it goes back to its usual self.
-- **Remembers everyone**: each member gets a profile card (what they've said about themselves: what to call them, a character they've given themselves such as being a catgirl, likes and pet peeves), and it uses it naturally in chat; there's also a long-term memory for the server (agreements, big events, long-running jokes and storylines). Say "remember …" and it saves it on the spot; otherwise it reviews the chat on its own once things go quiet. A profile card can only be seen and edited by its owner (`/ds-rp`), not even by admins.
+- **Remembers everyone**: each member gets a profile card (what they've said about themselves: what to call them, a character they've given themselves such as being a catgirl, likes and pet peeves), and it uses it naturally in chat; there's also a long-term memory for the server (agreements, big events, long-running jokes and storylines). Say "remember …" and it saves it on the spot; otherwise it reviews the chat on its own once things go quiet. Only the card's owner can see and edit its original text (`/ds-rp`), not even admins; if someone else asks, it may sum it up roughly in its own words, but never reads the card out word for word.
 - **dsowner can change its persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites its persona and saves it to the settings, and "change it back" undoes that; if anyone else asks, it tells them to ask dsowner.
 - **You control how much it talks**: its quota for speaking up on its own refills with the chat's message volume, so the livelier the chat, the faster it refills. Presets and every parameter can be adjusted from inside Discord.
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
@@ -104,9 +104,9 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 **更新到新版本**：代码是构建时复制进镜像的，所以要把新代码放进项目原来的文件夹，再重新构建：
 
-1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 或 2.2.1 更新到 2.2.2 只有 `dsbot` 文件夹变了。
+1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0、2.2.1 或 2.2.2 更新到 2.2.3 只有 `dsbot` 文件夹变了。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.2.2 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 3 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.2.3 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 3 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -135,7 +135,7 @@ python -m dsbot
 4. 给它定人设：`/ds 人设`（弹出编辑框）；`OWNER_ID` 本人也可以直接在聊天里 @ 它让它改（见下面“十二”）
 5. 想让它记得别的频道聊过的事：`/ds 记忆共享 操作:开 范围:全服务器`（见下面“七、跨频道记忆”）
 6. 给它几张表情包：`/ds 表情包 操作:上传`（见下面“十、发表情包和图”）
-7. 告诉群友：用 `/ds-rp` 可以看、改自己的人设卡，叫它“记住……”也行（见下面“十一、人设卡和长期记忆”）；想听歌就先进语音频道，再叫它“放首晴天”或者用 `/ds-music 播放`（见下面“十三、点歌”）
+7. 告诉群友：用 `/ds-rp` 可以看、改自己的人设卡（原文只有自己看得到；别人问起时它可能用自己的话大概说说），叫它“记住……”也行（见下面“十一、人设卡和长期记忆”）；想听歌就先进语音频道，再叫它“放首晴天”或者用 `/ds-music 播放`（见下面“十三、点歌”）
 8. 随时看状态：`/ds 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/ds 区域列表` 看它在哪些地方会回应
 
 不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
@@ -227,7 +227,7 @@ python -m dsbot
 | 最短判断间隔秒 | 60 | 两次主动判断至少隔多久 |
 | 主动判断思考 | low | 主动判断时的思考强度：off / low / high |
 | 点名回复思考 | off | 被叫到时的思考强度；off 最快 |
-| 每日预算美元 | 1.0 | 单个服务器每天的上限。超了只回点名，超过 2 倍连点名也不回 |
+| 每日预算美元 | 1.0 | 单个服务器每天的上限。超了只回点名，超过 2 倍连点名也不回。请求超时、响应传到一半断了时拿不到用量（对方多半照样算了钱），按估算算进预算 |
 | 全局每日预算美元 | 3.0 | 所有服务器加起来的上限 |
 | 上下文预算 | 30000 | 上下文超过这么多 token，就把最早的一半压成摘要 |
 | 看图 | 开 | 是否把图片发给模型 |
@@ -339,8 +339,8 @@ python -m dsbot
 
 **怎么记下来**
 - **当场记**：叫它说“记住我是猫娘”“以后叫我老大”，它会改你的人设卡；说“记一下，我们每周五晚上九点打副本”，它会记进长期记忆。记下了会在你那条消息上加个 📝。
-- **自己整理**：频道安静大约 10 分钟、又攒了几轮新聊天时，它会回顾一遍，把值得长期记住的写进人设卡和长期记忆；旧聊天要被压缩成摘要之前，也会先把那部分原话挑出来，在后台整理（不耽误压缩）。每次整理是单独的一次调用，费用很少，日志里会有一行“整理了记忆”。整理的时候有人叫它，照样马上回。
-- 整理失败时会隔得越来越久再试：连不上、限流、余额不足这类问题，等恢复了再接着整理；模型的输出不能用、或者一直写不完（超时），连着 3 次就跳过那一批，不会一直花钱。从旧版本升级上来时，之前的聊天不回头整理，从升级之后开始。
+- **自己整理**：频道安静大约 10 分钟、又攒了几轮新聊天时，它会回顾一遍，把值得长期记住的写进人设卡和长期记忆；旧聊天要被压缩成摘要之前，也会先把那部分原话挑出来，在后台整理（不耽误压缩；整理到一半又压缩了，压掉的那部分排着队接着整理）。每次整理是单独的一次调用，费用很少，日志里会有一行“整理了记忆”。整理的时候有人叫它，照样马上回。
+- 整理失败时会隔得越来越久再试：连不上、限流、余额不足这类问题，等恢复了再接着整理（快要压成摘要的那部分原话只试一次，没整理成就跳过）；模型的输出不能用、或者一直写不完（超时），连着 3 次就跳过那一批，不会一直花钱。从旧版本升级上来时，之前的聊天不回头整理，从升级之后开始。
 - **自己改**：群友用 `/ds-rp` 打开编辑框，直接改自己的卡。
 
 **规矩**
@@ -351,7 +351,7 @@ python -m dsbot
 - `/ds 清空记忆` 只清这个频道的聊天记录，不动人设卡和长期记忆。
 
 **谁能看、谁能改**
-- **人设卡是本人的隐私**：只有本人能用 `/ds-rp` 看、改、改回上一版或者清空，窗口只有自己看得见。管理员看不到，也删不了别人的卡；`/ds 状态` 里“上次的想法”在附过人设卡的频道也不显示。别人问它某个人的卡上写了什么，它也不会说——不过这一点是靠提示词约束的，没法百分之百保证，太私密的事别写进卡里。
+- **人设卡是本人的隐私**：只有本人能用 `/ds-rp` 看、改、改回上一版或者清空，窗口只有自己看得见。管理员看不到，也删不了别人的卡；`/ds 状态` 里“上次的想法”在附过人设卡的频道也不显示。别人问起某个人是什么设定，它可以用自己的话、照自己的口吻大概说说，但不会照念卡上的原文：要发的话里有一长段和它看得到的卡一模一样（连着 16 个字或词以上，比这短的卡是整张；或者东一段西一段、每段至少 8 个字，加起来抄到卡上 32 个字，短一点的卡是卡的四分之三、至少 16 个字；编号列出来、调换顺序、换成繁体都算。只用上称呼和口头禅不算），就不会发出去——被叫到时会让它用自己的话重说一次，还是照念就不说、只在那条消息上加个 🤐；主动插话时直接不发。群友自己在频道里说过的话、发的文件，它照着说不算。卡上的原话也不会被记进长期记忆（拆成几条分开记也一样）、搬进人设，也不会被它抄进别人的卡。本人想看原文用 `/ds-rp`。换个说法、翻译成别的语言、拆成好几次慢慢说，这些还是靠提示词约束；不到 10 个字的卡、不到 16 个字的卡少念一两个字、被拆成几小段（每段不到 8 个字）的短卡也拦不住，没法百分之百保证，太私密的事别写进卡里。（以前的版本是别人问起时完全不说，升级后变了，最好告诉群友一声。）
 - **你（bot 主人）** 可以用 `/dsowner 删除人设卡` 填用户 ID，删掉这个人在所有服务器的卡，删的时候看不到内容。比如有人退群后想被忘掉（退群后他自己就用不了 `/ds-rp` 了），或者有人往卡里写了奇怪的东西。
 - **长期记忆**记的是群里的事，管理员可以用 `/ds 长期记忆` 查看、添加、删除和清空。
 - 每张人设卡保留最近 5 个旧版本，给“改回上一版”用。在聊天里叫它忘掉、或者清空编辑框，旧版本还留着；`/ds-rp 操作:清空` 和 `/dsowner 删除人设卡` 连旧版本一起删。
@@ -547,6 +547,7 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 | `dsbot/engine.py` | 调度引擎：缓冲、时机判断、额度、预算、执行动作、压缩摘要、跨频道记忆 |
 | `dsbot/render.py` / `prompts.py` | 聊天记录渲染格式、system prompt |
 | `dsbot/memory.py` | 人设卡、长期记忆的存储（各一个 SQLite 文件），整理记忆的输出解析 |
+| `dsbot/textutil.py` / `hanzi.py` | 文字整理；照念人设卡原文的检查（`hanzi.py` 是繁简对照的字表，来自 OpenCC） |
 | `dsbot/mentions.py` | 把它话里的 @名字、#频道名 换成真的 @ 和频道链接 |
 | `dsbot/music.py` | 点歌：找歌（Tavily / B站搜索）、yt-dlp 下载音频、每个服务器的播放队列；Discord 语音那一层在 `discord_app.py` 的 `DiscordVoice` |
 | `dsbot/llm.py` | DeepSeek HTTP 客户端（思考开关、JSON 模式、用量解析） |

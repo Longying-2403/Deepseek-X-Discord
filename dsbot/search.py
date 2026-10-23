@@ -9,18 +9,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .llm import CONNECT_TIMEOUT
 from .models import SearchResult, Usage
+from .render import estimate_tokens
 from .textutil import clean_text
 
 log = logging.getLogger(__name__)
 
 TAVILY_URL = "https://api.tavily.com/search"
 MAX_SOURCES = 5
+SEARCH_USE_TOKENS = 5000  # 搜索超时、断线拿不到用量时估：每搜一次塞给模型的网页内容大约多少 token
 
 SEARCH_SYSTEM = """\
 你是一个搜索助手。用 web_search 工具搜索下面的问题，然后根据搜到的内容整理出和问题直接相关的事实。
@@ -32,9 +36,18 @@ SEARCH_SYSTEM = """\
 
 
 class SearchError(Exception):
-    def __init__(self, message: str, usage: Usage | None = None):
+    def __init__(self, message: str, usage: Usage | None = None, *, maybe_billed: bool = False):
         super().__init__(message)
-        self.usage = usage  # 没搜成但已经计费的 token（DeepSeek 返回了 200 却没有能用的结果时）
+        self.usage = usage  # 没搜成但已经计费的 token（DeepSeek 返回了 200 却没有能用的结果；超时、断线时是估的）
+        self.maybe_billed = maybe_billed  # 请求发出去了但没拿到结果（超时、传到一半断了）：对方可能照样算钱
+
+
+def estimate_search(payload: dict[str, Any], max_uses: int) -> Usage:
+    """搜索超时、响应传到一半断了：拿不到用量，但对方多半照样搜完、写完并计费。估一笔偏高的：
+    输入 = 发出去的内容 + 搜满 max_uses 次拿到的网页，全按没命中缓存算（system 里有当前时间，本来就命中不了）；输出按上限的一半算。"""
+    sent = estimate_tokens(json.dumps([payload.get("system"), payload.get("messages")], ensure_ascii=False))
+    miss = sent + SEARCH_USE_TOKENS * max(0, max_uses)
+    return Usage(prompt_tokens=miss, miss=miss, output=int(payload.get("max_tokens") or 0) // 2)
 
 
 def today_text(now: float, tz: str) -> str:
@@ -188,15 +201,25 @@ class WebSearch:
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
                 trust_env=True,  # 支持 HTTPS_PROXY 环境变量
             )
+        # 连接阶段单独限时：连都没连上就超时的，请求没发出去，不算钱（3.10 以前的 aiohttp 没有单独的 ConnectionTimeoutError）
+        not_connected = getattr(aiohttp, "ConnectionTimeoutError", aiohttp.ServerTimeoutError)
+        limits = aiohttp.ClientTimeout(total=self.timeout, connect=min(CONNECT_TIMEOUT, self.timeout / 2))  # 同 llm：要比总时限早一截
+        status: int | None = None  # 收到响应头之后才有
         try:
-            async with self._session.post(url, json=payload, headers=headers) as resp:
+            async with self._session.post(url, json=payload, headers=headers, timeout=limits) as resp:
+                status = resp.status
                 try:
                     data = await resp.json(content_type=None)
                 except ValueError:
                     data = await resp.text()
                 return resp.status, data
+        except not_connected as exc:
+            raise SearchError(f"连不上：{exc!r}") from None
         except asyncio.TimeoutError:
-            raise SearchError(f"搜索超时（{self.timeout:g} 秒）") from None
+            # 错误响应（429、503……）读到一半超时的：对方没跑这次搜索，不算钱
+            raise SearchError(f"搜索超时（{self.timeout:g} 秒）", maybe_billed=status in (None, 200)) from None
+        except aiohttp.ClientPayloadError as exc:  # 结果传到一半断了：对方已经跑完（多半也算了钱；错误响应不算）
+            raise SearchError(f"响应传到一半连接断了：{exc!r}", maybe_billed=status == 200) from None
         except SearchError:
             raise
         except Exception as exc:  # 网络错误
@@ -237,7 +260,13 @@ class WebSearch:
         usage = Usage()
         content: list[Any] = []  # 几次响应的内容拼在一起（中途暂停过的话，答案和来源可能在前面的响应里）
         for _ in range(3):  # 搜索时间长时接口可能先返回 pause_turn，要把已有的内容发回去让它接着做
-            status, data = await self._send(payload, headers)
+            try:
+                status, data = await self._send(payload, headers)
+            except SearchError as exc:
+                # 超时、传到一半断了：对方多半照样计费，估一笔；之前几段（pause_turn）已经算过的也带上，别丢
+                if exc.maybe_billed:
+                    usage = add_usage(usage, estimate_search(payload, self.max_uses))
+                raise SearchError(str(exc), usage if usage.prompt_tokens else None) from None
             if status != 200:
                 raise SearchError(_error_text(status, data), usage if usage.prompt_tokens else None)
             usage = add_usage(usage, parse_usage(data))

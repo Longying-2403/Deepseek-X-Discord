@@ -236,7 +236,7 @@ class CardModal(discord.ui.Modal):
         self.add_item(
             discord.ui.Label(
                 text="人设卡",
-                description="它会记住这些，和你聊天时用上。只有你自己能看、能改。",
+                description="它会记住这些，和你聊天时用上。原文只有你自己能看、能改；别人问起时它可能用自己的话大概说说。",
                 component=self.text,
             )
         )
@@ -375,7 +375,9 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append(f"上次：{st['last_decision']}")
     lines.append(
         f"今天本频道：调用 {channel_stats['calls']} 次（说话 {outcomes.get('reply', 0)}、表情 {outcomes.get('react', 0)}、"
-        f"沉默 {outcomes.get('pass', 0)}、出错 {outcomes.get('error', 0)}）"
+        f"沉默 {outcomes.get('pass', 0)}、出错 {outcomes.get('error', 0)}"
+        + (f"、照念人设卡被拦下 {outcomes['recited']}" if outcomes.get("recited") else "")
+        + "）"
     )
     hit = guild_stats["hit_rate"]
     lines.append(
