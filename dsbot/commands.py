@@ -2,7 +2,7 @@
 
 /ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
 /ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。私信里用是私信挂的那个服务器的卡。
-/ds-dm …    私信里用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录。
+/ds-dm …    服务器里和私信里都能用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录。
 /ds-music … 所有人：点歌（B站）、切歌、暂停、继续、停止、看队列、从队列里删歌、清空队列。切歌这些要在它放歌的语音频道里。
 /dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡等。
             和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
@@ -471,76 +471,137 @@ async def _say_public(interaction: discord.Interaction, text: str, footer: str =
         await interaction.response.send_message(text, allowed_mentions=none)
 
 
+def dm_channel_of(bot: "DSBot", interaction: discord.Interaction) -> int | None:
+    """这个人和 bot 的私信频道：在私信里用命令就是这里；在服务器里用，是记下的那个（还没私信过是 None）。"""
+    if interaction.guild_id is None:
+        return interaction.channel_id
+    home = bot.store.dm_home(interaction.user.id)
+    return home[1] if home is not None else None
+
+
+DM_WARNING = (
+    "⚠️ 私信里聊的事可能会记进那边的长期记忆和你的人设卡；你在那边的频道里叫它时，它也可能提起刚在私信里聊的，"
+    "频道里的人都看得到。不想让别人知道的，跟它说一声“保密”。"
+)
+
+
 def register_dm_commands(bot: "DSBot") -> None:
+    """/ds-dm：服务器里和私信里都能用（回复只有自己看得到）。"""
     dm = app_commands.Group(
         name="ds-dm",
-        description="私信设置：私信里用哪个服务器的人设和记忆、今天的额度",
-        allowed_contexts=app_commands.AppCommandContext(guild=False, dm_channel=True, private_channel=False),
+        description="私信它：私信里用哪个服务器的人设和记忆、今天的额度（服务器里、私信里都能用）",
+        allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=False),
+        # 只跟着 bot 进服务器：装在自己账号上的话，它会出现在 bot 不在的服务器里
+        allowed_installs=app_commands.AppInstallationType(guild=True, user=False),
     )
 
     async def guild_choices(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
         words = current.strip().casefold()
+        if interaction.guild_id is not None and bot.get_guild(interaction.guild_id) is not None:
+            bot.note_member(interaction.guild_id, interaction.user.id)  # 在这里打命令：当然是这里的成员
         guilds = await bot.dm_candidates(interaction.user.id)
         return [Choice(name=g.name[:100], value=str(g.id)) for g in guilds if not words or words in g.name.casefold()][:25]
 
     @dm.command(name="服务器", description="私信里用哪个服务器的人设、长期记忆和人设卡（换了会清空私信记录）")
     @app_commands.rename(target="服务器")
-    @app_commands.describe(target="你和它都在的服务器（输入几个字可以筛选）")
+    @app_commands.describe(target="你和它都在的服务器（输入几个字可以筛选）；在服务器里用、不填 = 这个服务器")
     @app_commands.autocomplete(target=guild_choices)
-    async def dm_server(interaction: discord.Interaction, target: str) -> None:
+    async def dm_server(interaction: discord.Interaction, target: Optional[str] = None) -> None:
         user_id = interaction.user.id
-        guilds = await bot.dm_candidates(user_id)
-        guild = next((g for g in guilds if str(g.id) == target.strip() or g.name == target.strip()), None)
-        if guild is None:
-            await _reply(interaction, "找不到这个服务器：要是你和它都在、那边也开着私信的服务器（从弹出的列表里选）。")
+        wanted = (target or "").strip()
+        if not wanted and interaction.guild_id is None:
+            await _reply(interaction, "选一个服务器（输入框会列出你和它都在的服务器）。")
             return
+        await interaction.response.defer(ephemeral=True)  # 要去问 Discord 他在哪些服务器里，可能超过 3 秒
+        here = bot.get_guild(interaction.guild_id) if interaction.guild_id is not None else None
+        if here is not None:
+            bot.note_member(here.id, user_id)  # 他在这里用命令，当然是这里的成员，不用再去查
+        if not wanted or (here is not None and wanted in (str(here.id), here.name)):
+            # 在服务器里用、不填（或者填的就是这里）：就是这个服务器
+            guild = here
+            if guild is None:
+                await _reply(interaction, "我不在这个服务器里：换一个你和我都在的服务器再用这个命令。")
+                return
+            if not bot.dm_open(guild):
+                await _reply(interaction, "这个服务器关掉了私信（管理员可以用 `/ds 设置 参数:私信` 打开）。")
+                return
+        else:
+            named = bot.get_guild(int(wanted)) if wanted.isdecimal() else None  # 从列表里选的是服务器 ID
+            if named is not None:
+                if not bot.dm_open(named):
+                    await _reply(interaction, f"「{discord_safe(named.name)}」关掉了私信。")
+                    return
+                member = await bot.is_member(named, user_id)
+                if member is None:
+                    await _reply(interaction, "Discord 一时没回答你在不在那个服务器里，过一会儿再试。")
+                    return
+                guild = named if member else None
+            else:
+                guilds = await bot.dm_candidates(user_id)
+                guild = next((g for g in guilds if g.name == wanted), None)
+            if guild is None:
+                await _reply(interaction, "找不到这个服务器：要是你和它都在、那边也开着私信的服务器（从弹出的列表里选）。")
+                return
         name = discord_safe(guild.name)
-        current = bot.store.dm_home(user_id)
-        channel_id = interaction.channel_id
-        if current is not None and current[0] == guild.id:
-            bot.store.set_dm_home(user_id, guild.id, channel_id)
-            bot.dm_channels[channel_id] = (user_id, guild.id)
-            await _reply(interaction, f"私信现在用的就是「{name}」。")
+        dm_channel = interaction.channel_id if interaction.guild_id is None else None
+        already, moved = await bot.set_dm_home(user_id, guild, dm_channel)
+        if already:
+            await _reply(interaction, f"私信现在用的就是「{name}」。\n{DM_WARNING}")
             return
-        bot.store.set_dm_home(user_id, guild.id, channel_id)
-        bot.dm_channels[channel_id] = (user_id, guild.id)
-        if current is not None:
-            bot.engine.move_dm(channel_id, guild.id)
-        log.info("%s 把私信改挂到服务器 %s", user_id, guild.id)
-        await _reply(
-            interaction,
-            f"好了，私信里改用「{name}」的人设、长期记忆和你在那里的人设卡来聊。"
-            + ("之前的私信记录清空了（服务器那边的记忆不受影响）。" if current is not None else "")
-            + "\n⚠️ 私信里聊的事可能会记进那边的长期记忆和你的人设卡，你在那边的频道里叫它时也可能被提起。",
-        )
+        text = f"好了，私信里用「{name}」的人设、长期记忆和你在那里的人设卡来聊。"
+        if moved:
+            text += "之前的私信记录清空了（服务器那边的记忆不受影响）。"
+        if interaction.guild_id is not None:
+            text += "直接私信它就能聊。"
+        await _reply(interaction, f"{text}\n{DM_WARNING}")
+
+    async def switch_note(user_id: int, home: tuple[int, int | None]) -> str:
+        """私信原来用的服务器用不了了：下次私信会怎样。"""
+        others = [g for g in await bot.dm_candidates(user_id) if g.id != home[0]]
+        if not others:
+            return "现在没有别的你和它都在、开着私信的服务器，私信暂时聊不了。"
+        cleared = "，私信记录会清空" if home[1] is not None else ""
+        return f"下次私信时会改用「{discord_safe(others[0].name)}」{cleared}（也可以用 `/ds-dm 服务器` 自己选）。"
 
     @dm.command(name="状态", description="私信现在用哪个服务器、今天私信花了多少")
     async def dm_status(interaction: discord.Interaction) -> None:
         user_id = interaction.user.id
+        await interaction.response.defer(ephemeral=True)  # 可能要去问 Discord 他还在不在那个服务器
+        if interaction.guild_id is not None and bot.get_guild(interaction.guild_id) is not None:
+            bot.note_member(interaction.guild_id, user_id)
         home = bot.store.dm_home(user_id)
-        guild = bot.get_guild(home[0]) if home is not None else None
-        if guild is None:
-            await _reply(interaction, "私信还没定用哪个服务器：随便跟它说句话就会定下来，或者用 `/ds-dm 服务器` 选一个。")
+        if home is None:
+            await _reply(
+                interaction,
+                "私信还没定用哪个服务器：直接私信它随便说句话就会定下来，或者用 `/ds-dm 服务器` 选一个。\n" + DM_WARNING,
+            )
             return
+        guild = bot.get_guild(home[0])
+        if guild is None:
+            await _reply(interaction, "⚠️ 它已经不在私信原来用的那个服务器里了。" + await switch_note(user_id, home))
+            return
+        channel_id = dm_channel_of(bot, interaction)
         now = time.time()
-        spent = bot.store.channel_spent(bot.ledger.day(now), interaction.channel_id)
+        spent = bot.store.channel_spent(bot.ledger.day(now), channel_id) if channel_id is not None else 0.0
         cap = bot.settings.get("dm_daily_budget_usd", guild_id=guild.id)
-        lines = [
-            f"私信用的是「{discord_safe(guild.name)}」的人设、长期记忆和人设卡。",
-            "⚠️ 私信里聊的事可能会记进那边的长期记忆和你的人设卡；你在那边的频道里叫它时，它也可能提起刚在私信里聊的。"
-            "不想让别人知道的，跟它说一声“保密”。",
-        ]
+        lines = [f"私信用的是「{discord_safe(guild.name)}」的人设、长期记忆和人设卡。", DM_WARNING]
         if user_id == bot.secrets.owner_id:
             lines.append(f"今天私信花了 ${spent:.4f}（你是 bot 的主人，不受每人上限限制）")
         else:
             lines.append(f"今天私信花了 ${spent:.4f} / ${cap:g}")
         if not bot.dm_open(guild):
-            lines.append("⚠️ 那个服务器现在关掉了私信：再跟它说话时会换一个服务器（会清空私信记录）")
+            lines.append("⚠️ 那个服务器现在关掉了私信。" + await switch_note(user_id, home))
+        elif interaction.guild_id != guild.id and await bot.is_member(guild, user_id) is False:
+            lines.append("⚠️ 你已经不在那个服务器里了。" + await switch_note(user_id, home))
         await _reply(interaction, "\n".join(lines))
 
     @dm.command(name="清空", description="清空私信里的聊天记录（服务器的长期记忆和你的人设卡不受影响）")
     async def dm_reset(interaction: discord.Interaction) -> None:
-        bot.engine.reset_channel(interaction.channel_id)
+        channel_id = dm_channel_of(bot, interaction)
+        if channel_id is None:
+            await _reply(interaction, "你还没私信过它，没有私信记录。")
+            return
+        bot.engine.reset_channel(channel_id)
         await _reply(interaction, "私信记录清空了，它从头开始（服务器的长期记忆和你的人设卡不受影响）。")
 
     bot.tree.add_command(dm)

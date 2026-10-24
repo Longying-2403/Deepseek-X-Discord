@@ -689,6 +689,8 @@ class Engine:
                 st.first_human_at = None
             return
         st = self.state(msg.channel_id, msg.guild_id, msg.parent_id, msg.category_id, msg.private)
+        if st.private and st.guild_id != msg.guild_id:
+            self.move_dm(st.channel_id, msg.guild_id)  # 私信换了服务器（引擎这边还是原来的）：原来那个服务器的记录不带过去
         view = self.view(st)
 
         st.pending.append(msg)
@@ -2461,7 +2463,12 @@ class Engine:
         now = self.clock()
         marked: set[int] = set()
         refused: list[Action] = []
+        guild = st.guild_id
         for action in mine:
+            if st.guild_id != guild:
+                # 加 📝 的时候私信换了服务器：剩下的不写（不能写进别的服务器）
+                log.info("私信 %s：写记忆的时候换了服务器，剩下的没写", st.channel_id)
+                break
             if action.kind == "card":
                 mid = self._apply_card(st, view, action, by_sid, now, seen, history)
                 if mid is None and not self._card_is(st, action, by_sid):
@@ -3594,6 +3601,12 @@ class Engine:
         sent_count = 0
         pinged: set[int] = set()  # 同一条消息只提醒一次（比如又回话又发贴图）
         directory: dict[str, Any] = {"pings_left": MAX_PINGS_PER_ROUND}  # 能 @ 的人、能链接的频道（第一次要用时才查）
+        guild = st.guild_id
+
+        def moved() -> bool:
+            """假装打字的时候私信换了服务器：按原来那个服务器的人设、记忆写的话不发了。"""
+            return st.private and st.guild_id != guild
+
         for action in actions:
             if action.kind == "react":
                 mid = st.msg_by_sid.get(action.to) if action.to is not None else None
@@ -3622,6 +3635,8 @@ class Engine:
                     delay = max(0.5, delay - elapsed)
                 async with self.transport.typing(st.channel_id):
                     await self.sleep(delay)
+                if moved():
+                    break
                 sent = await self._send_media(st, action, reply_mid, ping)
                 if sent is not None:
                     spoke = True
@@ -3643,6 +3658,8 @@ class Engine:
                     delay = max(0.5, delay - elapsed)  # 模型生成的时间也算在“打字”里
                 async with self.transport.typing(st.channel_id):
                     await self.sleep(delay)
+                if moved():
+                    return spoke, reacted, failed
                 people, channels = await self._directory(st, text, kind, directory)
                 for j, chunk in enumerate(split_for_discord(text)):
                     first = i == 0 and j == 0
@@ -3907,8 +3924,11 @@ class Engine:
         st = self.states.get(channel_id)
         if st is not None:
             st.guild_id = guild_id
-            st.pending.clear()  # 按原来的服务器收的消息
-            st.first_human_at = None
+            for m in st.pending:
+                m.guild_id = guild_id  # 还没回的那几条是他自己说的：换到新的服务器下接着回
+            if any(m.trigger for m in st.pending):
+                st.mention_due = True
+                self._wake(st)
 
     def status(
         self, guild_id: int, channel_id: int, parent_id: int | None, category_id: int | None = None

@@ -649,6 +649,33 @@ class DSBot(discord.Client):
         self._members[key] = (ok, now)
         return ok
 
+    def note_member(self, guild_id: int, user_id: int) -> None:
+        """他刚在这个服务器里用了命令：确实是成员（不用再去问 Discord，也盖掉“不在”的旧结果）。"""
+        self._members[(guild_id, user_id)] = (True, time.monotonic())
+
+    def dm_lock(self, user_id: int) -> asyncio.Lock:
+        """同一个人的私信挂在哪个服务器：定下来、换掉、按它处理私信，都一个一个来。"""
+        return self._dm_locks.setdefault(user_id, asyncio.Lock())
+
+    async def set_dm_home(self, user_id: int, guild: Any, channel_id: int | None) -> tuple[bool, bool]:
+        """/ds-dm 服务器：把私信改挂到 guild。channel_id：私信频道（在服务器里用命令时不知道，用记下的）。
+        返回 (本来就是它, 清空了私信记录)。"""
+        async with self.dm_lock(user_id):
+            current = self.store.dm_home(user_id)
+            old_channel = current[1] if current is not None else None  # 私信过才有私信记录
+            if channel_id is None:
+                channel_id = old_channel
+            self.store.set_dm_home(user_id, guild.id, channel_id)
+            if channel_id is not None:
+                self.dm_channels[channel_id] = (user_id, guild.id)
+            if current is not None and current[0] == guild.id:
+                return True, False
+            moved = old_channel is not None
+            if moved:
+                self.engine.move_dm(old_channel, guild.id)  # 原来那个服务器的私信记录不带过去
+            log.info("%s 把私信改挂到服务器 %s", user_id, guild.id)
+            return False, moved
+
     async def dm_candidates(self, user_id: int) -> list[Any]:
         """他和 bot 都在、开着私信的服务器：最近跟它聊过的在前，其余按名字。"""
         recent: dict[int, float] = {}
@@ -665,43 +692,51 @@ class DSBot(discord.Client):
     async def dm_home(self, user: Any, channel_id: int) -> tuple[Any, str | None]:
         """这段私信挂在哪个服务器，和要先跟他说的一句话（第一次定下来、换了服务器时说）。
         挂不了是 (None, 原因)；Discord 一时问不到是 (None, None)（这次先不回，也不换服务器）。"""
-        lock = self._dm_locks.setdefault(user.id, asyncio.Lock())
-        async with lock:
-            stored = self.store.dm_home(user.id)
-            prev = self.get_guild(stored[0]) if stored is not None else None
-            if prev is not None and self.dm_open(prev):
-                member = await self.is_member(prev, user.id)
-                if member is None:
-                    return None, None
-                if member:
-                    if stored is not None and stored[1] != channel_id:
-                        self.store.set_dm_home(user.id, prev.id, channel_id)
-                    self.dm_channels[channel_id] = (user.id, prev.id)
-                    return prev, None
-            candidates = await self.dm_candidates(user.id)
-            if not candidates:
-                return None, DM_NONE
-            guild = candidates[0]
-            self.store.set_dm_home(user.id, guild.id, channel_id)
-            self.dm_channels[channel_id] = (user.id, guild.id)
-            name = discord_safe(guild.name)
-            if stored is not None and stored[0] != guild.id:
-                self.engine.move_dm(channel_id, guild.id)  # 原来那个服务器的私信记录不带过去
-                old = f"「{discord_safe(prev.name)}」" if prev is not None else "原来那个服务器"
-                note = (
-                    f"{old}那边私信用不了了（你不在那里了，或者那边关掉了私信），现在改用「{name}」的人设和记忆来聊，之前的私信记录清空了。\n"
-                    f"⚠️ 这里聊的事可能会记进「{name}」的长期记忆和你的人设卡，你在那边的频道里叫我时也可能被提起。"
-                )
+        async with self.dm_lock(user.id):
+            return await self._dm_home(user, channel_id)
+
+    async def _dm_home(self, user: Any, channel_id: int) -> tuple[Any, str | None]:
+        """dm_home 的本体（调用方拿着这个人的 dm_lock）。"""
+        stored = self.store.dm_home(user.id)
+        prev = self.get_guild(stored[0]) if stored is not None else None
+        if prev is not None and self.dm_open(prev):
+            member = await self.is_member(prev, user.id)
+            if member is None:
+                return None, None
+            if member:
+                first = stored is not None and stored[1] is None  # 先用 /ds-dm 定了服务器，这是第一次私信
+                if stored is not None and stored[1] != channel_id:
+                    self.store.set_dm_home(user.id, prev.id, channel_id)
+                self.dm_channels[channel_id] = (user.id, prev.id)
+                return prev, (self._dm_first_note(prev) if first else None)
+        candidates = await self.dm_candidates(user.id)
+        if not candidates:
+            return None, DM_NONE
+        guild = candidates[0]
+        self.store.set_dm_home(user.id, guild.id, channel_id)
+        self.dm_channels[channel_id] = (user.id, guild.id)
+        old = f"「{discord_safe(prev.name)}」" if prev is not None else "原来那个服务器"
+        note = self._dm_first_note(guild)
+        if stored is not None and stored[0] != guild.id:
+            if stored[1] is not None:  # 私信过：原来那个服务器的私信记录不带过去
+                self.engine.move_dm(stored[1], guild.id)
+                note = f"{old}那边私信用不了了（你不在那里了，或者那边关掉了私信），之前的私信记录清空了。\n" + note
             else:
-                note = (
-                    f"私信里我会用「{name}」这个服务器的人设、长期记忆和你的人设卡来聊。\n"
-                    f"⚠️ 这里聊的事可能会记进那边的长期记忆和你的人设卡；你在「{name}」的频道里叫我时，我也可能提起刚在私信里聊的，"
-                    "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。"
-                )
-            if len(candidates) > 1:
-                note += "\n想换成别的服务器，用 `/ds-dm 服务器`。"
-            log.info("%s 的私信挂到服务器 %s（%d 个可选）", user.id, guild.id, len(candidates))
-            return guild, note
+                note = f"{old}那边私信用不了了（你不在那里了，或者那边关掉了私信）。\n" + note
+        if len(candidates) > 1:
+            note += "\n想换成别的服务器，用 `/ds-dm 服务器`。"
+        log.info("%s 的私信挂到服务器 %s（%d 个可选）", user.id, guild.id, len(candidates))
+        return guild, note
+
+    @staticmethod
+    def _dm_first_note(guild: Any) -> str:
+        """第一次在私信里聊（或者换了服务器）时先说明一声：用的是哪个服务器，私信里聊的可能被提起。"""
+        name = discord_safe(guild.name)
+        return (
+            f"私信里我会用「{name}」这个服务器的人设、长期记忆和你的人设卡来聊。\n"
+            f"⚠️ 这里聊的事可能会记进那边的长期记忆和你的人设卡；你在「{name}」的频道里叫我时，我也可能提起刚在私信里聊的，"
+            "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。"
+        )
 
     async def _on_dm(self, message: discord.Message) -> None:
         if message.author.bot or not isinstance(message.channel, discord.DMChannel):
@@ -709,21 +744,23 @@ class DSBot(discord.Client):
         if message.type not in CHAT_MESSAGE_TYPES:
             return
         channel_id = message.channel.id
-        guild, note = await self.dm_home(message.author, channel_id)
-        if guild is None:
-            now = time.monotonic()
-            if note is not None and now - self._dm_noticed.get(message.author.id, -DM_NOTICE_GAP) >= DM_NOTICE_GAP:
-                self._dm_noticed[message.author.id] = now
+        # 定服务器到交给引擎一气呵成：中间有人用 /ds-dm 换了服务器，这条也不会按原来的服务器处理
+        async with self.dm_lock(message.author.id):
+            guild, note = await self._dm_home(message.author, channel_id)
+            if guild is None:
+                now = time.monotonic()
+                if note is not None and now - self._dm_noticed.get(message.author.id, -DM_NOTICE_GAP) >= DM_NOTICE_GAP:
+                    self._dm_noticed[message.author.id] = now
+                    await self.transport.send(channel_id, note, reply_to=None, ping=False)
+                return
+            if note is not None:
                 await self.transport.send(channel_id, note, reply_to=None, ping=False)
-            return
-        if note is not None:
-            await self.transport.send(channel_id, note, reply_to=None, ping=False)
-        try:
-            incoming = self.to_incoming(message, dm_guild=guild.id)
-        except Exception:
-            log.exception("解析私信 %s 失败", message.id)
-            return
-        await self.engine.handle_message(incoming)
+            try:
+                incoming = self.to_incoming(message, dm_guild=guild.id)
+            except Exception:
+                log.exception("解析私信 %s 失败", message.id)
+                return
+            await self.engine.handle_message(incoming)
 
     # ---------------------------------------------------------------- 事件
 

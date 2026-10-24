@@ -336,7 +336,9 @@ class FakeGuild:
         return NS(id=uid)
 
 
-class Homes(unittest.IsolatedAsyncioTestCase):
+class BotCase(unittest.IsolatedAsyncioTestCase):
+    """真的 DSBot（不连 Discord）：服务器、成员都是假的。"""
+
     def make(self, guilds, store=None):
         try:
             from dsbot.discord_app import DSBot
@@ -358,6 +360,8 @@ class Homes(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
         return bot
 
+
+class Homes(BotCase):
     async def test_no_common_server(self):
         bot = self.make([FakeGuild(GUILD, "测试服")])
         guild, note = await bot.dm_home(NS(id=11), DM)
@@ -417,6 +421,306 @@ class Homes(unittest.IsolatedAsyncioTestCase):
         bot = self.make([FakeGuild(GUILD, "A服", {11})])
         results = await asyncio.gather(*(bot.dm_home(NS(id=11), DM) for _ in range(3)))
         self.assertEqual(sum(note is not None for _, note in results), 1)
+
+
+
+class FakeResponse:
+    def __init__(self, sent):
+        self.sent = sent
+        self.deferred = False
+
+    def is_done(self):
+        return self.deferred
+
+    async def defer(self, ephemeral=False):
+        self.deferred = ephemeral
+
+    async def send_message(self, text, ephemeral=False):
+        self.sent.append((text, ephemeral))
+
+
+class DmCommands(BotCase):
+    """/ds-dm：服务器里、私信里都能用（之前只在私信里出现，在服务器里打 / 找不到）。"""
+
+    def setUp(self):
+        self.a, self.b = FakeGuild(GUILD, "A服", {11}), FakeGuild(OTHER, "B服", {11})
+
+    def commands(self, bot):
+        from dsbot.commands import register_dm_commands
+        from dsbot.ledger import Ledger
+
+        added = []
+        bot.tree = NS(add_command=added.append)
+        bot.ledger = Ledger(bot.store, "Asia/Taipei")
+        bot.secrets = NS(owner_id=OWNER)
+        bot.engine.reset_channel = lambda cid: bot.engine.resets.append(cid)
+        bot.engine.resets = []
+        register_dm_commands(bot)
+        group = added[0]
+        return {name: group.get_command(name).callback for name in ("服务器", "状态", "清空")}, group
+
+    def interaction(self, *, in_guild=None):
+        self.sent = []
+
+        async def followup(text, ephemeral=False):
+            self.sent.append((text, ephemeral))
+
+        return NS(
+            user=NS(id=11),
+            guild_id=in_guild,
+            channel_id=CHANNEL if in_guild is not None else DM,
+            response=FakeResponse(self.sent),
+            followup=NS(send=followup),
+        )
+
+    async def test_shows_up_in_servers_and_dms(self):
+        bot = self.make([self.a])
+        _, group = self.commands(bot)
+        contexts = group.allowed_contexts
+        self.assertTrue(contexts.guild and contexts.dm_channel)
+        installs = group.allowed_installs  # 装在自己账号上不行：不然会出现在 bot 不在的服务器里
+        self.assertTrue(installs.guild)
+        self.assertFalse(installs.user)
+
+    async def test_pick_this_server_from_a_channel(self):
+        bot = self.make([self.a, self.b])
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=OTHER))  # 在 B服 里用，不填 = 这个服务器
+        self.assertEqual(bot.store.dm_home(11), (OTHER, None))
+        self.assertIn("「B服」", self.sent[0][0])
+        self.assertIn("可能提起", self.sent[0][0])
+        self.assertTrue(self.sent[0][1])  # 只有自己看得到
+        self.assertEqual(bot.engine.moved, [])
+        guild, note = await bot.dm_home(NS(id=11), DM)  # 之后第一次私信：就用 B服，私信里也说明一次
+        self.assertEqual(guild.id, OTHER)
+        self.assertEqual(bot.store.dm_home(11), (OTHER, DM))
+        self.assertIn("「B服」", note)
+        self.assertIn("保密", note)
+        self.assertNotIn("清空", note)
+        _, again = await bot.dm_home(NS(id=11), DM)
+        self.assertIsNone(again)  # 只说一次
+
+    async def test_switching_from_a_channel_clears_the_dm(self):
+        bot = self.make([self.a, self.b])
+        bot.store.set_dm_home(11, GUILD, DM)
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=OTHER))
+        self.assertEqual(bot.engine.moved, [(DM, OTHER)])
+        self.assertEqual((bot.store.dm_home(11), bot.dm_guild(DM)), ((OTHER, DM), OTHER))
+        self.assertIn("清空", self.sent[0][0])
+
+    async def test_server_with_dms_off(self):
+        bot = self.make([self.a, self.b])
+        bot.settings.set("guild", OTHER, "dm", "关")
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=OTHER))
+        self.assertIn("关掉了私信", self.sent[0][0])
+        self.assertIsNone(bot.store.dm_home(11))
+
+    async def test_pick_by_name_in_the_dm(self):
+        bot = self.make([self.a, self.b])
+        bot.store.set_dm_home(11, GUILD, DM)
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(), target=str(OTHER))
+        self.assertEqual(bot.engine.moved, [(DM, OTHER)])
+        await cmds["服务器"](self.interaction())  # 私信里不填：要他选
+        self.assertIn("选一个服务器", self.sent[0][0])
+
+    async def test_status_and_clear_from_a_channel(self):
+        bot = self.make([self.a])
+        cmds, _ = self.commands(bot)
+        await cmds["清空"](self.interaction(in_guild=GUILD))
+        self.assertIn("还没私信过", self.sent[0][0])
+        bot.store.set_dm_home(11, GUILD, DM)
+        await cmds["状态"](self.interaction(in_guild=GUILD))
+        self.assertIn("「A服」", self.sent[0][0])
+        self.assertIn("$0.0000 / $0.2", self.sent[0][0])
+        await cmds["清空"](self.interaction(in_guild=GUILD))
+        self.assertEqual(bot.engine.resets, [DM])  # 清的是私信，不是这个频道
+
+
+    async def test_this_server_without_the_bot(self):
+        bot = self.make([self.a])
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=999))
+        self.assertIn("我不在这个服务器里", self.sent[0][0])
+        self.assertIsNone(bot.store.dm_home(11))
+
+    async def test_this_server_even_with_a_stale_membership_answer(self):
+        # 他刚加入 B服：之前问过 Discord 时还“不在”（记了 10 分钟）。在 B服 里用命令就说明他在
+        bot = self.make([self.a, self.b])
+        bot._members[(OTHER, 11)] = (False, __import__("time").monotonic())
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=OTHER))
+        self.assertEqual(bot.store.dm_home(11), (OTHER, None))
+        guild, _ = await bot.dm_home(NS(id=11), DM)  # 之后私信也认这个服务器，不会因为旧结果又换走
+        self.assertEqual(guild.id, OTHER)
+        self.assertEqual(self.b.fetched, 0)
+
+    async def test_status_warns_when_they_left_the_server(self):
+        bot = self.make([self.a, self.b])
+        bot.store.set_dm_home(11, GUILD, DM)
+        self.a.members.clear()
+        cmds, _ = self.commands(bot)
+        await cmds["状态"](self.interaction(in_guild=OTHER))
+        self.assertIn("你已经不在那个服务器里了", self.sent[0][0])
+
+    async def test_switch_waits_for_a_dm_being_handled(self):
+        # 一条私信正在定服务器（在等 Discord 回答他在不在 A服）的时候，他在 B服 里换了服务器：
+        # 换服务器要等那条私信处理完，不能被它用旧的结果盖回 A服
+        gate = asyncio.Event()
+        a = FakeGuild(GUILD, "A服", {11})
+        original = a.fetch_member
+
+        async def slow(uid):
+            await gate.wait()
+            return await original(uid)
+
+        a.fetch_member = slow
+        bot = self.make([a, self.b])
+        bot.store.set_dm_home(11, GUILD, DM)
+        first = asyncio.create_task(bot.dm_home(NS(id=11), DM))
+        await asyncio.sleep(0)
+        switch = asyncio.create_task(bot.set_dm_home(11, self.b, None))
+        await asyncio.sleep(0)
+        self.assertFalse(switch.done())  # 在等那条私信
+        gate.set()
+        await asyncio.gather(first, switch)
+        self.assertEqual((bot.store.dm_home(11), bot.dm_guild(DM)), ((OTHER, DM), OTHER))
+        self.assertEqual(bot.engine.moved, [(DM, OTHER)])
+
+
+    async def test_naming_this_server_with_a_stale_membership_answer(self):
+        bot = self.make([self.a, self.b])
+        bot._members[(OTHER, 11)] = (False, __import__("time").monotonic())
+        cmds, group = self.commands(bot)
+        choices = await group.get_command("服务器")._params["target"].autocomplete(self.interaction(in_guild=OTHER), "")
+        self.assertIn(str(OTHER), [c.value for c in choices])  # 输入框里列得出这个服务器
+        await cmds["服务器"](self.interaction(in_guild=OTHER), target="B服")
+        self.assertEqual(bot.store.dm_home(11), (OTHER, None))
+
+    async def test_pick_by_id_checks_that_server(self):
+        bot = self.make([self.a, self.b])
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=GUILD), target=str(OTHER))
+        self.assertEqual(bot.store.dm_home(11), (OTHER, None))
+        self.b.members.clear()
+        bot._members.clear()
+        await cmds["服务器"](self.interaction(in_guild=GUILD), target=str(OTHER))
+        self.assertIn("找不到这个服务器", self.sent[0][0])
+        self.b.members.add(11)
+        bot._members.clear()
+        self.b.error = _server_error()
+        await cmds["服务器"](self.interaction(in_guild=GUILD), target=str(OTHER))
+        self.assertIn("过一会儿再试", self.sent[0][0])
+
+    async def test_no_history_means_nothing_cleared(self):
+        # 在服务器里定了 A服，还没私信过，又在私信里换成 B服：没有私信记录可清
+        bot = self.make([self.a, self.b])
+        cmds, _ = self.commands(bot)
+        await cmds["服务器"](self.interaction(in_guild=GUILD))
+        await cmds["服务器"](self.interaction(), target=str(OTHER))
+        self.assertNotIn("清空", self.sent[0][0])
+        self.assertEqual(bot.engine.moved, [])
+        self.assertEqual(bot.store.dm_home(11), (OTHER, DM))
+
+    async def test_first_dm_after_the_chosen_server_became_unusable(self):
+        bot = self.make([self.a, self.b])
+        bot.store.set_dm_home(11, OTHER, None)  # 用命令定了 B服，还没私信过
+        self.b.members.clear()
+        guild, note = await bot.dm_home(NS(id=11), DM)
+        self.assertEqual(guild.id, GUILD)
+        self.assertIn("「B服」那边私信用不了了", note)
+        self.assertNotIn("清空", note)
+        self.assertIn("保密", note)
+        self.assertEqual(bot.engine.moved, [])
+
+    async def test_status_when_the_home_is_gone(self):
+        bot = self.make([self.a, self.b])
+        cmds, _ = self.commands(bot)
+        bot.store.set_dm_home(11, 999, DM)  # bot 已经不在那个服务器了
+        await cmds["状态"](self.interaction(in_guild=GUILD))
+        self.assertIn("它已经不在", self.sent[0][0])
+        self.assertIn("会改用「A服」，私信记录会清空", self.sent[0][0])
+        bot.store.set_dm_home(11, GUILD, DM)
+        self.a.members.clear()
+        self.b.members.clear()
+        bot._members.clear()  # 刚才在 A服 里用过命令，那时他还在
+        await cmds["状态"](self.interaction(in_guild=None))
+        self.assertIn("你已经不在那个服务器里了", self.sent[0][0])
+        self.assertIn("私信暂时聊不了", self.sent[0][0])
+
+
+class Switching(unittest.IsolatedAsyncioTestCase):
+    async def test_engine_follows_a_switch_it_missed(self):
+        # 引擎里这段私信还挂在原来的服务器（比如换的时候它还没载入）：新来的消息说是 B服，就按换了服务器处理
+        engine, llm, transport, clock = dm_engine()
+        await engine.handle_message(dm(1, "在吗"))
+        await engine.drain()
+        transport.places[DM] = ChannelPlace(guild_id=OTHER, name="私信", dm=True)
+        await engine.handle_message(dm(2, "换了", guild_id=OTHER))
+        await engine.drain()
+        self.assertEqual(engine.states[DM].guild_id, OTHER)
+        self.assertNotIn("在吗", json.dumps(chats(llm)[-1]["messages"], ensure_ascii=False))
+
+    async def test_no_memory_writes_after_a_switch_mid_round(self):
+        # 一轮里要记两条，记第一条加 📝 的时候他换了服务器：第二条不能写进新的服务器
+        cards, memory = stores()
+        out = ACTIONS({"type": "memory", "op": "add", "text": "周五打副本"}, {"type": "memory", "op": "add", "text": "周六团建"}, REPLY(1, "记下了"))
+        engine, llm, transport, clock = dm_engine(lambda call: out, cards=cards, memory=memory)
+
+        async def react(channel_id, message_id, emoji):
+            transport.reactions.append((channel_id, message_id, emoji))
+            if emoji == "📝":
+                engine.move_dm(DM, OTHER)
+            return True
+
+        transport.react = react
+        await engine.handle_message(dm(1, "帮我记住：周五打副本，周六团建"))
+        await engine.drain()
+        self.assertEqual([m.text for m in memory.entries(GUILD)], ["周五打副本"])
+        self.assertEqual(memory.entries(OTHER), [])
+
+    async def test_clearing_the_record_mid_round_keeps_the_memory_writes(self):
+        # 只是清空聊天记录（没换服务器）：长期记忆不受影响，这一轮要记的照样记全
+        cards, memory = stores()
+        out = ACTIONS({"type": "memory", "op": "add", "text": "周五打副本"}, {"type": "memory", "op": "add", "text": "周六团建"}, REPLY(1, "记下了"))
+        engine, llm, transport, clock = dm_engine(lambda call: out, cards=cards, memory=memory)
+
+        async def react(channel_id, message_id, emoji):
+            if emoji == "📝":
+                engine.reset_channel(DM)
+            return True
+
+        transport.react = react
+        await engine.handle_message(dm(1, "帮我记住：周五打副本，周六团建"))
+        await engine.drain()
+        self.assertEqual([m.text for m in memory.entries(GUILD)], ["周五打副本", "周六团建"])
+
+    async def test_reply_written_for_the_old_server_is_not_sent(self):
+        engine, llm, transport, clock = dm_engine()
+        sleep = engine.sleep
+
+        async def typing_then_switch(seconds):
+            await sleep(seconds)
+            if chats(llm):  # 问完模型、假装打字的时候换了服务器
+                engine.move_dm(DM, OTHER)
+
+        engine.sleep = typing_then_switch
+        await engine.handle_message(dm(1, "在吗"))
+        await engine.drain()
+        self.assertEqual(transport.sent, [])
+
+    async def test_unanswered_dms_survive_a_switch(self):
+        engine, llm, transport, clock = dm_engine()
+        await engine.handle_message(dm(1, "在吗"))  # 还在等他说完，就换了服务器
+        transport.places[DM] = ChannelPlace(guild_id=OTHER, name="私信", dm=True)
+        engine.move_dm(DM, OTHER)
+        await engine.drain()
+        self.assertEqual(len(chats(llm)), 1)
+        self.assertIn("在吗", user_text(chats(llm)[0]))
+        self.assertEqual(engine.states[DM].guild_id, OTHER)
+        self.assertEqual(engine.store.conversation_channels(OTHER), [DM])
 
 
 if __name__ == "__main__":
