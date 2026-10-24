@@ -2,6 +2,75 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.3.0] - 2026-10-24
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **私信**：和它同在一个服务器的人可以直接私信它，私信里每句都算在跟它说，不用 @。
+  - **私信挂在一个服务器上**：它用那个服务器的人设、长期记忆和你在那里的人设卡，花费也算进那个服务器的每日预算。第一次私信时自动定：只有一个共同服务器就是它，有好几个时先挑你最近在里面跟它聊过的。新命令 `/ds-dm 服务器` 可以换（换了会清空私信记录，服务器那边的记忆不受影响）。你退出了那个服务器、或者那边关掉了私信，下次私信时会自动换一个。
+  - **和服务器互通**：私信里聊的事可能记进那个服务器的长期记忆和你的人设卡；你在那个服务器的频道里叫它时，它会带上你最近在私信里聊的几句（只带你自己的），可能在大家面前提起。反过来，你刚在公开频道里跟它聊过的，私信里它也接得上。这两样都不用开记忆共享。别人叫它时看不到你的私信，任何频道也翻不到私信的记录；提到“保密”“别告诉别人”这类的那一段不会带到频道里。第一次私信、换服务器时和 `/ds-dm 状态` 里都会提醒这一点。
+  - **等你说完再回**：连着发好几条，它等你停下 3 秒（发完又在打字就多等一会儿，最多 15 秒）再一起回，只问一次 DeepSeek。
+  - **花费上限**：新参数“每人每日私信预算美元”（`dm_daily_budget_usd`，默认 0.2）。到了上限它会说一声，之后只加个 💤；那个服务器当天的预算用完了，私信也先停，留给群里的点名。bot 主人自己私信不受这两条限制（只在超过预算 2 倍时停）。
+  - 私信里用不了点歌、服务器的贴图和主动发言。
+  - 管理员可以关掉：新参数“私信”（`dm`，默认开），`/ds 设置 参数:私信 值:关`。
+  - `/ds-dm 状态` 看私信用的是哪个服务器、今天花了多少；`/ds-dm 清空` 清空私信记录；`/ds-rp` 在私信里也能用，改的是私信挂的那个服务器的卡。
+
+**改进**
+
+- `/dsowner 设置` 的“参数”改成输入时提示：参数超过了 Discord 选单的 25 个上限，在这一栏打几个字（比如“私信”“预算”）就会列出来。
+- `/ds 状态` 多了一行“私信”。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。`config.toml` 里新加的 `dm`、`dm_daily_budget_usd` 不加也行，有默认值；`Dockerfile`、`requirements.txt`、`.env` 和数据库都不用动（数据库会自动多一张表）。
+- 确认新版生效：日志里有 `dsbot 2.3.0 启动中`，接着是 `已注册 4 个全局斜杠命令`，多了 `/ds-dm`。
+- **私信默认是开的**：更新以后所有服务器的成员都能私信它。不想要的服务器请用 `/ds 设置 参数:私信 值:关`；也最好跟群友说一声，私信里聊的可能被记进服务器、在频道里被提起。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 私信进入引擎时 `IncomingMessage.private` 为真，`guild_id` 是它挂的那个服务器；挂在哪个服务器存在数据库新表 `dm_homes`，由 `discord_app.py` 的 `dm_home` 决定（会去确认他还在不在那个服务器里，结果缓存 10 分钟）。
+- `engine.py`：私信等对方说完再开始一轮（`_dm_settle`），每人每天的花费上限在 `_dm_over`；跨频道带近况的 `_shared_context` 在私信和服务器频道之间按人互通。
+- 新测试 `test_dm.py`，测试增加到 818 个。
+- CONTRIBUTING.md 加了第 12 条：私信挂在一个服务器上、原话只在本人叫它时带到频道里，花费有上限。
+
+### English
+
+**Added**
+
+- **Direct messages**: anyone who shares a server with it can DM it. Every message in a DM counts as talking to it, no @ needed.
+  - **Each DM belongs to one server**: it uses that server's persona, long-term memory and your profile card there, and the cost counts against that server's daily budget. It's picked automatically the first time you DM it: if you share only one server, that's the one; if you share several, it picks the one where you last talked to it. You can switch with the new `/ds-dm 服务器` command (switching clears the DM history; the server's memory isn't affected). If you leave that server, or it turns DMs off, it switches to another one the next time you DM it.
+  - **Shared with the server**: what you talk about in DMs may be saved to that server's long-term memory and your profile card. When you call it in that server's channels, it brings along the last few things you said in DMs (yours only), and may bring them up in front of everyone. The other way round, what you just talked about with it in a public channel carries over into the DM. Neither needs cross-channel memory to be turned on. Nobody else sees your DMs when they call it, no channel can look up the DM history, and any part where you said to keep it secret ("保密", "别告诉别人" and the like) isn't brought into channels. It says all this the first time you DM it, when you switch servers, and in `/ds-dm 状态`.
+  - **Waits until you're done**: if you send several messages in a row, it waits until you've stopped for 3 seconds (a bit longer if you start typing again, 15 seconds at most), then answers them together with a single DeepSeek call.
+  - **Spending cap**: the new setting "每人每日私信预算美元" (`dm_daily_budget_usd`, default 0.2) caps what each person's DMs can cost per day. When it's reached, it says so once, then just reacts 💤. When the server's daily budget runs out, DMs stop too, leaving the rest for mentions in the server. The bot owner's own DMs aren't held to either of these (they only stop at twice the budget).
+  - Music, the server's stickers and speaking up on its own aren't available in DMs.
+  - Admins can turn DMs off with the new setting "私信" (`dm`, on by default): `/ds 设置 参数:私信 值:关`.
+  - `/ds-dm 状态` shows which server the DM uses and what it cost today; `/ds-dm 清空` clears the DM history; `/ds-rp` also works in DMs and edits your card in the server the DM belongs to.
+
+**Changed**
+
+- The "参数" (setting) option of `/dsowner 设置` now suggests as you type: there are more settings than the 25 a Discord menu can hold, so type a few characters (like "私信" or "预算") to see them.
+- `/ds 状态` (status) has a new "私信" (DMs) line.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. The new `dm` and `dm_daily_budget_usd` in `config.toml` are optional and have defaults; `Dockerfile`, `requirements.txt`, `.env` and the database stay as they are (the database gets one new table on its own).
+- To check that the new version took effect: the log shows `dsbot 2.3.0 启动中`, followed by `已注册 4 个全局斜杠命令` (4 global slash commands registered), now including `/ds-dm`.
+- **DMs are on by default**: after updating, members of every server can DM it. Turn it off where you don't want it with `/ds 设置 参数:私信 值:关`, and it's worth telling your members that what they say in DMs may be saved to the server and brought up in its channels.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- DMs reach the engine with `IncomingMessage.private` set, and `guild_id` is the server the DM belongs to. Which server that is lives in the new `dm_homes` database table, decided by `dm_home` in `discord_app.py` (which checks that the person is still in that server, caching the answer for 10 minutes).
+- `engine.py`: a DM round starts only once the person has finished (`_dm_settle`); the per-person daily cap is `_dm_over`; `_shared_context`, which brings in recent conversations from other channels, now passes each person's own conversations between their DM and the server's channels.
+- New tests in `test_dm.py`. There are now 818 tests.
+- CONTRIBUTING.md has a new rule 12: a DM belongs to one server, its messages only reach channels when that person calls it there, and DMs have a spending cap.
+
 ## [2.2.3] - 2026-10-23
 
 > 英文版这次没有更新，还是 2.0.0。
