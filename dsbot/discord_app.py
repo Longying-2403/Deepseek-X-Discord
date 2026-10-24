@@ -7,6 +7,7 @@ import io
 import logging
 import signal
 import tempfile
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -61,6 +62,10 @@ BOT_PERMISSIONS = discord.Permissions(
     speak=True,  # 点歌：在语音频道里放声音
 )
 MUSIC_BITRATE = 128  # 放歌的码率（kbps）
+DM_MEMBER_TTL = 600.0  # 问过 Discord“他在不在这个服务器里”，这么久之内不再问
+DM_SCAN_GUILDS = 50  # 找和他共同的服务器时，最多问这么多个服务器
+DM_NOTICE_GAP = 3600.0  # “私信聊不了”的提示，同一个人这么久最多说一次
+DM_NONE = "我们好像没有共同的服务器（或者那边关掉了私信），私信暂时聊不了。"
 
 
 def _log_close_error(task: asyncio.Task[Any]) -> None:
@@ -116,8 +121,30 @@ class DiscordTransport:
     def is_ours(self, message_id: int) -> bool:
         return message_id in self._sent_set
 
+    def _home(self, channel: Any) -> Any:
+        """频道所在的服务器；私信是它挂的那个服务器（用那里的表情）。"""
+        guild = getattr(channel, "guild", None)
+        if guild is None and channel is not None:
+            gid = self.client.dm_guild(channel.id)
+            guild = self.client.get_guild(gid) if gid is not None else None
+        return guild
+
     def channel_info(self, channel_id: int) -> ChannelInfo:
         channel = self.client.get_channel(channel_id)
+        gid = self.client.dm_guild(channel_id)
+        if gid is not None:
+            guild = self.client.get_guild(gid)
+            me = guild.me if guild is not None else None
+            user = getattr(channel, "recipient", None)
+            member = guild.get_member(user.id) if guild is not None and user is not None else None
+            return ChannelInfo(
+                guild_name=guild.name if guild is not None else "未知服务器",
+                channel_name="私信",
+                bot_name=me.display_name if me is not None else (self.client.user.display_name if self.client.user else "bot"),
+                emojis=sorted({e.name for e in usable_emojis(guild)}),
+                stickers=[],  # 服务器自己的贴图只能在那个服务器里发
+                dm_with=(member or user).display_name if (member or user) is not None else "对方",
+            )
         guild = getattr(channel, "guild", None)
         me = guild.me if guild is not None else None
         if me is not None:
@@ -137,6 +164,9 @@ class DiscordTransport:
 
     def locate(self, channel_id: int) -> ChannelPlace | None:
         """频道在哪个服务器、哪个类别，以及是不是所有人都看得到（跨频道记忆用）。不在缓存里就返回 None。"""
+        gid = self.client.dm_guild(channel_id)
+        if gid is not None:
+            return ChannelPlace(guild_id=gid, name="私信", dm=True)
         channel = self.client.get_channel(channel_id)
         guild = getattr(channel, "guild", None)
         if channel is None or guild is None:
@@ -221,7 +251,7 @@ class DiscordTransport:
         channel = await self._resolve(channel_id)
         if channel is None:
             return None
-        converted = render_custom_emoji(text, emoji_lookup(getattr(channel, "guild", None)))  # :名字: → 服务器表情
+        converted = render_custom_emoji(text, emoji_lookup(self._home(channel)))  # :名字: → 服务器表情
         if len(converted) <= DISCORD_LIMIT:  # 换成 <:名字:id> 会变长；超过上限就原样发，别整条发不出去
             text = converted
         kwargs = self._base_kwargs(channel_id, reply_to, ping, mentions)
@@ -239,7 +269,7 @@ class DiscordTransport:
         if channel is None or not hasattr(channel, "get_partial_message"):
             return False
         try:
-            await channel.get_partial_message(message_id).add_reaction(resolve_reaction(emoji, getattr(channel, "guild", None)))
+            await channel.get_partial_message(message_id).add_reaction(resolve_reaction(emoji, self._home(channel)))
             return True
         except Exception as exc:
             log.info("加表情 %s 失败：%r", emoji, exc)
@@ -480,6 +510,10 @@ class DSBot(discord.Client):
         self._ticker: asyncio.Task[None] | None = None
         self._closing: asyncio.Task[None] | None = None  # 收到 SIGTERM 后开始的关闭
         self._cdn: Any = None  # 下载预览图、贴图用的 aiohttp 会话（第一次用时才建）
+        self.dm_channels: dict[int, tuple[int, int]] = store.dm_homes()  # 私信频道 -> (人, 挂在的服务器)
+        self._members: dict[tuple[int, int], tuple[bool, float]] = {}  # (服务器, 人) -> (在不在, 什么时候问的)
+        self._dm_locks: dict[int, asyncio.Lock] = {}
+        self._dm_noticed: dict[int, float] = {}  # 人 -> 上次说“私信聊不了”的时间
         self.music: MusicPlayer | None = None  # 点歌：登录时才启用（--check 不会去动下载目录）
         self.music_problem = "还没启动"  # 点歌用不了的原因
 
@@ -585,12 +619,119 @@ class DSBot(discord.Client):
         finally:
             await super().close()  # 前面哪一步出错也要断开和 Discord 的连接，不然进程退不出去
 
+    # ---------------------------------------------------------------- 私信
+
+    def dm_guild(self, channel_id: int) -> int | None:
+        """私信频道挂在哪个服务器（不是私信、或者还没定是 None）。"""
+        entry = self.dm_channels.get(channel_id)
+        return entry[1] if entry is not None else None
+
+    def dm_open(self, guild: Any) -> bool:
+        return bool(self.settings.get("dm", guild_id=guild.id))
+
+    async def is_member(self, guild: Any, user_id: int) -> bool | None:
+        """他现在还在不在这个服务器里（问不到 Discord 时是 None）。"""
+        if guild.get_member(user_id) is not None:
+            return True
+        key = (guild.id, user_id)
+        now = time.monotonic()
+        cached = self._members.get(key)
+        if cached is not None and now - cached[1] < DM_MEMBER_TTL:
+            return cached[0]
+        try:
+            await guild.fetch_member(user_id)
+            ok = True
+        except discord.NotFound:
+            ok = False
+        except (discord.HTTPException, asyncio.TimeoutError, OSError) as exc:
+            log.info("查不到 %s 在不在服务器 %s：%r", user_id, guild.id, exc)
+            return None
+        self._members[key] = (ok, now)
+        return ok
+
+    async def dm_candidates(self, user_id: int) -> list[Any]:
+        """他和 bot 都在、开着私信的服务器：最近跟它聊过的在前，其余按名字。"""
+        recent: dict[int, float] = {}
+        for (gid, uid), talks in self.engine.interactions.items():
+            if uid == user_id and talks:
+                recent[gid] = max(recent.get(gid, 0.0), talks[-1].at)
+        guilds = sorted(self.guilds, key=lambda g: (-recent.get(g.id, 0.0), g.name.casefold(), g.id))
+        out = []
+        for guild in guilds[:DM_SCAN_GUILDS]:
+            if self.dm_open(guild) and await self.is_member(guild, user_id):
+                out.append(guild)
+        return out
+
+    async def dm_home(self, user: Any, channel_id: int) -> tuple[Any, str | None]:
+        """这段私信挂在哪个服务器，和要先跟他说的一句话（第一次定下来、换了服务器时说）。
+        挂不了是 (None, 原因)；Discord 一时问不到是 (None, None)（这次先不回，也不换服务器）。"""
+        lock = self._dm_locks.setdefault(user.id, asyncio.Lock())
+        async with lock:
+            stored = self.store.dm_home(user.id)
+            prev = self.get_guild(stored[0]) if stored is not None else None
+            if prev is not None and self.dm_open(prev):
+                member = await self.is_member(prev, user.id)
+                if member is None:
+                    return None, None
+                if member:
+                    if stored is not None and stored[1] != channel_id:
+                        self.store.set_dm_home(user.id, prev.id, channel_id)
+                    self.dm_channels[channel_id] = (user.id, prev.id)
+                    return prev, None
+            candidates = await self.dm_candidates(user.id)
+            if not candidates:
+                return None, DM_NONE
+            guild = candidates[0]
+            self.store.set_dm_home(user.id, guild.id, channel_id)
+            self.dm_channels[channel_id] = (user.id, guild.id)
+            name = discord_safe(guild.name)
+            if stored is not None and stored[0] != guild.id:
+                self.engine.move_dm(channel_id, guild.id)  # 原来那个服务器的私信记录不带过去
+                old = f"「{discord_safe(prev.name)}」" if prev is not None else "原来那个服务器"
+                note = (
+                    f"{old}那边私信用不了了（你不在那里了，或者那边关掉了私信），现在改用「{name}」的人设和记忆来聊，之前的私信记录清空了。\n"
+                    f"⚠️ 这里聊的事可能会记进「{name}」的长期记忆和你的人设卡，你在那边的频道里叫我时也可能被提起。"
+                )
+            else:
+                note = (
+                    f"私信里我会用「{name}」这个服务器的人设、长期记忆和你的人设卡来聊。\n"
+                    f"⚠️ 这里聊的事可能会记进那边的长期记忆和你的人设卡；你在「{name}」的频道里叫我时，我也可能提起刚在私信里聊的，"
+                    "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。"
+                )
+            if len(candidates) > 1:
+                note += "\n想换成别的服务器，用 `/ds-dm 服务器`。"
+            log.info("%s 的私信挂到服务器 %s（%d 个可选）", user.id, guild.id, len(candidates))
+            return guild, note
+
+    async def _on_dm(self, message: discord.Message) -> None:
+        if message.author.bot or not isinstance(message.channel, discord.DMChannel):
+            return
+        if message.type not in CHAT_MESSAGE_TYPES:
+            return
+        channel_id = message.channel.id
+        guild, note = await self.dm_home(message.author, channel_id)
+        if guild is None:
+            now = time.monotonic()
+            if note is not None and now - self._dm_noticed.get(message.author.id, -DM_NOTICE_GAP) >= DM_NOTICE_GAP:
+                self._dm_noticed[message.author.id] = now
+                await self.transport.send(channel_id, note, reply_to=None, ping=False)
+            return
+        if note is not None:
+            await self.transport.send(channel_id, note, reply_to=None, ping=False)
+        try:
+            incoming = self.to_incoming(message, dm_guild=guild.id)
+        except Exception:
+            log.exception("解析私信 %s 失败", message.id)
+            return
+        await self.engine.handle_message(incoming)
+
     # ---------------------------------------------------------------- 事件
 
     async def on_message(self, message: discord.Message) -> None:
-        if self.user is None or message.guild is None:
-            return  # 不处理私信
-        if message.author.id == self.user.id:
+        if self.user is None or message.author.id == self.user.id:
+            return
+        if message.guild is None:
+            await self._on_dm(message)
             return
         if message.type not in CHAT_MESSAGE_TYPES:
             return  # 加入提示、置顶通知之类的系统消息
@@ -602,7 +743,9 @@ class DSBot(discord.Client):
         await self.engine.handle_message(incoming)
 
     async def on_raw_typing(self, payload: discord.RawTypingEvent) -> None:
-        if self.user is None or payload.guild_id is None or payload.user_id == self.user.id:
+        if self.user is None or payload.user_id == self.user.id:
+            return
+        if payload.guild_id is None and payload.channel_id not in self.dm_channels:
             return
         if payload.user is not None and payload.user.bot:
             return
@@ -610,22 +753,26 @@ class DSBot(discord.Client):
 
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """消息被编辑，或 Discord 补上了链接预览（GIF 选单发的 GIF 就是这样）。"""
-        if self.user is None or payload.guild_id is None:
+        if self.user is None:
+            return
+        dm_guild = self.dm_guild(payload.channel_id) if payload.guild_id is None else None
+        if payload.guild_id is None and dm_guild is None:
             return
         message = getattr(payload, "message", None)
-        if message is None or message.guild is None or message.author.id == self.user.id:
+        if message is None or message.author.id == self.user.id or (message.guild is None and dm_guild is None):
             return
         if message.type not in CHAT_MESSAGE_TYPES:
             return
         try:
             # edited_at 只有本人改了内容才有；只是补上预览的更新没有
-            self.engine.handle_edit(self.to_incoming(message), edited=message.edited_at is not None)
+            self.engine.handle_edit(self.to_incoming(message, dm_guild=dm_guild), edited=message.edited_at is not None)
         except Exception:
             log.exception("更新消息 %s 失败", payload.message_id)
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        if payload.guild_id is not None:
-            self.engine.handle_delete(payload.guild_id, payload.channel_id, [payload.message_id])
+        guild_id = payload.guild_id if payload.guild_id is not None else self.dm_guild(payload.channel_id)
+        if guild_id is not None:
+            self.engine.handle_delete(guild_id, payload.channel_id, [payload.message_id])
 
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
         """管理员一次删了很多条。"""
@@ -656,13 +803,14 @@ class DSBot(discord.Client):
                     raise ValueError("图太大")
         return bytes(data)
 
-    def to_incoming(self, message: discord.Message) -> IncomingMessage:
-        assert self.user is not None and message.guild is not None
+    def to_incoming(self, message: discord.Message, *, dm_guild: int | None = None) -> IncomingMessage:
+        """dm_guild：私信时，这段私信挂在的那个服务器。"""
+        assert self.user is not None and (message.guild is not None or dm_guild is not None)
         channel = message.channel
         parent_id = channel.parent_id if isinstance(channel, discord.Thread) else None
         aliases = self.settings.get(
             "aliases",
-            guild_id=message.guild.id,
+            guild_id=message.guild.id if message.guild is not None else dm_guild,
             channel_id=channel.id,
             parent_id=parent_id,
             category_id=safe_category_id(channel),
@@ -673,4 +821,5 @@ class DSBot(discord.Client):
             aliases=parse_aliases(aliases),
             is_ours=self.transport.is_ours,
             fetch_url=self.fetch_url,
+            dm_guild=dm_guild,
         )

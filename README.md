@@ -24,6 +24,7 @@
 - **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 自带的搜索查一下再回答。每个服务器每天有次数上限。
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **会点歌**：进语音频道后叫它“放首晴天”，或者用 `/ds-music 播放`，它会进你所在的语音频道放 B站视频的声音；同一个语音频道里的人都能切歌、暂停、停止。只能放 B站的，不放直播。
+- **能私信**：和它同在一个服务器的人可以直接私信它。私信里它用那个服务器的人设、长期记忆和你的人设卡，聊的事也会记回去，你在那个服务器的频道里叫它时也可能被提起（说“保密”的不会）；连着发几条，它等你说完再一起回；每人每天有花费上限（见“十四、私信”）。
 - **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
 > 这是中文版（命令、回复和文档都是中文）。英文版全部是英文，在 [`english` 分支](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)；它目前是 v2.0.0，还没有之后加的功能（会 @ 人、跟着删改、会点歌），可以在 [v2.0.0 的 Release](https://github.com/Longying-2403/Deepseek-X-Discord/releases/tag/v2.0.0) 下载 `-en.zip`。
@@ -48,6 +49,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Searches the web**: when it's called with a question about news, prices, scores, weather or anything else recent that it doesn't know, it looks it up with DeepSeek's built-in search first, then answers. Each server has a daily search cap.
 - **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share. Private channels don't share by default.
 - **Plays music**: join a voice channel and ask it to "play some Jay Chou", or use `/ds-music 播放`, and it joins your voice channel and plays the audio of a Bilibili video; anyone in the same voice channel can skip, pause or stop. Bilibili only, no live streams.
+- **Direct messages**: anyone who shares a server with it can DM it. In DMs it uses that server's persona, long-term memory and your profile card, and what you talk about can be remembered there too. When you call it in that server's channels, it may bring up what you just said in DMs (not the parts you asked to keep secret). If you send several messages in a row, it waits until you're done and answers them together. Each person has a daily spending cap.
 - **You control where it responds**: limit it by channel, by category, or for the whole server.
 
 It replies in the language of the message it's answering, so it also works in mixed-language servers.
@@ -104,9 +106,9 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 **更新到新版本**：代码是构建时复制进镜像的，所以要把新代码放进项目原来的文件夹，再重新构建：
 
-1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0、2.2.1 或 2.2.2 更新到 2.2.3 只有 `dsbot` 文件夹变了。
+1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.2.3 之间的版本更新到 2.3.0 只有 `dsbot` 文件夹变了（`config.toml` 里新加的 `dm`、`dm_daily_budget_usd` 不加也行，有默认值）。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.2.3 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 3 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.3.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`、`/ds-dm`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -176,6 +178,16 @@ python -m dsbot
 | `/ds-rp 操作:改回上一版` | 卡被改坏了（或者删错了）：改回上一个版本，最多能往回改 5 次 |
 | `/ds-rp 操作:清空` | 删掉自己的人设卡，连同旧版本，找不回来 |
 
+在私信里用 `/ds-rp`，改的是私信挂的那个服务器的卡（见“十四”）。
+
+### `/ds-dm`（私信里用）
+
+| 命令 | 作用 |
+|---|---|
+| `/ds-dm 服务器` | 私信里用哪个服务器的人设、长期记忆和人设卡（列出你和它都在、开着私信的服务器）。换了会清空私信记录，服务器那边的记忆不受影响 |
+| `/ds-dm 状态` | 私信现在用的是哪个服务器、今天私信花了多少 |
+| `/ds-dm 清空` | 清空私信的聊天记录，让它从头开始 |
+
 ### `/ds-music`（所有人）
 
 | 命令 | 作用 |
@@ -193,7 +205,7 @@ python -m dsbot
 
 | 命令 | 作用 |
 |---|---|
-| `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索、读链接、每日搜索上限和每日找图上限），可以指定某个服务器 ID，不填就是全局 |
+| `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索、读链接、每日搜索上限、每日找图上限和私信预算），可以指定某个服务器 ID，不填就是全局。参数太多，一个选单放不下：在“参数”一栏打几个字（比如“私信”“预算”）就会列出来 |
 | `/dsowner 总览` | 今天每个服务器花了多少、调用多少次、缓存命中率 |
 | `/dsowner 删除人设卡` | 填用户 ID，删掉这个人在所有服务器的人设卡（看不到内容） |
 
@@ -217,6 +229,7 @@ python -m dsbot
 | 发图 | 开 | 让它自己发表情包库里的图、上网找图。关掉后两样都不发 |
 | 人设卡 | 开 | 记住群友自己说的称呼、设定、喜好，聊天时用上（见“十一”） |
 | 长期记忆 | 开 | 记住这个服务器的约定、大事、长期的梗和剧情（见“十一”） |
+| 私信 | 开 | 让这个服务器的成员私信它（见“十四”）。只看全服务器这一级：`/ds 设置 参数:私信 值:关` |
 
 区域（`/ds 区域`）对应的参数叫“允许回应”，默认开。想让所有服务器一开始就是白名单模式，把 `config.toml` 里的 `enabled` 改成 `false`。
 
@@ -236,6 +249,7 @@ python -m dsbot
 | 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。按歌名点歌也算一次（见“十三”）。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
 | 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily） |
 | 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
+| 每人每日私信预算美元 | 0.2 | 每个人每天私信它最多花多少，也算进私信挂的那个服务器的预算；你自己私信不受限（见“十四”） |
 
 “一轮”的意思：同一个人 20 秒内连发的几条算一轮，免得分行打字刷额度。
 
@@ -449,7 +463,23 @@ python -m dsbot
 - 关掉点歌：`config.toml` 的 `[bot]` 里写 `music = false`，再 `docker compose up -d --force-recreate`。
 - `docker compose exec dsbot python -m dsbot --check` 会显示点歌要用的东西（yt-dlp、ffmpeg、语音库）在不在；`/ds 状态` 里也有一行点歌的状态。
 
-## 十四、它是怎么工作的
+## 十四、私信
+
+和它同在一个服务器的人，可以直接私信它。私信里每句话都算在跟它说，不用 @。
+
+- **私信挂在一个服务器上**：它用那个服务器的人设、长期记忆和你在那里的人设卡，花费也算进那个服务器的每日预算。第一次私信时自动定：只有一个共同服务器就是它；有好几个时，先挑你最近在里面跟它聊过的，并告诉你可以用 `/ds-dm 服务器` 换。换了会清空私信记录（里面是原来那个服务器的东西），服务器那边的记忆不受影响。你退出了那个服务器、或者那边关掉了私信，下次私信时它会自动换一个（同样清空私信记录）。
+- **和服务器互通**：私信里聊的事，它整理记忆时可能记进那个服务器的长期记忆和你的人设卡。你在那个服务器的频道里叫它时，它会带上你最近在私信里跟它聊的几句（只带你自己的、最近 6 小时、最近两段），**可能在大家面前提起**；反过来，你刚在公开频道里跟它聊过的，私信里它也接得上。这两样都不用开记忆共享。别人叫它时看不到你的私信，任何频道也翻不到私信的记录。
+- **⚠️ 要保密就说一声**：私信里提到“保密”“别告诉别人”“秘密”之类的那一段，不会带到频道里，它也不会记；第一次私信、`/ds-dm 状态` 和换服务器时，它都会提醒这一点。
+- **等你说完再回**：连着发好几条，它等你停下 3 秒（发完又在打字就多等一会儿）再一起回，最多等 15 秒。
+- **花费上限**：每个人每天私信最多花“每人每日私信预算美元”（默认 0.2 美元），到了它会说一声“今天聊得有点多了”，之后只加个 💤。那个服务器今天的预算用完了，私信也先停（留给群里的点名）。你（`OWNER_ID`）自己私信不受这两条限制，只在超过预算 2 倍时停。
+- **私信里用不了的**：点歌、服务器的贴图、主动发言。服务器表情、表情包、搜索、读文件和链接照常能用，次数算那个服务器的。
+- **管理员不想让成员私信**：`/ds 设置 参数:私信 值:关`。之后这个服务器的成员私信它时，它会换用别的共同服务器；一个都没有就告诉他私信聊不了。
+
+> 私信的内容也会发给 DeepSeek 处理。
+
+---
+
+## 十五、它是怎么工作的
 
 ```
 消息进来 ──► 存进该频道的缓冲区
@@ -478,7 +508,7 @@ python -m dsbot
 
 ---
 
-## 十五、常见问题
+## 十六、常见问题
 
 **@ 它没反应**
 - 这个频道不在允许的区域：`/ds 状态` 第一行会提示，`/ds 区域列表` 看整体设置。
@@ -520,7 +550,7 @@ python -m dsbot
 
 **看不到 `/ds-music`（或者别的新命令）**：
 - Discord 会缓存命令列表：电脑版按 Ctrl+R（Mac 是 ⌘R）刷新，手机版把 App 完全关掉再打开。
-- 看日志里启动时那一行：2.2.1 起会写成 `已注册 3 个全局斜杠命令：/ds、/ds-rp、/ds-music`（顺序可能不一样）。后面没列出名字、或者只有 2 个，说明跑的还是旧代码（回到“更新到新版本”那几步）；有“注册全局斜杠命令失败”，看后面写的原因。
+- 看日志里启动时那一行：2.2.1 起会写成 `已注册 3 个全局斜杠命令：/ds、/ds-rp、/ds-music`，加了私信以后是 4 个（多一个 `/ds-dm`），顺序可能不一样。后面没列出名字、或者只有 2 个，说明跑的还是旧代码（回到“更新到新版本”那几步）；有“注册全局斜杠命令失败”，看后面写的原因。
 - `config.toml` 里的 `sync_commands_on_start` 要是 `true`（默认就是）。
 - 服务器设置 → 整合 → 这个 bot：管理员可能限制了谁能用它的命令。
 
@@ -528,11 +558,11 @@ python -m dsbot
 
 **点歌之后没声音**：看它在语音频道里头像有没有亮绿圈（在说话）。没有的话检查它在那个语音频道的“说话”权限，日志里搜“放不出来”“下载”。
 
-**私信**：目前只在服务器里工作，不处理私信。
+**私信它没反应**：要和它同在一个服务器，而且那个服务器没关掉私信（`/ds 状态` 里有一行“私信”）；今天的私信预算用完了，它会加个 💤。私信里用 `/ds-dm 状态` 看用的是哪个服务器、今天花了多少（见“十四”）。
 
 ---
 
-## 十六、开发
+## 十七、开发
 
 欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤、几条设计约束，以及中英两个版本怎么同步。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
 

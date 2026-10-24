@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS persona_history (
     request TEXT,                 -- 当时那条要求，方便以后查
     reverted INTEGER NOT NULL DEFAULT 0  -- 这次修改已经被撤销了
 );
+CREATE TABLE IF NOT EXISTS dm_homes (
+    user_id INTEGER PRIMARY KEY,  -- 私信它的人
+    guild_id INTEGER NOT NULL,    -- 这段私信挂在哪个服务器（用它的人设、记忆、人设卡、预算）
+    channel_id INTEGER,           -- 和这个人的私信频道
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dm_homes_channel ON dm_homes (channel_id);
 """
 
 MSGMAP_KEEP = 3000  # 每个频道保留最近多少个消息编号的映射
@@ -330,6 +337,11 @@ class Store:
         ).fetchall()
         return [r["channel_id"] for r in rows]
 
+    def move_conversation(self, channel_id: int, guild_id: int) -> None:
+        """私信换了挂的服务器：记录归到新的服务器下（先清空再换）。"""
+        with self.db:
+            self.db.execute("UPDATE conversations SET guild_id = ? WHERE channel_id = ?", (guild_id, channel_id))
+
     def reset_conversation(self, channel_id: int) -> None:
         with self.db:
             self.db.execute("DELETE FROM turns WHERE channel_id = ?", (channel_id,))
@@ -430,6 +442,34 @@ class Store:
             "SELECT COUNT(*) AS n FROM usage WHERE day = ? AND guild_id = ? AND kind = ?", (day, guild_id, kind)
         ).fetchone()
         return int(row["n"])
+
+    def channel_spent(self, day: str, channel_id: int) -> float:
+        """这个频道今天花了多少（私信：这个人今天私信它花了多少）。"""
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(cost), 0) AS c FROM usage WHERE day = ? AND channel_id = ?", (day, channel_id)
+        ).fetchone()
+        return float(row["c"])
+
+    # ---------------------------------------------------------------- 私信挂在哪个服务器
+
+    def dm_home(self, user_id: int) -> tuple[int, int | None] | None:
+        """(服务器, 私信频道)；没定过是 None。"""
+        row = self.db.execute("SELECT guild_id, channel_id FROM dm_homes WHERE user_id = ?", (user_id,)).fetchone()
+        return (int(row["guild_id"]), row["channel_id"]) if row is not None else None
+
+    def dm_homes(self) -> dict[int, tuple[int, int]]:
+        """私信频道 -> (人, 服务器)。"""
+        rows = self.db.execute("SELECT user_id, guild_id, channel_id FROM dm_homes WHERE channel_id IS NOT NULL")
+        return {int(r["channel_id"]): (int(r["user_id"]), int(r["guild_id"])) for r in rows}
+
+    def set_dm_home(self, user_id: int, guild_id: int, channel_id: int | None) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO dm_homes (user_id, guild_id, channel_id, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET guild_id = excluded.guild_id, "
+                "channel_id = COALESCE(excluded.channel_id, dm_homes.channel_id), updated_at = excluded.updated_at",
+                (user_id, guild_id, channel_id, time.time()),
+            )
 
     def spend_by_guild(self, day: str) -> dict[int, float]:
         rows = self.db.execute("SELECT guild_id, SUM(cost) AS c FROM usage WHERE day = ? GROUP BY guild_id", (day,))

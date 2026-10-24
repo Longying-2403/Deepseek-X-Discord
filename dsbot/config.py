@@ -47,6 +47,7 @@ _SPEC_LIST = [
     Spec("images", "发图", bool, "admin", "让它自己发表情包库里的图，或者上网找图（找到的图它会先看一遍再决定发不发）"),
     Spec("cards", "人设卡", bool, "admin", "记住群友自己说的称呼、设定、喜好，聊天时用上（群友用 /ds-rp 管自己的卡，管理员看不到）"),
     Spec("long_memory", "长期记忆", bool, "admin", "记住这个服务器的约定、大事、长期的梗和剧情（用 /ds 长期记忆 管理）"),
+    Spec("dm", "私信", bool, "admin", "让服务器成员私信它：私信里用这个服务器的人设、长期记忆和人设卡；私信里聊的可能记进来，也可能在他叫它的频道里被提起（只看全服务器这一级）"),
     # —— 主人 ——
     Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
@@ -60,6 +61,7 @@ _SPEC_LIST = [
     Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
     Spec("links", "读链接", bool, "owner", "被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily）"),
     Spec("daily_image_limit", "每日找图上限", int, "owner", "每个服务器每天最多上网找几次图（0 = 不找，表情包库照常能用）", 0, 1000),
+    Spec("dm_daily_budget_usd", "每人每日私信预算美元", float, "owner", "每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）", 0, 100),
 ]
 
 SPECS: dict[str, Spec] = {s.key: s for s in _SPEC_LIST}
@@ -81,6 +83,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "images": True,
     "cards": True,
     "long_memory": True,
+    "dm": True,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -93,6 +96,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "daily_search_limit": 30,
     "links": True,
     "daily_image_limit": 10,
+    "dm_daily_budget_usd": 0.2,
 }
 
 # 一键档位：只动“话量”相关的三个参数

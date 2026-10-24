@@ -1,7 +1,8 @@
 """斜杠命令。
 
 /ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
-/ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。
+/ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。私信里用是私信挂的那个服务器的卡。
+/ds-dm …    私信里用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录。
 /ds-music … 所有人：点歌（B站）、切歌、暂停、继续、停止、看队列、从队列里删歌、清空队列。切歌这些要在它放歌的语音频道里。
 /dsowner …  只注册在 CONTROL_GUILD_ID 那个服务器里，并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡等。
             和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
@@ -73,6 +74,21 @@ NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”�
 # 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
+
+
+def owner_key(raw: str) -> str | None:
+    """/dsowner 设置 的参数：选单里选的是参数名，手打的也认中文名。"""
+    raw = raw.strip()
+    if raw in OWNER_SET_KEYS:
+        return raw
+    return next((k for k in OWNER_SET_KEYS if SPECS[k].label == raw), None)
+
+
+def owner_key_choices(current: str) -> list[Choice[str]]:
+    """输入时弹出的参数列表（Discord 最多显示 25 个）：名字或说明里有输入的字的。"""
+    words = current.strip().casefold()
+    keys = [k for k in OWNER_SET_KEYS if not words or words in SPECS[k].label.casefold() or words in k or words in SPECS[k].help]
+    return [Choice(name=SPECS[k].label, value=k) for k in keys[:25]]
 
 
 async def _reply(interaction: discord.Interaction, text: str) -> None:
@@ -254,7 +270,8 @@ class CardModal(discord.ui.Modal):
             )
         else:
             text = "人设卡已保存，下次你说话时它就会用上。" if changed else "人设卡没有改动。"
-        if value.strip() and not self.bot.settings.view(*_ids(interaction)).cards:
+        ids = _ids(interaction) if interaction.guild_id is not None else (self.guild_id, None, None, None)
+        if value.strip() and not self.bot.settings.view(*ids).cards:
             text += "\n（这里关掉了人设卡，它暂时不会用。）"
         await _reply(interaction, text)
 
@@ -366,6 +383,13 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     if st["memes_on"] and st["media_blocked_for"] > 0:
         minutes = max(1, round(st["media_blocked_for"] / 60))
         lines.append(f"⚠️ 这里最近连着发不出图（多半是 bot 没有“附加文件”权限），约 {minutes} 分钟内先不发图，之后自动再试")
+    if bot.settings.get("dm", guild_id=interaction.guild_id):
+        lines.append(
+            f"私信：开（成员可以私信它，用这里的人设和记忆；私信里聊的可能被记进来、在他叫它的频道里被提起；"
+            f"也算进本服务器的预算，每人每天 ≤ ${view.dm_daily_budget_usd:g}）"
+        )
+    else:
+        lines.append("私信：关")
     if st["music_on"]:
         playing = f" · 现在{st['playing']}" if st["playing"] else ""
         lines.append(f"点歌：开（/ds-music，只能放 B站的，按歌名找算一次联网搜索）{discord_safe(playing)}")
@@ -445,6 +469,81 @@ async def _say_public(interaction: discord.Interaction, text: str, footer: str =
         await interaction.followup.send(text, allowed_mentions=none)
     else:
         await interaction.response.send_message(text, allowed_mentions=none)
+
+
+def register_dm_commands(bot: "DSBot") -> None:
+    dm = app_commands.Group(
+        name="ds-dm",
+        description="私信设置：私信里用哪个服务器的人设和记忆、今天的额度",
+        allowed_contexts=app_commands.AppCommandContext(guild=False, dm_channel=True, private_channel=False),
+    )
+
+    async def guild_choices(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        words = current.strip().casefold()
+        guilds = await bot.dm_candidates(interaction.user.id)
+        return [Choice(name=g.name[:100], value=str(g.id)) for g in guilds if not words or words in g.name.casefold()][:25]
+
+    @dm.command(name="服务器", description="私信里用哪个服务器的人设、长期记忆和人设卡（换了会清空私信记录）")
+    @app_commands.rename(target="服务器")
+    @app_commands.describe(target="你和它都在的服务器（输入几个字可以筛选）")
+    @app_commands.autocomplete(target=guild_choices)
+    async def dm_server(interaction: discord.Interaction, target: str) -> None:
+        user_id = interaction.user.id
+        guilds = await bot.dm_candidates(user_id)
+        guild = next((g for g in guilds if str(g.id) == target.strip() or g.name == target.strip()), None)
+        if guild is None:
+            await _reply(interaction, "找不到这个服务器：要是你和它都在、那边也开着私信的服务器（从弹出的列表里选）。")
+            return
+        name = discord_safe(guild.name)
+        current = bot.store.dm_home(user_id)
+        channel_id = interaction.channel_id
+        if current is not None and current[0] == guild.id:
+            bot.store.set_dm_home(user_id, guild.id, channel_id)
+            bot.dm_channels[channel_id] = (user_id, guild.id)
+            await _reply(interaction, f"私信现在用的就是「{name}」。")
+            return
+        bot.store.set_dm_home(user_id, guild.id, channel_id)
+        bot.dm_channels[channel_id] = (user_id, guild.id)
+        if current is not None:
+            bot.engine.move_dm(channel_id, guild.id)
+        log.info("%s 把私信改挂到服务器 %s", user_id, guild.id)
+        await _reply(
+            interaction,
+            f"好了，私信里改用「{name}」的人设、长期记忆和你在那里的人设卡来聊。"
+            + ("之前的私信记录清空了（服务器那边的记忆不受影响）。" if current is not None else "")
+            + "\n⚠️ 私信里聊的事可能会记进那边的长期记忆和你的人设卡，你在那边的频道里叫它时也可能被提起。",
+        )
+
+    @dm.command(name="状态", description="私信现在用哪个服务器、今天私信花了多少")
+    async def dm_status(interaction: discord.Interaction) -> None:
+        user_id = interaction.user.id
+        home = bot.store.dm_home(user_id)
+        guild = bot.get_guild(home[0]) if home is not None else None
+        if guild is None:
+            await _reply(interaction, "私信还没定用哪个服务器：随便跟它说句话就会定下来，或者用 `/ds-dm 服务器` 选一个。")
+            return
+        now = time.time()
+        spent = bot.store.channel_spent(bot.ledger.day(now), interaction.channel_id)
+        cap = bot.settings.get("dm_daily_budget_usd", guild_id=guild.id)
+        lines = [
+            f"私信用的是「{discord_safe(guild.name)}」的人设、长期记忆和人设卡。",
+            "⚠️ 私信里聊的事可能会记进那边的长期记忆和你的人设卡；你在那边的频道里叫它时，它也可能提起刚在私信里聊的。"
+            "不想让别人知道的，跟它说一声“保密”。",
+        ]
+        if user_id == bot.secrets.owner_id:
+            lines.append(f"今天私信花了 ${spent:.4f}（你是 bot 的主人，不受每人上限限制）")
+        else:
+            lines.append(f"今天私信花了 ${spent:.4f} / ${cap:g}")
+        if not bot.dm_open(guild):
+            lines.append("⚠️ 那个服务器现在关掉了私信：再跟它说话时会换一个服务器（会清空私信记录）")
+        await _reply(interaction, "\n".join(lines))
+
+    @dm.command(name="清空", description="清空私信里的聊天记录（服务器的长期记忆和你的人设卡不受影响）")
+    async def dm_reset(interaction: discord.Interaction) -> None:
+        bot.engine.reset_channel(interaction.channel_id)
+        await _reply(interaction, "私信记录清空了，它从头开始（服务器的长期记忆和你的人设卡不受影响）。")
+
+    bot.tree.add_command(dm)
 
 
 def register_music_commands(bot: "DSBot") -> None:
@@ -745,7 +844,8 @@ def register_commands(bot: "DSBot") -> None:
     async def set_cmd(
         interaction: discord.Interaction, key: Choice[str], value: str, scope: Optional[Choice[str]] = None
     ) -> None:
-        target = _target(interaction, scope)
+        # 私信不在任何频道、类别里：只看全服务器这一级
+        target = _target(interaction, scope) if key.value != "dm" else ("guild", interaction.guild_id, "全服务器")
         if target is None:
             await _reply(interaction, NO_CATEGORY)
             return
@@ -797,7 +897,7 @@ def register_commands(bot: "DSBot") -> None:
 
     # 人人都能用（不设 default_permissions）：只能管自己的卡
     @bot.tree.command(name="ds-rp", description="查看、修改你在这个服务器的人设卡（只有你自己看得到）")
-    @app_commands.guild_only()
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
     @app_commands.rename(action="操作")
     @app_commands.describe(action="编辑（不选就是编辑）/ 改回上一版 / 清空")
     @app_commands.choices(action=CARD_ACTIONS)
@@ -807,6 +907,12 @@ def register_commands(bot: "DSBot") -> None:
             await _reply(interaction, "人设卡没有启用。")
             return
         guild_id, user_id = interaction.guild_id, interaction.user.id
+        if guild_id is None:  # 私信里：私信挂的那个服务器的卡
+            home = bot.store.dm_home(user_id)
+            if home is None or bot.get_guild(home[0]) is None:
+                await _reply(interaction, "先私信我随便说句话，定下私信用哪个服务器，再来改人设卡。")
+                return
+            guild_id = home[0]
         value = action.value if action is not None else "edit"
         if value == "undo":
             name = getattr(interaction.user, "display_name", None) or interaction.user.name
@@ -825,6 +931,7 @@ def register_commands(bot: "DSBot") -> None:
             await interaction.response.send_modal(CardModal(bot, guild_id, card.text if card else ""))
 
     register_music_commands(bot)
+    register_dm_commands(bot)
 
     @bot.tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
@@ -853,17 +960,23 @@ def register_commands(bot: "DSBot") -> None:
             return False
         return True
 
+    async def owner_keys(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        return owner_key_choices(current)
+
     @owner.command(name="设置", description="调整参数：全局默认，或者指定某个服务器")
     @app_commands.rename(key="参数", value="值", target="服务器id")
     @app_commands.describe(
-        key="要改哪个参数", value="新的值；填“默认”恢复", target="只改某个服务器就填它的 ID；不填 = 全局默认"
+        key="要改哪个参数（输入几个字可以筛选）", value="新的值；填“默认”恢复", target="只改某个服务器就填它的 ID；不填 = 全局默认"
     )
-    @app_commands.choices(key=[Choice(name=SPECS[k].label, value=k) for k in OWNER_SET_KEYS])
-    async def owner_set(
-        interaction: discord.Interaction, key: Choice[str], value: str, target: Optional[str] = None
-    ) -> None:
+    @app_commands.autocomplete(key=owner_keys)
+    async def owner_set(interaction: discord.Interaction, key: str, value: str, target: Optional[str] = None) -> None:
         if not await is_owner(interaction):
             return
+        found = owner_key(key)
+        if found is None:
+            await _reply(interaction, f"没有叫「{discord_safe(key)}」的参数：从输入框弹出的列表里选一个。")
+            return
+        key = Choice(name=SPECS[found].label, value=found)
         if target and target.strip():
             if not target.strip().isdecimal():
                 await _reply(interaction, "服务器 ID 应该是一串数字（右键服务器 → 复制服务器 ID）。")

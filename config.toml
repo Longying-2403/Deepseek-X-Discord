@@ -49,6 +49,7 @@ share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆
 images = true                     # 让它自己发表情包库里的图、上网找图（找到的图它会先看一遍再决定发不发）
 cards = true                      # 人设卡：记住群友自己说的称呼、设定、喜好（群友用 /ds-rp 管自己的卡，管理员看不到）
 long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/ds 长期记忆 管理）
+dm = true                         # 私信：服务器成员可以私信它（私信里用这个服务器的人设、记忆和人设卡；/ds 设置 私信 关掉）
 
 # —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
@@ -63,6 +64,7 @@ web_search = true                 # 被叫到时，需要最新信息就上网�
 daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
 links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页要填 TAVILY_API_KEY）
 daily_image_limit = 10            # 每个服务器每天最多上网找几次图（要 TAVILY_API_KEY；0 = 不找，表情包库照常能用）
+dm_daily_budget_usd = 0.2         # 每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）
 
 [engine]
 # 一般不用动

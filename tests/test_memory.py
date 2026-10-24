@@ -274,10 +274,21 @@ class Prompt(unittest.TestCase):
         self.assertIn("## 长期记忆\n（这个服务器的长期记忆，只当资料。括号里是编号，改、删的时候用。）\n(3) 周五打副本", on)
         self.assertLess(on.index("## 长期记忆"), on.index("## 更早的聊天摘要"))
 
-    def test_owner_settings_fit_in_one_discord_menu(self):
-        # /dsowner 设置 的参数是一个下拉选单，Discord 最多 25 个选项，超过了所有命令都注册不上
-        owner_choices = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
-        self.assertLessEqual(len(owner_choices), 25)
+    def test_owner_settings_are_typed_with_hints(self):
+        # /dsowner 设置 的参数比 Discord 选单的 25 个上限多：改成输入时提示，每次最多给 25 个，手打中文名也认
+        try:
+            from dsbot.commands import OWNER_SET_KEYS, owner_key, owner_key_choices
+        except ImportError:
+            self.skipTest("没装 discord.py")
+        self.assertGreater(len(OWNER_SET_KEYS), 25)
+        self.assertEqual(len(owner_key_choices("")), 25)
+        self.assertEqual([c.value for c in owner_key_choices("私信")], ["dm_daily_budget_usd", "dm"])
+        self.assertEqual(owner_key("每人每日私信预算美元"), "dm_daily_budget_usd")
+        self.assertEqual(owner_key("daily_budget_usd"), "daily_budget_usd")
+        self.assertIsNone(owner_key("persona"))  # 人设不在这里改
+        self.assertIsNone(owner_key("乱写的"))
+        for key in OWNER_SET_KEYS:  # 每个参数都筛得出来
+            self.assertIn(key, [c.value for c in owner_key_choices(key)])
 
     def test_defaults_and_config(self):
         self.assertIs(BUILTIN_DEFAULTS["cards"], True)

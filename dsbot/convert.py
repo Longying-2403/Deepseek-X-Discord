@@ -157,7 +157,9 @@ def convert_message(
     aliases: list[str],
     is_ours: Callable[[int], bool],
     fetch_url: FetchUrl | None = None,
+    dm_guild: int | None = None,
 ) -> IncomingMessage:
+    """dm_guild：私信时，这段私信挂在的那个服务器（私信里每句话都算在叫它）。"""
     channel = message.channel
     parent_id = getattr(channel, "parent_id", None)  # 只有帖子（Thread）有 parent_id
 
@@ -180,6 +182,8 @@ def convert_message(
         )
     if not mentions_bot and aliases:
         mentions_bot = alias_called(own_text, aliases)
+    if dm_guild is not None:
+        mentions_bot = True  # 私信里只有它和对方：每句都是跟它说的
 
     reply_to_id: int | None = None
     reply_to_bot = False
@@ -263,7 +267,7 @@ def convert_message(
     return IncomingMessage(
         message_id=message.id,
         channel_id=channel.id,
-        guild_id=message.guild.id,
+        guild_id=dm_guild if dm_guild is not None else message.guild.id,
         parent_id=parent_id,
         category_id=safe_category_id(channel),
         author_id=message.author.id,
@@ -279,4 +283,5 @@ def convert_message(
         links=links,
         awaiting_embeds=not embeds and bool(URL_RE.search(message.clean_content or "")),
         mentioned=mentioned,
+        private=dm_guild is not None,
     )

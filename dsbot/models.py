@@ -123,6 +123,7 @@ class IncomingMessage:
     awaiting_embeds: bool = False  # 带链接但预览还没到（Discord 会稍后补上）
     from_owner: bool = False  # 引擎设置：发言的是 OWNER_ID（dsowner）本人
     mentioned: list[tuple[int, str]] = field(default_factory=list)  # 这条消息 @ 到的人（不含 bot）：(用户 ID, 显示的名字)
+    private: bool = False  # 私信（guild_id 是这段私信挂在的那个服务器：记忆、人设卡、预算都用它的）
 
     @property
     def addressed(self) -> bool:
@@ -239,6 +240,7 @@ class ChannelInfo:
     bot_name: str
     emojis: list[str] = field(default_factory=list)  # 这个服务器里 bot 能用的自定义表情名（排好序）
     stickers: list[str] = field(default_factory=list)  # 这个服务器里能发的贴图名（排好序）
+    dm_with: str | None = None  # 私信：对方的名字（不是私信是 None）
 
 
 @dataclass
@@ -251,6 +253,7 @@ class ChannelPlace:
     category_id: int | None = None
     public: bool = False  # 所有人（@everyone）都看得到；拿不准时为 False
     private_thread: bool = False  # 私密帖子（只有被邀请的人看得到）
+    dm: bool = False  # 私信（guild_id 是它挂在的那个服务器）
 
 
 @dataclass

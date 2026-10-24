@@ -47,6 +47,7 @@ from .models import (
 from .prompts import (
     CARD_QUOTED,
     DEFAULT_PERSONA,
+    DM_LIMIT_TEXT,
     EDIT_NOTE,
     EDITED_MARK,
     IMAGE_BLOCKED,
@@ -128,6 +129,9 @@ SEND_FAIL_BACKOFF = 1800.0
 HOUSEKEEP_EVERY = 600.0
 IDLE_EVICT = 3600.0  # 闲置这么久的频道，把内存里的对话记录先放掉（需要时再从数据库读）
 EMBED_WAIT = 2.0  # 叫它的消息带链接、预览还没到时，最多等这么久再回
+DM_SETTLE = 3.0  # 私信：对方停下这么久（没再发消息）才回，连着发的几条一起回
+DM_TYPING_HOLD = 6.0  # 私信：发完消息后又显示“正在输入”，这么久之内当他还在打字
+DM_MAX_WAIT = 15.0  # 私信：最多等这么久就回（一直在打字也回）
 AUTO_READ_WINDOW = 120.0  # 同一个人发了文件、这么久之内又叫它，就直接读那个文件
 RECENT_FILES_KEEP = 30  # 每个频道记住最近多少条带文件的消息（模型可以用 read 要求读）
 MAX_READ_TARGETS = 3
@@ -435,6 +439,14 @@ def _ago(seconds: float) -> str:
     return f"{seconds / 3600:.0f} 小时前"
 
 
+_SECRET_WORDS = ("保密", "秘密", "别告诉", "不要告诉", "别说出去", "不要说出去", "别跟别人说", "不要跟别人说", "别让别人知道", "不要让别人知道", "私下")
+
+
+def _secret(lines: list[str]) -> bool:
+    """私信里的这段对话提到了要保密：不带到服务器的频道里。"""
+    return any(word in line for line in lines for word in _SECRET_WORDS)
+
+
 def _pick_lines(lines: list[str], about: str | None, budget: int) -> list[str]:
     """翻记录时挑哪些行：有关键词就挑提到它的（连同前后一行），否则挑最近的；总长不超过 budget。"""
     missed = False
@@ -550,6 +562,10 @@ class ChannelState:
     people: dict[int, str] = field(default_factory=dict)  # 最近说过话、被 @ 过的人 -> 名字（有序：最近的在后）
     edit_notes: dict[int, tuple[int, IncomingMessage]] = field(default_factory=dict)  # 很早的消息被编辑：消息 -> (编号, 改过的样子)
     music_seen: str | None = None  # 上次告诉它“语音频道里正在放什么”的那一行（变了才再写；没在放是 None）
+    private: bool = False  # 私信（guild_id 是它挂在的那个服务器）
+    last_typing_at: float = 0.0  # 最近一次有人在打字
+    dm_waiting: bool = False  # 私信：正在等对方说完
+    dm_notice_day: str = ""  # 私信：哪天已经说过“今天聊太多了”
 
 
 class Engine:
@@ -616,14 +632,21 @@ class Engine:
     # ------------------------------------------------------------------ 输入
 
     def state(
-        self, channel_id: int, guild_id: int, parent_id: int | None = None, category_id: int | None = None
+        self,
+        channel_id: int,
+        guild_id: int,
+        parent_id: int | None = None,
+        category_id: int | None = None,
+        private: bool = False,
     ) -> ChannelState:
         st = self.states.get(channel_id)
         if st is None:
             view = self.settings.view(guild_id, channel_id, parent_id, category_id)
             st = ChannelState(channel_id, guild_id, parent_id, QuotaBucket(view.quota_capacity), category_id)
+            st.private = private
             self.states[channel_id] = st
             return st
+        st.private = st.private or private
         if st.parent_id is None and parent_id is not None:
             st.parent_id = parent_id
         if category_id is not None or parent_id is None:
@@ -643,18 +666,29 @@ class Engine:
             )
         )
 
+    def _allowed(self, msg: IncomingMessage) -> bool:
+        """这条消息它看不看：频道看“允许回应”；私信看它挂的那个服务器开没开私信。"""
+        if msg.private:
+            return bool(self.settings.get("dm", guild_id=msg.guild_id))
+        return self.enabled(msg.guild_id, msg.channel_id, msg.parent_id, msg.category_id)
+
+    @staticmethod
+    def _live(st: ChannelState, view: View) -> bool:
+        """这里现在开着：频道看“允许回应”，私信看那个服务器开没开私信。"""
+        return bool(view.dm) if st.private else bool(view.enabled)
+
     async def handle_message(self, msg: IncomingMessage) -> None:
         now = self.clock()
         msg.received_at = now
         msg.from_owner = self._is_owner(msg)
-        if not self.enabled(msg.guild_id, msg.channel_id, msg.parent_id, msg.category_id):
+        if not self._allowed(msg):
             # 不在允许的区域：完全不看，之前攒下的也一起丢掉
             st = self.states.get(msg.channel_id)
             if st is not None and st.pending:
                 st.pending.clear()
                 st.first_human_at = None
             return
-        st = self.state(msg.channel_id, msg.guild_id, msg.parent_id, msg.category_id)
+        st = self.state(msg.channel_id, msg.guild_id, msg.parent_id, msg.category_id, msg.private)
         view = self.view(st)
 
         st.pending.append(msg)
@@ -673,6 +707,13 @@ class Engine:
         if st.turns.is_new_turn(msg.author_id, now, self.ec.turn_merge_seconds):
             st.bucket.on_turn(view.refill_turns, view.quota_capacity)
 
+        if st.private:
+            # 私信：每句都在跟它说话。等他说完（停下几秒、不在打字）再一起回，连着发的几条只问一次；
+            # 花费另有每人每天的上限（_dm_over），不按“每分钟点名几次”限
+            msg.trigger = True
+            st.mention_due = True
+            self._kick_dm(st)
+            return
         if msg.addressed:
             if self.limiter.allow((msg.guild_id, msg.author_id), view.mention_rate_limit, 60.0, now):
                 msg.trigger = True
@@ -694,7 +735,9 @@ class Engine:
     def handle_typing(self, channel_id: int) -> None:
         st = self.states.get(channel_id)
         if st is not None:
-            st.last_activity_at = max(st.last_activity_at, self.clock())
+            now = self.clock()
+            st.last_activity_at = max(st.last_activity_at, now)
+            st.last_typing_at = max(st.last_typing_at, now)
 
     def find_message(self, channel_id: int, message_id: int) -> IncomingMessage | None:
         """还没处理完（缓冲中或正在处理）的消息。"""
@@ -820,7 +863,13 @@ class Engine:
         if not self.store.message_rows(channel_id, message_ids):
             return None
         place = self.transport.locate(channel_id)
-        return self.state(channel_id, guild_id, place.parent_id if place else None, place.category_id if place else None)
+        return self.state(
+            channel_id,
+            guild_id,
+            place.parent_id if place else None,
+            place.category_id if place else None,
+            bool(place and place.dm),
+        )
 
     def _queue_fix(self, st: ChannelState, message_id: int, updated: IncomingMessage | None) -> None:
         if st.fixes.get(message_id, 0) is None and updated is not None:
@@ -842,7 +891,7 @@ class Engine:
         finally:
             st.fixing = False
         if st.mention_due and st.pending:
-            self._kick(st)  # 改记录的时候有人叫它：轮到它了
+            self._wake(st)  # 改记录的时候有人叫它：轮到它了
 
     def _flush_fixes(self, st: ChannelState, conv: Conversation) -> None:
         """把还没改写进记录的删除、编辑先改掉（调用方拿着锁）。开始新的一轮、压缩、整理记忆之前都先做一次，
@@ -956,7 +1005,7 @@ class Engine:
             if st.scheduled or st.lock.locked() or not st.pending:
                 continue
             if st.mention_due or self._proactive_ready(st, now):
-                self._kick(st)
+                self._wake(st)
         if now - self._last_housekeep >= HOUSEKEEP_EVERY:
             self._last_housekeep = now
             self._housekeep(now)
@@ -1003,6 +1052,43 @@ class Engine:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def _wake(self, st: ChannelState) -> None:
+        """有人叫它、还没回：频道马上开始这一轮；私信先等对方说完。"""
+        if st.private:
+            self._kick_dm(st)
+        else:
+            self._kick(st)
+
+    def _kick_dm(self, st: ChannelState) -> None:
+        """私信：等对方说完再开始这一轮（已经在等了就不用再等一份）。"""
+        if self.closing or st.dm_waiting:
+            return
+        st.dm_waiting = True
+        task = asyncio.get_running_loop().create_task(self._dm_settle(st))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _dm_settle(self, st: ChannelState) -> None:
+        try:
+            start = self.clock()
+            for _ in range(20):
+                if self.closing:
+                    return
+                now = self.clock()
+                last = max((m.received_at for m in st.pending if not m.is_bot), default=start)
+                ready = last + DM_SETTLE
+                if st.last_typing_at > last:  # 发完又开始打字了：多等一会儿
+                    ready = max(ready, st.last_typing_at + DM_TYPING_HOLD)
+                wait = min(ready, start + DM_MAX_WAIT) - now
+                if wait <= 0:
+                    break
+                await self.sleep(wait)
+                if self.clock() <= now:
+                    break  # 时间没走（测试里的假时钟）：不再等了
+        finally:
+            st.dm_waiting = False
+        self._kick(st)
+
     async def drain(self) -> None:
         """等所有进行中的轮次结束（测试和关闭时用）。"""
         while pending := [t for t in self._tasks if not t.done()]:
@@ -1018,9 +1104,27 @@ class Engine:
         hard = guild >= g_budget * mult or total >= t_budget * mult
         return over, hard
 
+    def _dm_over(self, st: ChannelState, view: View, triggers: list[IncomingMessage], over: bool, now: float) -> bool:
+        """私信超了预算：那个服务器今天的预算用完了（先留给群里点名），或者这个人今天私信花的到了上限。
+        bot 主人自己私信只受“超过预算好几倍连点名也不回”的限制。"""
+        if any(m.from_owner for m in triggers):
+            return False
+        if over:
+            return True
+        return self.store.channel_spent(self.ledger.day(now), st.channel_id) >= view.dm_daily_budget_usd
+
+    async def _dm_limit_notice(self, st: ChannelState, last: IncomingMessage, now: float) -> None:
+        """今天第一次超的时候说一声，之后只加个表情。"""
+        day = self.ledger.day(now)
+        if st.dm_notice_day != day:
+            st.dm_notice_day = day
+            if await self.transport.send(st.channel_id, DM_LIMIT_TEXT, reply_to=None, ping=False) is not None:
+                return
+        await self._safe_react(st, last.message_id, "💤")
+
     def _proactive_ready(self, st: ChannelState, now: float) -> bool:
         view = self.view(st)
-        if not view.enabled or not view.proactive or st.first_human_at is None:
+        if st.private or not view.enabled or not view.proactive or st.first_human_at is None:
             return False
         if now < self.paused_until or now < st.error_until:
             return False
@@ -1041,7 +1145,7 @@ class Engine:
             st.scheduled = False
             st.mention_due = False
             self._prune(st, self.clock())
-            if not self.view(st).enabled:
+            if not self._live(st, self.view(st)):
                 st.pending.clear()  # 刚被管理员关掉的区域：攒着的消息也不处理了
                 st.first_human_at = None
             if st.pending and (any(m.trigger for m in st.pending) or self._proactive_ready(st, self.clock())):
@@ -1061,7 +1165,7 @@ class Engine:
                     st.inflight = []
                     st.gallery = []  # 找到的候选图只在这一轮里能挑
         if st.mention_due and st.pending:
-            self._kick(st)
+            self._wake(st)
 
     # ------------------------------------------------------------------ 一轮
 
@@ -1116,6 +1220,12 @@ class Engine:
                 m.trigger = False
                 await self._safe_react(st, m.message_id, "⚠️")
             return
+        if st.private and kind == "mention" and self._dm_over(st, view, triggers, over, now):
+            log.info("私信 %s：今天的私信预算用完了，不回", st.channel_id)
+            for m in triggers:
+                m.trigger = False
+            await self._dm_limit_notice(st, triggers[-1], now)
+            return
 
         if any(m.trigger and m.awaiting_embeds and now - m.received_at < EMBED_WAIT for m in batch):
             # GIF / 图片链接的预览图通常晚一两秒才到（消息更新事件会把图补进同一个对象里）
@@ -1158,7 +1268,7 @@ class Engine:
         ] + context
         playing = st.music_seen  # 写进记录的那一行（没在放是 None）
         if kind == "mention":
-            status = self.music.status(st.guild_id) if self.music is not None else None
+            status = self.music.status(st.guild_id) if self.music is not None and not st.private else None
             playing = MUSIC_NOW.format(text=neutralize(one_line(status, 300))) if status is not None else None
             if playing != st.music_seen:  # 换了歌、停了：告诉它一声（只写在这一轮里，system prompt 不变）
                 context.append(playing or MUSIC_IDLE)
@@ -1682,7 +1792,7 @@ class Engine:
     ) -> str:
         """模型的 music 动作：替叫它的那个人点歌、切歌、删歌……also：同一个人接着写的别的删歌（和 action 一起删）；
         state：这一轮的点歌动作共用的记录（music.RoundState）。"""
-        if self.music is None:
+        if self.music is None or st.private:
             return MUSIC_OFF
         m = self._music_who(st, action, numbered, targets)
         if m is None:
@@ -2107,8 +2217,8 @@ class Engine:
         place = self.transport.locate(channel_id)
         if place is None:
             return False
-        if place.public:
-            return True
+        if place.public or place.dm:
+            return True  # 私信：和服务器互通（私信里它会提醒自己，他要保密的不记）
         explicit = self.settings.overrides("channel", channel_id).get(key)
         if explicit is None and place.parent_id is not None and not place.private_thread:
             explicit = self.settings.overrides("channel", place.parent_id).get(key)
@@ -2564,12 +2674,13 @@ class Engine:
         last_id = turns[-1].id
         cards_ok = self._cards_on(view) and self.implicit_ok(st.channel_id, "cards")
         memory_ok = self._memory_on(view) and self.implicit_ok(st.channel_id, "long_memory")
-        if view.enabled and (cards_ok or memory_ok) and self._over_budget(st, view, now)[0]:
+        live = self._live(st, view)
+        if live and (cards_ok or memory_ok) and self._over_budget(st, view, now)[0]:
             if upto is not None:
                 self._set_reviewed(st, conv, last_id)  # 这部分马上就压掉了，以后也整理不了
             st.last_review_at = now  # 今天的预算用完了：隔一阵再看（预算是按天算的）
             return None
-        chunks = self._review_chunks(turns, info.bot_name) if view.enabled and (cards_ok or memory_ok) else []
+        chunks = self._review_chunks(turns, info.bot_name) if live and (cards_ok or memory_ok) else []
         if not any(chunk.sids for chunk in chunks):
             # 这里不整理（关掉了，或者是私密频道），或者这段时间没有群友说话：以后打开了也不回头整理这些旧的
             self._set_reviewed(st, conv, last_id)
@@ -2713,6 +2824,7 @@ class Engine:
             entry_max=self.ec.memory_entry_chars,
             count=len(memories or []),
             max_entries=self.ec.memory_max_entries,
+            dm=st.private,
         )
         prompt = [
             {"role": "system", "content": system},
@@ -2815,6 +2927,8 @@ class Engine:
 
     def shares_out(self, channel_id: int, place: ChannelPlace) -> bool:
         """这个频道的内容能不能给同服务器别的频道看：开了共享；私密频道还要在这个频道上单独开。"""
+        if place.dm:
+            return False  # 私信里的原话不给服务器里的频道翻（要记的整理进长期记忆、人设卡）
         view = self.settings.view(place.guild_id, channel_id, place.parent_id, place.category_id)
         if not view.enabled or not view.share_memory:
             return False
@@ -2918,7 +3032,8 @@ class Engine:
             memory_max=self.ec.memory_max_entries,
             card_max=self.ec.card_max_chars,
             entry_max=self.ec.memory_entry_chars,
-            music=self.music is not None,
+            music=self.music is not None and not st.private,
+            dm_with=neutralize(one_line(info.dm_with, 32)) if info.dm_with is not None else None,
         )
 
     def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:
@@ -3097,18 +3212,25 @@ class Engine:
 
         返回 (文字行, 带进来的对话序号, 这次写进去的名单)。
         """
-        if not view.share_memory:
-            return [], {}, None
         lines: list[str] = []
         listed: tuple[str, ...] | None = None
-        sources = self.shared_sources(st.guild_id, st.channel_id)
-        names = tuple(self._display(p) for _, p in sources[: self.ec.share_list_limit])
-        if names != st.listed:
-            listed = names
-            lines += render_channel_list(list(names), len(sources) - len(names))
+        sources = self.shared_sources(st.guild_id, st.channel_id) if view.share_memory else []
+        if view.share_memory:
+            names = tuple(self._display(p) for _, p in sources[: self.ec.share_list_limit])
+            if names != st.listed:
+                listed = names
+                lines += render_channel_list(list(names), len(sources) - len(names))
         ttl = self.ec.share_recent_hours * 3600
         marks: dict[int, int] = {}
         allowed = {cid: p for cid, p in sources}
+        # 私信和服务器的频道之间，同一个人自己跟它的对话不管开没开记忆共享都带：
+        # 在频道里叫它时带上他刚才的私信，私信里带上他刚才在公开频道里跟它聊的
+        for key in {(st.guild_id, m.author_id) for m in triggers if not m.is_bot}:
+            for item in self.interactions.get(key, ()):
+                if item.channel_id not in allowed and item.channel_id != st.channel_id:
+                    place = self.transport.locate(item.channel_id)
+                    if place is not None and place.guild_id == st.guild_id and (place.public if st.private else place.dm):
+                        allowed[item.channel_id] = place
         for m in triggers:
             if m.is_bot or m.author_id in marks:
                 continue
@@ -3116,14 +3238,18 @@ class Engine:
             fresh = [
                 item
                 for item in self.interactions.get((st.guild_id, m.author_id), ())
-                if item.channel_id in allowed and item.seq > since and now - item.at <= ttl
+                if item.channel_id in allowed
+                and item.seq > since
+                and now - item.at <= ttl
+                and not (allowed[item.channel_id].dm and _secret(item.lines))
             ]
             if not fresh:
                 continue
             marks[m.author_id] = max(item.seq for item in fresh)  # 只带最近两次；更早的就不带了
             for item in fresh[-2:]:
-                where = self._display(allowed[item.channel_id])
-                block = [f"（{neutralize(one_line(m.author_name, 32))} {_ago(now - item.at)}在 {where} 跟你聊过："]
+                place = allowed[item.channel_id]
+                where = "私信里" if place.dm else f" {self._display(place)} "
+                block = [f"（{neutralize(one_line(m.author_name, 32))} {_ago(now - item.at)}在{where}跟你聊过："]
                 block += ["  " + neutralize(line) for line in item.lines]
                 block[-1] += "）"
                 lines += block
@@ -3773,6 +3899,16 @@ class Engine:
                 self.interactions[key] = deque(kept, maxlen=INTERACTIONS_PER_PERSON)
             else:
                 del self.interactions[key]
+
+    def move_dm(self, channel_id: int, guild_id: int) -> None:
+        """私信改挂到别的服务器：清掉私信的记录（里面是原来那个服务器的人设卡、记忆），之后用新服务器的。"""
+        self.reset_channel(channel_id)
+        self.store.move_conversation(channel_id, guild_id)
+        st = self.states.get(channel_id)
+        if st is not None:
+            st.guild_id = guild_id
+            st.pending.clear()  # 按原来的服务器收的消息
+            st.first_human_at = None
 
     def status(
         self, guild_id: int, channel_id: int, parent_id: int | None, category_id: int | None = None
