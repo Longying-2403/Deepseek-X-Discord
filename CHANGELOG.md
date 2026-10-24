@@ -2,6 +2,67 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.3.1] - 2026-10-24
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**改进**
+
+- **`/ds-dm` 在服务器里也能用了**：以前只在和它的私信里才出现，在服务器频道里打 `/` 找不到。现在两边都能用，回复只有自己看得到。在服务器里用 `/ds-dm 服务器`、不填，就是把私信挂到这个服务器；`/ds-dm 状态`、`/ds-dm 清空` 在服务器里用，看的、清的也是你和它的私信。
+- 先用命令定了服务器、之后第一次私信时，它也会在私信里先说明一次用的是哪个服务器、私信里聊的可能在频道里被提起。
+- `/ds-dm 状态` 说得更清楚：它已经不在原来那个服务器里、你退出了那个服务器、那边关掉了私信时，会说下次私信会改用哪个服务器，或者私信暂时聊不了。
+
+**修复**
+
+- 在服务器里用 `/ds-dm 服务器` 时，Discord 一时查不到你是不是成员（或者你刚加入这个服务器），会被错说成“这个服务器关掉了私信”。
+- 一条私信正在处理的时候用 `/ds-dm 服务器` 换了服务器，这段私信可能一直挂在原来的服务器上（用原来那边的人设和记忆），直到重启；这一轮还没写完的“记住……”也可能写进新的服务器。现在换服务器要等那条私信处理完，换了之后这一轮剩下的记忆不写、按原来的服务器写好的回复也不发；还没来得及回的私信不丢，改到新的服务器下接着回。
+- 从来没私信过就换服务器，不会再说“之前的私信记录清空了”。
+- `/ds-dm` 只跟着 bot 进服务器：把它装在自己账号上的人，不会在 bot 不在的服务器里看到它。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。
+- 确认新版生效：日志里有 `dsbot 2.3.1 启动中`。Discord 会缓存命令列表：服务器里打 `/` 还看不到 `/ds-dm` 的话，电脑版按 Ctrl+R，手机版把 App 完全关掉再打开。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `discord_app.py`：同一个人的私信挂在哪个服务器，定下来、换掉、按它处理一条私信，都拿着这个人的 `dm_lock`（`_on_dm` 从定服务器到交给引擎一直拿着）；换服务器走新的 `set_dm_home`。
+- `engine.py`：私信的消息说的服务器和引擎里记的不一样时，按换了服务器处理（`move_dm`）；`move_dm` 不再丢掉还没回的私信；`_apply_memory_actions` 和 `_execute` 在半路换了服务器时停下。
+- 测试增加到 838 个（`test_dm.py` 加了 `/ds-dm` 命令本身的测试）。
+- CONTRIBUTING.md 第 12 条补上：改私信挂的服务器要拿 `dm_lock`，换服务器只能经过 `move_dm`。
+
+### English
+
+**Changed**
+
+- **`/ds-dm` now works in servers too**: before, it only showed up in your DM with the bot, so typing `/` in a server channel didn't find it. It now works in both places, and the replies are only visible to you. Running `/ds-dm 服务器` in a server without picking one attaches your DM to that server; `/ds-dm 状态` and `/ds-dm 清空` run in a server still show and clear your DM with the bot.
+- If you picked the server with the command first, your first DM afterwards still gets the explanation in the DM itself: which server it uses, and that what you say there may come up in its channels.
+- `/ds-dm 状态` (status) is clearer: when the bot is no longer in the old server, you left it, or it turned DMs off, it tells you which server the next DM will switch to, or that DMs won't work for now.
+
+**Fixed**
+
+- Running `/ds-dm 服务器` in a server could wrongly say "this server turned off DMs" when Discord briefly couldn't confirm you were a member (or you had just joined).
+- Switching servers with `/ds-dm 服务器` while a DM was being handled could leave that DM attached to the old server (using its persona and memory) until a restart, and a "remember…" from that round could be written to the new server. Switching now waits for that DM to be handled; after a switch, the rest of that round's memory writes are skipped and a reply written for the old server isn't sent. DMs it hadn't answered yet aren't lost: they're answered under the new server.
+- Switching servers before you ever DMed it no longer says "your DM history was cleared".
+- `/ds-dm` only comes with the bot when it's added to a server, so people who installed the app on their own account don't see it in servers the bot isn't in.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`.
+- To check that the new version took effect: the log shows `dsbot 2.3.1 启动中`. Discord caches the command list, so if `/ds-dm` still doesn't show up when you type `/` in a server, press Ctrl+R on desktop, or fully close and reopen the mobile app.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `discord_app.py`: deciding, switching or acting on which server a person's DM belongs to now always happens under that person's `dm_lock` (`_on_dm` holds it from picking the server until the message reaches the engine); switching goes through the new `set_dm_home`.
+- `engine.py`: when a DM arrives saying a different server than the engine has, it's treated as a switch (`move_dm`); `move_dm` no longer drops DMs it hasn't answered yet; `_apply_memory_actions` and `_execute` stop if the server changes partway.
+- There are now 838 tests (`test_dm.py` now tests the `/ds-dm` commands themselves).
+- CONTRIBUTING.md rule 12 now says that changing which server a DM belongs to must hold `dm_lock`, and that switching servers must go through `move_dm`.
+
 ## [2.3.0] - 2026-10-24
 
 > 英文版这次没有更新，还是 2.0.0。
