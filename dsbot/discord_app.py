@@ -135,7 +135,7 @@ class DiscordTransport:
         if gid is not None:
             guild = self.client.get_guild(gid)
             me = guild.me if guild is not None else None
-            user = getattr(channel, "recipient", None)
+            user = getattr(channel, "recipient", None) or self.client.dm_user(channel_id)
             member = guild.get_member(user.id) if guild is not None and user is not None else None
             return ChannelInfo(
                 guild_name=guild.name if guild is not None else "未知服务器",
@@ -143,7 +143,7 @@ class DiscordTransport:
                 bot_name=me.display_name if me is not None else (self.client.user.display_name if self.client.user else "bot"),
                 emojis=sorted({e.name for e in usable_emojis(guild)}),
                 stickers=[],  # 服务器自己的贴图只能在那个服务器里发
-                dm_with=(member or user).display_name if (member or user) is not None else "对方",
+                dm_with=(member or user).display_name if (member or user) is not None else self.client.dm_names.get(channel_id, "对方"),
             )
         guild = getattr(channel, "guild", None)
         me = guild.me if guild is not None else None
@@ -188,8 +188,16 @@ class DiscordTransport:
             private_thread=private_thread,
         )
 
-    async def _resolve(self, channel_id: int) -> Any:
+    def _cached(self, channel_id: int) -> Any:
+        """缓存里的频道。私信频道 discord.py 不放进缓存（收到私信时现做一个、用完就扔）：
+        换成只认 ID 的那种，照样能显示“正在输入”、发消息、加表情。"""
         channel = self.client.get_channel(channel_id)
+        if channel is None and self.client.dm_guild(channel_id) is not None:
+            channel = self.client.get_partial_messageable(channel_id, type=discord.ChannelType.private)
+        return channel
+
+    async def _resolve(self, channel_id: int) -> Any:
+        channel = self._cached(channel_id)
         if channel is None:
             try:
                 channel = await self.client.fetch_channel(channel_id)
@@ -276,7 +284,7 @@ class DiscordTransport:
             return False
 
     def typing(self, channel_id: int) -> _SafeTyping:
-        return _SafeTyping(self.client.get_channel(channel_id))
+        return _SafeTyping(self._cached(channel_id))
 
     def channel_names(self, guild_id: int) -> dict[str, set[int]]:
         """服务器里它看得到的频道和帖子：名字 -> 频道（它在话里写 #频道名 时换成真的频道链接）。"""
@@ -514,6 +522,7 @@ class DSBot(discord.Client):
         self._members: dict[tuple[int, int], tuple[bool, float]] = {}  # (服务器, 人) -> (在不在, 什么时候问的)
         self._dm_locks: dict[int, asyncio.Lock] = {}
         self._dm_noticed: dict[int, float] = {}  # 人 -> 上次说“私信聊不了”的时间
+        self.dm_names: dict[int, str] = {}  # 私信频道 -> 对方最近的名字（discord.py 的用户缓存不一定留着）
         self.music: MusicPlayer | None = None  # 点歌：登录时才启用（--check 不会去动下载目录）
         self.music_problem = "还没启动"  # 点歌用不了的原因
 
@@ -625,6 +634,11 @@ class DSBot(discord.Client):
         """私信频道挂在哪个服务器（不是私信、或者还没定是 None）。"""
         entry = self.dm_channels.get(channel_id)
         return entry[1] if entry is not None else None
+
+    def dm_user(self, channel_id: int) -> Any:
+        """私信的对方（最近私信过它的人 discord.py 会记着；重启以后还没私信过的是 None）。"""
+        entry = self.dm_channels.get(channel_id)
+        return self.get_user(entry[0]) if entry is not None else None
 
     def dm_open(self, guild: Any) -> bool:
         return bool(self.settings.get("dm", guild_id=guild.id))
@@ -744,6 +758,7 @@ class DSBot(discord.Client):
         if message.type not in CHAT_MESSAGE_TYPES:
             return
         channel_id = message.channel.id
+        self.dm_names[channel_id] = message.author.display_name
         # 定服务器到交给引擎一气呵成：中间有人用 /ds-dm 换了服务器，这条也不会按原来的服务器处理
         async with self.dm_lock(message.author.id):
             guild, note = await self._dm_home(message.author, channel_id)

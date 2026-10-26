@@ -723,5 +723,67 @@ class Switching(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.store.conversation_channels(OTHER), [DM])
 
 
+
+class TransportDM(unittest.IsolatedAsyncioTestCase):
+    """discord.py 不把私信频道放进缓存：“正在输入”、发消息、对方的名字都不能靠 get_channel。"""
+
+    def make(self):
+        try:
+            import discord
+
+            from dsbot.discord_app import DiscordTransport
+        except ImportError:
+            self.skipTest("没装 discord.py")
+        typed, made = [], []
+
+        class Partial:
+            def __init__(self, cid):
+                self.id, self.guild = cid, None
+
+            def typing(self):
+                outer = self
+
+                class Ctx:
+                    async def __aenter__(self):
+                        typed.append(outer.id)
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                return Ctx()
+
+        def partial(cid, type=None):
+            made.append((cid, type))
+            return Partial(cid)
+
+        guild = NS(id=GUILD, name="测试服", me=NS(display_name="小D"), emojis=[], stickers=[], get_member=lambda uid: None)
+        client = NS(
+            get_channel=lambda cid: None,  # 私信频道不在缓存里
+            get_partial_messageable=partial,
+            get_guild=lambda gid: guild if gid == GUILD else None,
+            user=NS(display_name="小D"),
+            dm_channels={DM: (11, GUILD)},
+            dm_names={DM: "阿明"},
+        )
+        client.dm_guild = lambda cid: client.dm_channels.get(cid, (None, None))[1]
+        client.dm_user = lambda cid: None  # 用户缓存里没有了
+        return DiscordTransport(client), typed, made, discord
+
+    async def test_typing_shows_in_dms(self):
+        transport, typed, made, discord = self.make()
+        async with transport.typing(DM):
+            pass
+        self.assertEqual(typed, [DM])
+        self.assertEqual(made, [(DM, discord.ChannelType.private)])
+        async with transport.typing(CHANNEL):  # 不是私信、又不在缓存里：不显示，也不出错
+            pass
+        self.assertEqual(typed, [DM])
+
+    async def test_dm_partner_name_without_the_user_cache(self):
+        transport, *_ = self.make()
+        info = transport.channel_info(DM)
+        self.assertEqual((info.dm_with, info.guild_name, info.channel_name), ("阿明", "测试服", "私信"))
+
+
 if __name__ == "__main__":
     unittest.main()
