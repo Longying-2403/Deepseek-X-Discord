@@ -2,6 +2,47 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.3.2] - 2026-10-27
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**修复**
+
+- **私信里不显示“正在输入”**：discord.py 收到私信时不把私信频道放进缓存，按 ID 找不到，“正在输入”就悄悄跳过了。现在私信里它想回复、看文件、上网查的时候都会显示“正在输入”。
+- 私信里它不知道对方叫什么（提示词里写的是“对方”），现在用对方的名字。
+- 私信里发消息、加表情不用每次再去问 Discord 要一次频道。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.3.2 启动中`。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `discord_app.py` 的 `DiscordTransport._cached`：私信频道不在缓存里时换成 `get_partial_messageable`；`DSBot.dm_names` 记着私信对方最近的名字。
+- 测试增加到 840 个（`test_dm.py` 的 `TransportDM`）。
+
+### English
+
+**Fixed**
+
+- **No "typing…" in DMs**: discord.py doesn't keep DM channels in its cache, so looking one up by ID found nothing and the typing indicator was silently skipped. It now shows "typing…" in DMs while it's writing a reply, reading files or searching.
+- In DMs it didn't know the other person's name (the prompt said "the other person"); it now uses their name.
+- Sending messages and adding reactions in DMs no longer asks Discord for the channel each time.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.3.2 启动中`.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `DiscordTransport._cached` in `discord_app.py` falls back to `get_partial_messageable` when a DM channel isn't cached; `DSBot.dm_names` keeps the DM partner's latest name.
+- There are now 840 tests (`TransportDM` in `test_dm.py`).
+
 ## [2.3.1] - 2026-10-24
 
 > 英文版这次没有更新，还是 2.0.0。
