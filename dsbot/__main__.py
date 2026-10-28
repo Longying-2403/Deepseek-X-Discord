@@ -94,6 +94,15 @@ def check(config_path: str) -> int:
     else:
         how = "Tavily" if secrets.tavily_api_key else "B站自己的搜索（容易被风控，建议填 TAVILY_API_KEY）"
         print(f"✓ 点歌：yt-dlp、ffmpeg、语音库都在（只能放 B站的；按歌名找歌用 {how}）")
+    port = int(cfg.bot.desktop_port or 0)
+    if not secrets.desktop_token:
+        print("· 桌面操作：没填 DESKTOP_TOKEN，不开（可选）")
+    elif port <= 0:
+        print("· 桌面操作：config.toml 里 desktop_port = 0，不开")
+    elif len(secrets.desktop_token) < 16:
+        print("! 桌面操作：DESKTOP_TOKEN 太短，至少 16 个字符（电脑上的小程序也不认）")
+    else:
+        print(f"✓ 桌面操作：电脑上的小程序连端口 {port}（docker-compose.yml 里要开这个端口）")
     from .memes import MemeLibrary
 
     memes = MemeLibrary(cfg.bot.meme_dir, cfg.bot.server_meme_dir, max_bytes=cfg.engine.image_max_bytes)

@@ -3,3 +3,5 @@ data/
 __pycache__/
 *.pyc
 .venv/
+desktop_agent/agent.toml
+desktop_agent/agent.log

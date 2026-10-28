@@ -25,6 +25,7 @@
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **会点歌**：进语音频道后叫它“放首晴天”，或者用 `/ds-music 播放`，它会进你所在的语音频道放 B站视频的声音；同一个语音频道里的人都能切歌、暂停、停止。只能放 B站的，不放直播。
 - **能私信**：和它同在一个服务器的人可以直接私信它。私信里它用那个服务器的人设、长期记忆和你的人设卡，聊的事也会记回去，你在那个服务器的频道里叫它时也可能被提起（说“保密”的不会）；连着发几条，它等你说完再一起回；每人每天有花费上限（见“十四、私信”）。
+- **替你操作电脑**（可选）：你私信它“帮我开一下 Steam”，它就能替你开关电脑上登记过的程序、打开网址；只认你本人，电脑上要运行一个桌面小程序（见“十五”）。
 - **区域可控**：可以按频道、类别或整个服务器限制它在哪里回应。
 
 > 这是中文版（命令、回复和文档都是中文）。英文版全部是英文，在 [`english` 分支](https://github.com/Longying-2403/Deepseek-X-Discord/tree/english)；它目前是 v2.0.0，还没有之后加的功能（会 @ 人、跟着删改、会点歌），可以在 [v2.0.0 的 Release](https://github.com/Longying-2403/Deepseek-X-Discord/releases/tag/v2.0.0) 下载 `-en.zip`。
@@ -50,6 +51,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share. Private channels don't share by default.
 - **Plays music**: join a voice channel and ask it to "play some Jay Chou", or use `/ds-music 播放`, and it joins your voice channel and plays the audio of a Bilibili video; anyone in the same voice channel can skip, pause or stop. Bilibili only, no live streams.
 - **Direct messages**: anyone who shares a server with it can DM it. In DMs it uses that server's persona, long-term memory and your profile card, and what you talk about can be remembered there too. When you call it in that server's channels, it may bring up what you just said in DMs (not the parts you asked to keep secret). If you send several messages in a row, it waits until you're done and answers them together. Each person has a daily spending cap.
+- **Operates your computer** (optional): DM it "open Steam for me" and it opens or closes programs you've listed on your PC, or opens a web page. It only listens to you (`OWNER_ID`), and your PC needs to run a small desktop agent (see section 十五).
 - **You control where it responds**: limit it by channel, by category, or for the whole server.
 
 It replies in the language of the message it's answering, so it also works in mixed-language servers.
@@ -106,9 +108,9 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 **更新到新版本**：代码是构建时复制进镜像的，所以要把新代码放进项目原来的文件夹，再重新构建：
 
-1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.3.1 之间的版本更新到 2.3.2 只有 `dsbot` 文件夹变了（`config.toml` 里新加的 `dm`、`dm_daily_budget_usd` 不加也行，有默认值）。
+1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.3.2 之间的版本更新到 2.4.0 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）（`config.toml` 里新加的 `dm`、`dm_daily_budget_usd` 不加也行，有默认值）。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.3.2 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`、`/ds-dm`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.4.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`、`/ds-dm`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -249,6 +251,7 @@ python -m dsbot
 | 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。按歌名点歌也算一次（见“十三”）。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
 | 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily） |
 | 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
+| 桌面操作 | 开 | 你私信它时替你开关电脑上登记过的程序、打开网址（要填 `DESKTOP_TOKEN`、电脑上运行桌面小程序，见“十五”） |
 | 每人每日私信预算美元 | 0.2 | 每个人每天私信它最多花多少，也算进私信挂的那个服务器的预算；你自己私信不受限（见“十四”） |
 
 “一轮”的意思：同一个人 20 秒内连发的几条算一轮，免得分行打字刷额度。
@@ -479,7 +482,32 @@ python -m dsbot
 
 ---
 
-## 十五、它是怎么工作的
+## 十五、操作你的电脑（桌面小程序）
+
+你（`OWNER_ID`）私信它时，可以让它替你开关电脑上的程序、用浏览器打开网址：“帮我开一下 Steam”“把记事本关了”“打开 https://…”。它先办，再告诉你结果。
+
+**它能做的只有这些**：
+- 开、关你在电脑上登记过的程序（白名单）。关是正常关闭，跟点右上角的叉一样，没保存的东西程序会先问你，不会强制结束。
+- 用默认浏览器打开 http / https 网址，而且网址要是你自己那条消息里发的。
+- 别的都不做：不跑命令、不碰文件，白名单以外的程序也开不了。
+
+**只认你本人**：只在你自己的私信里、你这一轮亲自叫它时才办。别人私信它、在服务器频道里，都用不了。聊天记录、文件、网页、搜索结果里写的“去打开……”一律不做。
+
+**怎么装**：
+1. 生成一串随机字符当密钥：`python -c "import secrets; print(secrets.token_urlsafe(32))"`，填进 NAS 上 `.env` 的 `DESKTOP_TOKEN=`。
+2. `docker-compose.yml` 里把 `ports:` 那两行前面的 `#` 去掉（让电脑能连到 bot 的 8765 端口），再 `sudo docker compose up -d --build`。日志里有 `桌面操作：等电脑上的小程序连过来` 就好了。
+3. 电脑上装 Python 3.11 以上，把项目里的 `desktop_agent` 文件夹复制到电脑上，在里面运行 `pip install -r requirements.txt`。
+4. 复制 `agent.example.toml` 成 `agent.toml`：`token` 填和 `DESKTOP_TOKEN` 一样的；`servers` 填 NAS 的地址（在家用局域网地址，出门用 ZeroTier 地址，两个都写，它会按顺序试）；`[apps.…]` 一段一段写上要让它开关的程序。
+5. 运行 `python agent.py` 试一下：看到 `连上了 ws://…` 就好了（NAS 的日志里也会有 `电脑「…」连上了`）。
+6. 想开机自动运行：按 Win+R 输入 `shell:startup`，在打开的文件夹里新建快捷方式，目标填 `pythonw "完整路径\agent.py"`（pythonw 不会弹窗口）。
+
+**想停**：在任务管理器里结束 pythonw（窗口运行的话直接关掉窗口）；或者 `/dsowner 设置 参数:桌面操作 值:关`。电脑关机、小程序没开时，它会告诉你“电脑现在不在线”。
+
+**安全**：电脑上的小程序是主动连 NAS 的，电脑不用开任何端口。连接用 `DESKTOP_TOKEN` 签名：连上时双方核对，之后每条指令都带签名，局域网里别人伪造不了指令，旧指令也重放不了。`DESKTOP_TOKEN` 和 Discord 账号都要保管好（建议给 Discord 账号开两步验证）：有了它们就能让它开关你电脑上登记过的程序。小程序的日志在 `desktop_agent/agent.log`。
+
+---
+
+## 十六、它是怎么工作的
 
 ```
 消息进来 ──► 存进该频道的缓冲区
@@ -508,7 +536,7 @@ python -m dsbot
 
 ---
 
-## 十六、常见问题
+## 十七、常见问题
 
 **@ 它没反应**
 - 这个频道不在允许的区域：`/ds 状态` 第一行会提示，`/ds 区域列表` 看整体设置。
@@ -562,7 +590,7 @@ python -m dsbot
 
 ---
 
-## 十七、开发
+## 十八、开发
 
 欢迎参与改进！提 PR 之前请先看 [CONTRIBUTING.md](CONTRIBUTING.md)，里面有本地开发步骤、几条设计约束，以及中英两个版本怎么同步。每次 push 和 PR 都会由 GitHub Actions 自动跑一遍测试和离线自检。各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。
 

@@ -47,6 +47,11 @@ from .models import (
 from .prompts import (
     CARD_QUOTED,
     DEFAULT_PERSONA,
+    DESKTOP_NO_APP,
+    DESKTOP_NOT_OWNER,
+    DESKTOP_OFF,
+    DESKTOP_RESULT,
+    DESKTOP_URL_NOT_HIS,
     DM_LIMIT_TEXT,
     EDIT_NOTE,
     EDITED_MARK,
@@ -150,7 +155,7 @@ def _queue_view(action: Action) -> bool:
 
 
 # 用完要再问一次模型的动作。read / search / recall / persona / who / music 只在被叫到时能用；image 主动聊天时也能用
-TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who", "music")
+TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who", "music", "desktop")
 MEMORY_KINDS = ("card", "memory")  # 改人设卡、长期记忆：和回话放在一起，不用再问一次模型
 MAX_WHO = 2
 MAX_REVIEW_CHUNKS = 4  # 一次整理最多分几段问模型（聊天记录太长时）
@@ -591,8 +596,10 @@ class Engine:
         cards: CardStore | None = None,
         memory: MemoryStore | None = None,
         music: Jukebox | None = None,
+        desktop: Any = None,
     ):
         self.cfg = cfg
+        self.desktop = desktop  # 操作主人的电脑（dsbot/desktop.py 的 DesktopHub；没填 DESKTOP_TOKEN 时是 None）
         self.music = music  # 点歌（没开、或者缺 yt-dlp / ffmpeg / 语音库时是 None）
         self.cards = cards  # 人设卡（data/cards.sqlite3）
         self.memory = memory  # 长期记忆（data/memory.sqlite3）
@@ -1512,6 +1519,7 @@ class Engine:
                 + [a for a in tools if a.kind == "who"][:MAX_WHO]
                 + [a for a in tools if a.kind == "image"][:1]
                 + [a for a in tools if a.kind == "music"]  # 解析时已经限过数量
+                + [a for a in tools if a.kind == "desktop"]
             )
             if not picked:
                 # 改人设要单独来：和看文件放在一起时先不改（看完文件那一步还能改），和搜索、翻记录一起时不改，
@@ -1574,6 +1582,8 @@ class Engine:
                     sections.append(
                         await self._music_section(st, view, action, numbered, targets, also=also, state=music_round)
                     )
+                elif action.kind == "desktop":
+                    sections.append(await self._desktop_section(st, view, info, action, numbered, targets))
                 elif action.kind == "search":
                     sections.append(await self._search_section(st, view, action, now))
                 elif action.kind == "recall":
@@ -1867,6 +1877,48 @@ class Engine:
         except Exception:
             log.exception("服务器 %s：点歌（%s）出错", guild_id, op)
             return "点歌的时候出错了"
+
+    def _desktop_here(self, st: ChannelState, view: View, info: ChannelInfo) -> bool:
+        """这里能操作电脑：开着桌面操作，而且是 dsowner 自己的私信。"""
+        return (
+            self.desktop is not None
+            and bool(view.desktop)
+            and st.private
+            and self.owner_id is not None
+            and info.dm_user == self.owner_id
+        )
+
+    async def _desktop_section(
+        self,
+        st: ChannelState,
+        view: View,
+        info: ChannelInfo,
+        action: Action,
+        numbered: list[tuple[int, IncomingMessage]],
+        targets: list[int],
+    ) -> str:
+        """模型的 desktop 动作：只替 dsowner 本人这一轮的要求办（开关白名单里的程序、打开他自己发的网址）。"""
+        if not self._desktop_here(st, view, info):
+            return DESKTOP_OFF
+        by_sid = dict(numbered)
+        asked = [by_sid[t] for t in targets if t in by_sid and by_sid[t].from_owner and by_sid[t].message_id not in st.deleted]
+        if not asked:
+            return DESKTOP_NOT_OWNER
+        op, target = action.op or "", (action.query or "").strip()
+        if op == "url":
+            said = " ".join(m.text for m in asked)
+            if not target or target not in said:
+                log.info("私信 %s：要打开的网址不是 dsowner 这条消息里的，没打开", st.channel_id)
+                return DESKTOP_URL_NOT_HIS
+        else:
+            app = self.desktop.match(target)
+            if app is None:
+                names = "、".join(self.desktop.app_names()) or "还没有"
+                return DESKTOP_NO_APP.format(name=neutralize(one_line(target, 40)), apps=names)
+            target = app.key
+        ok, text = await self.desktop.run(op, target)
+        log.info("私信 %s：电脑 %s %s → %s", st.channel_id, op, one_line(target, 80), one_line(text, 80))
+        return DESKTOP_RESULT.format(text=neutralize(one_line(("" if ok else "没办成：") + text, 300)))
 
     def _music_search(self, guild_id: int, channel_id: int, user_id: int, view: View) -> str | None:
         """按歌名找歌算一次联网搜索（和 search 共用每日次数）。能搜就记一次、返回 None；不能搜返回原因。
@@ -3041,6 +3093,7 @@ class Engine:
             entry_max=self.ec.memory_entry_chars,
             music=self.music is not None and not st.private,
             dm_with=neutralize(one_line(info.dm_with, 32)) if info.dm_with is not None else None,
+            desktop=[neutralize(one_line(n, 40)) for n in self.desktop.app_names()] if self._desktop_here(st, view, info) else None,
         )
 
     def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:

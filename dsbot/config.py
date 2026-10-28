@@ -61,6 +61,7 @@ _SPEC_LIST = [
     Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
     Spec("links", "读链接", bool, "owner", "被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily）"),
     Spec("daily_image_limit", "每日找图上限", int, "owner", "每个服务器每天最多上网找几次图（0 = 不找，表情包库照常能用）", 0, 1000),
+    Spec("desktop", "桌面操作", bool, "owner", "替你开关电脑上登记过的程序、打开网址（只认你本人；要在电脑上运行桌面小程序）"),
     Spec("dm_daily_budget_usd", "每人每日私信预算美元", float, "owner", "每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）", 0, 100),
 ]
 
@@ -97,6 +98,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "links": True,
     "daily_image_limit": 10,
     "dm_daily_budget_usd": 0.2,
+    "desktop": True,
 }
 
 # 一键档位：只动“话量”相关的三个参数
@@ -197,6 +199,7 @@ class BotConfig:
     cards_database: str = "data/cards.sqlite3"  # 人设卡（和聊天记录分开存，方便备份、搬家）
     memory_database: str = "data/memory.sqlite3"  # 长期记忆
     music: bool = True  # 点歌（B站，/ds-music）：要 yt-dlp、ffmpeg 和语音库（Docker 镜像里都装好了）
+    desktop_port: int = 8765  # 桌面小程序连过来的端口（还要在 .env 填 DESKTOP_TOKEN、docker-compose.yml 开这个端口；0 = 不开）
 
 
 @dataclass
@@ -324,6 +327,7 @@ class Secrets:
     control_guild_id: int | None = None
     discord_proxy: str | None = None
     tavily_api_key: str | None = None  # 可选：打开网页、上网找图都靠它；DeepSeek 自带搜索用不了时也改用它
+    desktop_token: str | None = None  # 可选：桌面小程序连过来时核对的密钥（不填就不开桌面操作）
 
 
 def load_secrets(env: dict[str, str] | None = None) -> Secrets:
@@ -344,4 +348,5 @@ def load_secrets(env: dict[str, str] | None = None) -> Secrets:
         control_guild_id=control_id,
         discord_proxy=env.get("DISCORD_PROXY", "").strip() or None,
         tavily_api_key=env.get("TAVILY_API_KEY", "").strip() or None,
+        desktop_token=env.get("DESKTOP_TOKEN", "").strip() or None,
     )

@@ -27,6 +27,7 @@ from .convert import (
     usable_emojis,
     usable_stickers,
 )
+from .desktop import DesktopHub
 from .engine import Engine
 from .images import MAX_RAW_BYTES
 from .ledger import Ledger
@@ -143,6 +144,7 @@ class DiscordTransport:
                 bot_name=me.display_name if me is not None else (self.client.user.display_name if self.client.user else "bot"),
                 emojis=sorted({e.name for e in usable_emojis(guild)}),
                 stickers=[],  # 服务器自己的贴图只能在那个服务器里发
+                dm_user=self.client.dm_channels[channel_id][0],
                 dm_with=(member or user).display_name if (member or user) is not None else self.client.dm_names.get(channel_id, "对方"),
             )
         guild = getattr(channel, "guild", None)
@@ -515,6 +517,13 @@ class DSBot(discord.Client):
             cards=cards,
             memory=memory,
         )
+        # 操作主人的电脑：填了 DESKTOP_TOKEN、开了端口才有（电脑上的桌面小程序连过来）
+        self.desktop = (
+            DesktopHub(secrets.desktop_token, port=int(cfg.bot.desktop_port))
+            if secrets.desktop_token and int(cfg.bot.desktop_port or 0) > 0
+            else None
+        )
+        self.engine.desktop = self.desktop
         self._ticker: asyncio.Task[None] | None = None
         self._closing: asyncio.Task[None] | None = None  # 收到 SIGTERM 后开始的关闭
         self._cdn: Any = None  # 下载预览图、贴图用的 aiohttp 会话（第一次用时才建）
@@ -540,6 +549,12 @@ class DSBot(discord.Client):
         except (NotImplementedError, RuntimeError):
             pass  # Windows 不支持
         self._start_music()
+        if self.desktop is not None:
+            try:
+                await self.desktop.start()
+            except OSError as exc:
+                log.error("桌面操作开不了（端口 %s 被占用？）：%s", self.desktop.port, exc)
+                self.desktop = self.engine.desktop = None
         if self.cfg.bot.sync_commands_on_start:
             try:
                 synced = await self.tree.sync()
@@ -617,6 +632,11 @@ class DSBot(discord.Client):
                     await asyncio.wait_for(self.music.close(), timeout=5)  # 离开语音频道
                 except Exception as exc:
                     log.warning("关闭点歌出错：%r", exc)
+            if self.desktop is not None:
+                try:
+                    await asyncio.wait_for(self.desktop.close(), timeout=5)  # 和电脑上的小程序断开
+                except Exception as exc:
+                    log.warning("关闭桌面操作出错：%r", exc)
             await self.llm.close()
             await self.searcher.close()
             await self.web.close()

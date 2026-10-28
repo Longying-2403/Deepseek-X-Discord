@@ -241,6 +241,7 @@ class ChannelInfo:
     emojis: list[str] = field(default_factory=list)  # 这个服务器里 bot 能用的自定义表情名（排好序）
     stickers: list[str] = field(default_factory=list)  # 这个服务器里能发的贴图名（排好序）
     dm_with: str | None = None  # 私信：对方的名字（不是私信是 None）
+    dm_user: int | None = None  # 私信：对方的用户 ID
 
 
 @dataclass

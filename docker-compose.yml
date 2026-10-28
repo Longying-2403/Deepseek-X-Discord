@@ -8,3 +8,6 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro   # 改配置不用重新构建：docker compose up -d --force-recreate
       - ./data:/app/data                    # 数据库：对话记录、设置、花费
+    # 桌面操作（可选，见 README“十五”）：让电脑上的桌面小程序连到这个端口。要用就去掉下面两行前面的 #
+    # ports:
+    #   - "8765:8765"

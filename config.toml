@@ -23,6 +23,7 @@ server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上
 cards_database = "data/cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
 memory_database = "data/memory.sqlite3"   # 长期记忆
 music = true                      # 点歌：在语音频道里放 B站视频的声音（/ds-music，或者 @它“放首歌”）；false = 关掉
+desktop_port = 8765               # 桌面操作：电脑上的桌面小程序连这个端口（还要填 .env 的 DESKTOP_TOKEN、在 docker-compose.yml 开端口）；0 = 不开
 
 [pricing]
 # 美元 / 百万 token，按高峰价填；非高峰自动乘 offpeak_factor。
@@ -65,6 +66,7 @@ daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = �
 links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页要填 TAVILY_API_KEY）
 daily_image_limit = 10            # 每个服务器每天最多上网找几次图（要 TAVILY_API_KEY；0 = 不找，表情包库照常能用）
 dm_daily_budget_usd = 0.2         # 每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）
+desktop = true                    # 桌面操作：你私信叫它时替你开关电脑上登记过的程序、打开网址（没填 DESKTOP_TOKEN 时不管这项）
 
 [engine]
 # 一般不用动

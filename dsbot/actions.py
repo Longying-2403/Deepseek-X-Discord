@@ -20,6 +20,13 @@ _MEMORY_KINDS = ("memory", "memo", "long_memory", "note", "长期记忆")
 _CARD_KINDS = ("card", "set_card", "update_card", "persona_card", "人设卡")
 _WHO_KINDS = ("who", "lookup_card", "find_card", "card_lookup", "查人设卡")
 _MUSIC_KINDS = ("music", "play_music", "song", "play", "点歌", "放歌")
+_DESKTOP_KINDS = ("desktop", "computer", "pc", "电脑")
+_DESKTOP_OPS = {
+    "open": "open", "launch": "open", "start": "open", "run": "open", "打开": "open", "开": "open", "启动": "open",
+    "close": "close", "quit": "close", "exit": "close", "kill": "close", "stop": "close", "关": "close", "关掉": "close", "关闭": "close",
+    "url": "url", "browse": "url", "open_url": "url", "link": "url", "网址": "url", "网页": "url",
+}
+MAX_DESKTOP = 3  # 一轮最多让电脑办几件事
 MAX_MUSIC = 3  # 一轮最多点几首
 MAX_REMOVE = 10  # 一轮最多从队列里删几首
 _MUSIC_OPS = {
@@ -239,6 +246,14 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
                 actions.append(Action("music", to, query=query, op=op))
             elif op is not None and op != "play" and not any(a.kind == "music" and a.op == op for a in actions):
                 actions.append(Action("music", to, op=op))
+        elif kind in _DESKTOP_KINDS:
+            op = _DESKTOP_OPS.get(str(item.get("op", item.get("action", "")) or "").strip().lower())
+            target = _text_field(item, "target", "app", "program", "name", "url", "link")
+            if op is None and target and target.lower().startswith(("http://", "https://")):
+                op = "url"
+            same = any(a.kind == "desktop" and (a.op, a.query) == (op, target) for a in actions)
+            if op and target and not same and sum(a.kind == "desktop" for a in actions) < MAX_DESKTOP:
+                actions.append(Action("desktop", to, op=op, query=target[:500]))
         elif kind in ("read", "read_file", "open", "look"):
             if to is not None and not any(a.kind == "read" and a.to == to for a in actions):
                 actions.append(Action("read", to))

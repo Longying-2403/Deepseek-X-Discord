@@ -1,0 +1,36 @@
+# DeepSeek 群友 · 桌面小程序的配置。复制成 agent.toml 再改。
+
+# bot 在哪：按顺序试，连上一个就用它。在家走局域网，出门走 ZeroTier（电脑要加入同一个 ZeroTier 网络）
+servers = [
+  "ws://192.168.31.13:8765/desktop",   # NAS 的局域网地址
+  "ws://10.147.17.58:8765/desktop",    # NAS 的 ZeroTier 地址
+]
+
+# 和 NAS 上 .env 里的 DESKTOP_TOKEN 一模一样（一串随机字符，至少 16 个）
+token = "在这里填 DESKTOP_TOKEN"
+
+# 它能开关的程序，只有这些。每个程序一段：
+#   name     它在 Discord 里怎么叫这个程序
+#   open     怎么打开：程序路径（.exe）、快捷方式（.lnk），或者 steam:// 这类链接
+#   args     可选：打开时带的参数（写了 args 就直接运行 open 这个 exe）
+#   process  可选：关的时候按这个进程名关（任务管理器“详细信息”里看）；不填就只能开、不能关
+#   aliases  可选：别的叫法
+# 路径里的反斜杠要写两个（C:\\Program Files\\...），或者用单引号包起来（'C:\Program Files\...'）
+
+[apps.notepad]
+name = "记事本"
+open = "notepad.exe"
+process = "notepad.exe"
+aliases = ["notepad"]
+
+[apps.steam]
+name = "Steam"
+open = "steam://open/main"
+process = "steam.exe"
+aliases = ["蒸汽"]
+
+# [apps.chrome]
+# name = "Chrome"
+# open = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+# process = "chrome.exe"
+# aliases = ["谷歌浏览器", "浏览器"]

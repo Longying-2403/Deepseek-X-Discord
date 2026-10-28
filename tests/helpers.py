@@ -94,6 +94,7 @@ class FakeTransport:
         self.member_searches: list[list[str]] = []
         self.mentions: list[tuple[int, ...]] = []  # 每条发出去的文字真的提醒了谁（和 sent 一一对应）
         self.dm_with: dict[int, str] = {}  # 私信频道 -> 对方的名字（还要在 places 里登记成 dm=True）
+        self.dm_users: dict[int, int] = {}  # 私信频道 -> 对方的用户 ID
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
         return ChannelInfo(
@@ -103,6 +104,7 @@ class FakeTransport:
             emojis=list(self.emojis),
             stickers=list(self.stickers),
             dm_with=self.dm_with.get(channel_id),
+            dm_user=self.dm_users.get(channel_id),
         )
 
     def locate(self, channel_id: int) -> ChannelPlace | None:

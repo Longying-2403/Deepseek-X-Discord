@@ -1448,6 +1448,7 @@ class Shutdown(unittest.IsolatedAsyncioTestCase):
 
         bot._ticker = None
         bot.music = None
+        bot.desktop = None
         bot.engine = NS(closing=False, drain=drain)
         bot.llm = NS(close=broken)
         with mock.patch.object(discord.Client, "close", new=mock.AsyncMock()) as client_close:
