@@ -2,6 +2,65 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.4.0] - 2026-10-28
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **替你操作电脑（桌面操作，可选）**：你（`OWNER_ID`）私信它“帮我开一下 Steam”“把记事本关了”“打开 https://…”，它就替你开关电脑上登记过的程序、用默认浏览器打开网址，办完告诉你结果。
+  - 能做的只有这三种：开、关你在电脑上 `agent.toml` 里登记过的程序（关是正常关闭，跟点右上角的叉一样，没保存的东西程序会先问你），打开 http / https 网址（网址要是你自己那条消息里发的）。不跑命令、不碰文件。
+  - 只认你本人：只在你自己的私信里、你这一轮亲自叫它时才办。别人私信它、在服务器频道里都用不了；聊天记录、文件、网页里写的“去打开……”一律不做。
+  - 电脑上要运行一个桌面小程序（`desktop_agent` 文件夹，要 Python 3.11 以上）。小程序是主动连 NAS 的，电脑不用开端口；在家连局域网地址，出门可以连 ZeroTier 这类虚拟局域网地址，按顺序试。
+  - 连接用 `DESKTOP_TOKEN` 签名，每条指令也带签名和递增的编号，别人伪造不了，旧指令也重放不了。
+  - 电脑没开、小程序没运行时，它会告诉你“电脑现在不在线”。不想用了：`/dsowner 设置 参数:桌面操作 值:关`。
+
+**升级须知**
+
+- `dsbot` 文件夹变了，另外新加了 `desktop_agent` 文件夹。只换 `dsbot`、不填 `DESKTOP_TOKEN` 时，桌面操作不会开，其他一切照旧。
+- 想用桌面操作：在 `.env` 里填 `DESKTOP_TOKEN`，把 `docker-compose.yml` 里 `ports:` 那两行前面的 `#` 去掉，再 `sudo docker compose up -d --build`；然后在电脑上装好桌面小程序。步骤见 README 的“十五、操作你的电脑”。
+- 确认新版生效：日志里有 `dsbot 2.4.0 启动中`；填了 `DESKTOP_TOKEN` 的话还有 `桌面操作：等电脑上的小程序连过来`，小程序连上后有 `电脑「…」连上了`。
+- `config.toml` 里新加的 `desktop_port`、`desktop` 不加也行，都有默认值。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新文件 `dsbot/desktop.py`：`DesktopHub`，一个 aiohttp WebSocket 服务（容器里的 8765 端口），等小程序连过来；HMAC-SHA256 签名，连接时双方核对，指令编号只增不减。
+- 新文件夹 `desktop_agent`：电脑上运行的小程序 `agent.py`（只依赖 aiohttp），配置照着 `agent.example.toml` 写。
+- `actions.py` 新动作 `{"type":"desktop","op":"open|close|url","target":…}`，一轮最多 3 个；`engine.py` 的 `_desktop_here` / `_desktop_section` 负责只在 dsowner 的私信里、只认 dsowner 本人这一轮的消息才执行。
+- 新参数 `desktop`（dsowner 才能改），`config.toml` 的 `[bot]` 新加 `desktop_port`。
+- 测试增加到 857 个（`test_desktop.py`：解析、引擎、真的连一次小程序、小程序的动作）。
+
+### English
+
+**Added**
+
+- **Operates your computer (desktop control, optional)**: DM it as `OWNER_ID` with "open Steam for me", "close Notepad" or "open https://…", and it opens or closes programs you've listed on your PC, or opens a web page in your default browser, then tells you how it went.
+  - It can only do these three things: open or close programs listed in `agent.toml` on your PC (closing is a normal close, like clicking the X, so the program asks about unsaved work first), and open http / https links that appear in your own message. It never runs commands or touches files.
+  - It only listens to you: only in your own DMs, only for the message where you called it this turn. Other people's DMs and server channels can't use it, and "go open …" written in chat history, files or web pages is ignored.
+  - Your PC needs to run a small desktop agent (the `desktop_agent` folder, Python 3.11 or later). The agent connects out to the NAS, so the PC doesn't open any port. At home it uses the LAN address; on the road it can use a virtual LAN address such as ZeroTier, trying them in order.
+  - The connection is signed with `DESKTOP_TOKEN`, and every command carries a signature and an increasing number, so nobody can forge commands or replay old ones.
+  - When the PC is off or the agent isn't running, it tells you the computer is offline. To turn it off: `/dsowner 设置 参数:桌面操作 值:关`.
+
+**Upgrading**
+
+- The `dsbot` folder changed, and there's a new `desktop_agent` folder. If you only replace `dsbot` and don't set `DESKTOP_TOKEN`, desktop control stays off and everything else works as before.
+- To use desktop control: set `DESKTOP_TOKEN` in `.env`, remove the `#` in front of the two `ports:` lines in `docker-compose.yml`, then run `sudo docker compose up -d --build`; then set up the desktop agent on your PC. See section 十五 of the README.
+- To check the new version took effect: the log shows `dsbot 2.4.0 启动中`; with `DESKTOP_TOKEN` set it also shows `桌面操作：等电脑上的小程序连过来`, and `电脑「…」连上了` once the agent connects.
+- The new `desktop_port` and `desktop` settings in `config.toml` are optional and have defaults.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New file `dsbot/desktop.py`: `DesktopHub`, an aiohttp WebSocket server (port 8765 in the container) that waits for the agent; HMAC-SHA256 signing, both sides verify on connect, command numbers only go up.
+- New folder `desktop_agent`: the agent `agent.py` that runs on the PC (needs only aiohttp), configured from `agent.example.toml`.
+- New action in `actions.py`: `{"type":"desktop","op":"open|close|url","target":…}`, at most 3 per turn; `_desktop_here` / `_desktop_section` in `engine.py` make sure it only runs in dsowner's DMs, for dsowner's own message this turn.
+- New setting `desktop` (dsowner only); new `desktop_port` under `[bot]` in `config.toml`.
+- There are now 857 tests (`test_desktop.py`: parsing, engine, a real agent connection, the agent's actions).
+
 ## [2.3.2] - 2026-10-27
 
 > 英文版这次没有更新，还是 2.0.0。
