@@ -2,6 +2,63 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.5.0] - 2026-11-05
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**改进**
+
+- **联网搜索、读网页、按歌名找歌都先用 DeepSeek 的 Search / Fetch 接口**（2026-10-17 开放，用的就是 `DEEPSEEK_API_KEY`），Tavily 改成备用：
+  - **联网搜索**：改用 Search 接口，一次通常不到 1 秒（以前是让 DeepSeek 的模型边搜边整理，要好几秒到十几秒）。搜到的几条（标题、网站、日期、摘要）交给它自己读，挑对得上的说。DeepSeek 没搜到或者出错了，填了 `TAVILY_API_KEY` 的话改用 Tavily 再搜一次。
+  - **读网页**：群友发的网页先交给 Fetch 接口去读，读不了的（PDF、有的网站不让它看、整页都是图）再交给 Tavily。**不填 `TAVILY_API_KEY` 也能打开一般网页了**（以前只能读推文）。网页还是由 DeepSeek / Tavily 的服务器去读，NAS 自己不打开。
+  - **按歌名找歌**：先用 Search 接口只搜 bilibili.com，没找到再用 Tavily，最后才用 B站自己的搜索（它容易被风控拦下来）。讲这首歌的视频（分析、解析、讲解、演奏之类）也往后排，免得放成别人在讲歌。
+  - 上网找图还是只能用 Tavily（DeepSeek 的搜索不给图片）。
+- **费用**：Search、Fetch 都按次收费，每 1000 次 0.75 美元（一次 0.075 美分），只有搜到结果、读到内容才算钱，算进每日预算和私信预算。联网搜索比以前便宜（以前按 token 算，一次约 0.1–0.5 美分）。超了每日预算时和以前一样不搜，也不用 DeepSeek 读网页、按歌名找歌（推文、Tavily、B站自己的搜索不花钱，照常）。
+- 让它搜最近的事时，它会在关键词里写具体日期（“11月4日”比“昨晚”搜得准）；搜到的结果可能有不相关的、过时的，它会看清日期和来源再用。
+- `config.toml` 的 `base_url` 填了不带这两个接口的中转地址时，日志会提醒你（以前会被当成网页打不开）。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.5.0 启动中`。
+- `config.toml` 的 `[pricing]` 新加的 `search_per_1000`、`fetch_per_1000` 不加也行，有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 用不到了，留着也没关系。
+- `TAVILY_API_KEY` 现在只用来上网找图，以及在 DeepSeek 搜不到、读不了时备用，不填也行。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新文件 `dsbot/dstools.py`：`DeepSeekTools`（Search / Fetch 接口）。`search.py` 改成 Search 接口 → Tavily，Anthropic 兼容接口那一套（`parse_messages_response`、`estimate_search` 等）去掉了。
+- `SearchResult.paid`、`SearchError.paid`、`LinkResult.paid`：DeepSeek 算了钱的次数；`Pricing.search_cost()`、`fetch_cost()`。`LinkReader.read(..., pay=False)`：超了预算不用要花钱的读法。`Source.search(query, paid=..., pay=...)`：按歌名找歌算了钱时叫一下，记在这次找歌的那一行上；超了预算不用 DeepSeek。
+- 测试共 862 个（`test_share_search.py` 的 `SearchClient`、`test_links_images.py`、`test_music.py` 新增了 DeepSeek 接口和记账的测试）。
+
+### English
+
+**Improved**
+
+- **Web search, reading web pages and finding songs by name now go to DeepSeek's Search / Fetch APIs first** (opened on 2026-10-17, using the same `DEEPSEEK_API_KEY`), with Tavily as the backup:
+  - **Web search**: now uses the Search API and usually takes under a second (it used to have a DeepSeek model search and summarize, which took several seconds or more). The results it finds (title, site, date, summary) are handed to it to read, and it picks what's relevant. If DeepSeek finds nothing or fails, it searches again with Tavily when `TAVILY_API_KEY` is set.
+  - **Reading web pages**: pages people post are read through the Fetch API first; what it can't read (PDFs, sites that block it, pages that are all pictures) goes to Tavily. **Ordinary web pages now open without `TAVILY_API_KEY`** (before, only posts on X could). Pages are still read by DeepSeek's / Tavily's servers; the NAS never opens them itself.
+  - **Finding songs by name**: searches only bilibili.com through the Search API first, then Tavily, and only then Bilibili's own search (which is often blocked by its anti-bot checks). Videos that talk about the song (analysis, breakdowns, instrumental performances) are ranked lower too, so it doesn't end up playing someone discussing the song.
+  - Image search still needs Tavily (DeepSeek's search doesn't return images).
+- **Cost**: Search and Fetch are billed per request, $0.75 per 1,000 (0.075 US cents each), and only when they return results or page content. The cost counts toward the daily budget and the DM budget. Web search is cheaper than before (it used to be billed by tokens, roughly 0.1–0.5 US cents per search). Over the daily budget it still doesn't search, and it also stops using DeepSeek to read web pages or find songs by name (posts on X, Tavily and Bilibili's own search are free and keep working).
+- When searching for something recent, it writes the actual date in the query ("Nov 4" finds more than "last night"), and it checks the dates and sources of what it finds, since some results may be off-topic or out of date.
+- If `base_url` in `config.toml` points to a relay that doesn't offer these two APIs, the log now tells you (before, it looked like the web page couldn't be opened).
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.5.0 启动中`.
+- The new `search_per_1000` and `fetch_per_1000` under `[pricing]` in `config.toml` are optional and have defaults. `search_base_url`, `search_timeout_seconds` and `search_max_uses` under `[deepseek]` are no longer used; it's fine to leave them.
+- `TAVILY_API_KEY` is now only for image search and as a backup when DeepSeek can't search or read something; it's optional.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New file `dsbot/dstools.py`: `DeepSeekTools` (the Search / Fetch APIs). `search.py` now goes Search API → Tavily; the Anthropic-compatible code (`parse_messages_response`, `estimate_search` and so on) was removed.
+- `SearchResult.paid`, `SearchError.paid`, `LinkResult.paid`: how many DeepSeek calls were billed; `Pricing.search_cost()`, `fetch_cost()`. `LinkReader.read(..., pay=False)`: skip the paid way of reading when over budget. `Source.search(query, paid=..., pay=...)`: `paid` is called when a song search was billed and charged to that search's row; `pay=False` skips DeepSeek when over budget.
+- There are now 862 tests (new tests for the DeepSeek APIs and their billing in `SearchClient` in `test_share_search.py`, `test_links_images.py` and `test_music.py`).
+
 ## [2.4.0] - 2026-10-28
 
 > 英文版这次没有更新，还是 2.0.0。
