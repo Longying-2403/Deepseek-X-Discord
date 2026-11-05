@@ -177,15 +177,16 @@ class Stores(unittest.TestCase):
             self.assertEqual(Store(path).load_conversation(5, 1).reviewed_upto, 42)  # 再打开一次也没问题
 
     def test_parse_review(self):
-        cards, ops = parse_review(
+        cards, ops, dm_ops = parse_review(
             '```json\n{"cards": [{"to": "12", "text": "猫娘"}, {"to": 1, "text": ""}, "坏"], '
             '"memory": [{"add": "周五打副本"}, {"edit": "(3)", "text": "改"}, {"delete": "第4条"}, {"op": "add", "text": "x"}, {"edit": 5}]}\n```'
         )
         self.assertEqual(cards, [(12, "猫娘", None)])
         self.assertEqual([(o.op, o.no, o.text) for o in ops], [("add", None, "周五打副本"), ("edit", 3, "改"), ("delete", 4, None), ("add", None, "x")])
         self.assertIsNone(parse_review("不是 JSON"))
-        self.assertEqual(parse_review('{"cards": 5, "memory": true}'), ([], []))
-        self.assertEqual(parse_review('{"cards": {"to": 3, "name": "阿明", "text": "x"}}'), ([(3, "x", "阿明")], []))
+        self.assertEqual(dm_ops, [])  # 没写私信记忆
+        self.assertEqual(parse_review('{"cards": 5, "memory": true}'), ([], [], []))
+        self.assertEqual(parse_review('{"cards": {"to": 3, "name": "阿明", "text": "x"}}'), ([(3, "x", "阿明")], [], []))
         self.assertEqual((coerce_no("（7）"), coerce_no(True), coerce_no("七")), (7, None, None))
 
 
@@ -282,7 +283,7 @@ class Prompt(unittest.TestCase):
             self.skipTest("没装 discord.py")
         self.assertGreater(len(OWNER_SET_KEYS), 25)
         self.assertEqual(len(owner_key_choices("")), 25)
-        self.assertEqual([c.value for c in owner_key_choices("私信")], ["dm_daily_budget_usd", "dm"])
+        self.assertEqual([c.value for c in owner_key_choices("私信")], ["dm_daily_budget_usd", "dm", "dm_memory", "cross_server"])
         self.assertEqual(owner_key("每人每日私信预算美元"), "dm_daily_budget_usd")
         self.assertEqual(owner_key("daily_budget_usd"), "daily_budget_usd")
         self.assertIsNone(owner_key("persona"))  # 人设不在这里改
@@ -374,7 +375,7 @@ class CardsInChat(unittest.IsolatedAsyncioTestCase):
             await engine.handle_message(msg(502, "@小D 小雨喜欢别人怎么叫她", mentions_bot=True))  # 查了小雨的卡
             await engine.drain()
         text = "\n".join(logs.output)
-        self.assertIn("（附着人设卡，内容略）", text)
+        self.assertIn("（附着人设卡或私信记忆，内容略）", text)
         self.assertNotIn("猫娘奶糖", text)
         self.assertNotIn("喜欢被叫老大", text)
         self.assertEqual([sent[1] for sent in transport.sent], ["你是猫娘奶糖 {", "小雨喜欢被叫老大 {"])  # 照样当成回复发出去

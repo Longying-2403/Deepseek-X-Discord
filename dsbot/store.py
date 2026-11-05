@@ -37,6 +37,20 @@ CREATE TABLE IF NOT EXISTS turns (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turns_channel ON turns (channel_id, id);
+CREATE TABLE IF NOT EXISTS dm_memory_attached (
+    turn_id INTEGER NOT NULL,     -- 频道里附上某人私信记忆的那条记录
+    channel_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,           -- 附的时候写的名字（撤回时按它找到那一段）
+    PRIMARY KEY (turn_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_dm_memory_attached_user ON dm_memory_attached (user_id);
+CREATE TABLE IF NOT EXISTS dm_notices (
+    user_id INTEGER NOT NULL,
+    what TEXT NOT NULL,           -- 私信里说明过的事（比如 dm_memory：私信记忆）
+    at REAL NOT NULL,
+    PRIMARY KEY (user_id, what)
+);
 CREATE TABLE IF NOT EXISTS msgmap (
     channel_id INTEGER NOT NULL,
     short_id INTEGER NOT NULL,
@@ -249,6 +263,52 @@ class Store:
             ):
                 out.setdefault(r["message_id"], []).append((r["short_id"], r["author_name"]))
         return out
+
+    # ---------------------------------------------------------------- 频道里附过的私信记忆
+
+    def note_dm_memory(self, turn_id: int, channel_id: int, user_id: int, name: str) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO dm_memory_attached (turn_id, channel_id, user_id, name) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (turn_id, user_id) DO UPDATE SET name = excluded.name",
+                (turn_id, channel_id, user_id, name),
+            )
+
+    def dm_memory_turns(self, *, user_id: int | None = None, guild_id: int | None = None) -> list[tuple[int, int, int, str]]:
+        """附过私信记忆的记录 [(记录, 频道, 人, 名字)]：只看某个人的、某个服务器的（都不填就是全部）。"""
+        sql = "SELECT a.turn_id, a.channel_id, a.user_id, a.name FROM dm_memory_attached a"
+        where: list[str] = []
+        args: list[Any] = []
+        if guild_id is not None:
+            sql += " JOIN conversations c ON c.channel_id = a.channel_id"
+            where.append("c.guild_id = ?")
+            args.append(guild_id)
+        if user_id is not None:
+            where.append("a.user_id = ?")
+            args.append(user_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return [(r["turn_id"], r["channel_id"], r["user_id"], r["name"]) for r in self.db.execute(sql + " ORDER BY a.turn_id", args)]
+
+    def forget_dm_memory(self, rows: list[tuple[int, int]]) -> None:
+        """不用再管的附件记录 [(记录, 人)]（已经撤回了，或者那条记录已经没了）。"""
+        with self.db:
+            self.db.executemany("DELETE FROM dm_memory_attached WHERE turn_id = ? AND user_id = ?", rows)
+
+    def dm_noticed(self, user_id: int, what: str) -> bool:
+        return self.db.execute("SELECT 1 FROM dm_notices WHERE user_id = ? AND what = ?", (user_id, what)).fetchone() is not None
+
+    def mark_dm_noticed(self, user_id: int, what: str, now: float | None = None) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO dm_notices (user_id, what, at) VALUES (?, ?, ?)",
+                (user_id, what, time.time() if now is None else now),
+            )
+
+    def turn_content(self, turn_id: int) -> Any | None:
+        """一条记录现在的内容（已经被压缩、清空掉了就是 None）。"""
+        r = self.db.execute("SELECT content FROM turns WHERE id = ?", (turn_id,)).fetchone()
+        return json.loads(r["content"]) if r is not None else None
 
     def update_turn(self, turn_id: int, content: Any) -> None:
         """改写一条记录（消息被删、被编辑时用；平时记录只追加）。"""

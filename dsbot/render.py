@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo
 from .models import DocBlock, IncomingMessage
 from .prompts import (
     CARDS_HEAD,
+    DM_MEMORY_GONE,
+    DM_MEMORY_GONE_TAIL,
+    DM_MEMORY_HEAD,
+    DM_MEMORY_TAIL,
     EDIT_NOTE,
     EDITED_MARK,
     GALLERY_FOOT,
@@ -541,6 +545,59 @@ def last_music_line(turns: list[Any]) -> str | None:
     return None
 
 
+def render_dm_memory(name: str, entries: list[str]) -> list[str]:
+    """频道里附上某人私信记忆里不敏感的那些。entries 为空：告诉它清空了，之前附着的别再用。"""
+    who = neutralize(one_line(name, 32))
+    if not entries:
+        return [DM_MEMORY_GONE.format(name=who)]
+    lines = [DM_MEMORY_HEAD.format(name=who)] + ["  " + neutralize(one_line(entry, 300)) for entry in entries]
+    lines[-1] += "）"
+    return lines
+
+
+def drop_dm_memory(content: Any, name: str) -> Any:
+    """从一条记录里拿掉附着的某人的私信记忆（标题行连同下面缩进的几条），还有“清空了”那句。别的原样不动。"""
+    head = DM_MEMORY_HEAD.format(name=name)
+    gone = DM_MEMORY_GONE.format(name=name)
+
+    def fix(text: str) -> str:
+        out: list[str] = []
+        skipping = fenced = False
+        for line in text.split("\n"):
+            if fenced:  # 文件、链接的内容原样留着：里面就算有一模一样的一行，也不是它附上的
+                out.append(line)
+                fenced = line != ">>>"
+                continue
+            if skipping:
+                if line.startswith("  "):
+                    continue
+                skipping = False
+            if line == head:
+                skipping = True
+                continue
+            if line == "<<<":
+                fenced = True
+            if line != gone:
+                out.append(line)
+        return "\n".join(out)
+
+    if isinstance(content, str):
+        return fix(content)
+    if isinstance(content, list):
+        return [
+            {**part, "text": fix(part["text"])}
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            else part
+            for part in content
+        ]
+    return content
+
+
+def has_dm_memory(content: Any) -> bool:
+    """这条记录里附着某人的私信记忆。"""
+    return any(line.startswith("（") and line.endswith(DM_MEMORY_TAIL) for line in content_text(content).split("\n"))
+
+
 def own_text(content: Any) -> str:
     """压缩记忆用：这个频道自己的内容。去掉从别的频道带来的近况、频道名单、翻到的记录、搜索结果、找图的候选图、人设卡和点歌的结果。
 
@@ -576,8 +633,10 @@ def own_text(content: Any) -> str:
             file_fence, after_file = True, False
             continue
         after_search = after_file = False
-        if line.startswith("（") and (line.endswith("跟你聊过：") or line == LIST_HEAD):
-            skipping_block = True
+        if line.startswith("（") and (line.endswith(("跟你聊过：", DM_MEMORY_TAIL)) or line == LIST_HEAD):
+            skipping_block = True  # 别处带来的近况、私信记忆：都不是这个频道自己的
+        elif line.startswith("（") and line.endswith(DM_MEMORY_GONE_TAIL):
+            continue
         elif line.startswith(("（你翻了", "（你搜了", _GALLERY_START, _WHO_START)) or line in _CARDS_HEADS:
             skipping_fence = True
             after_search = line.startswith("（你搜了")
@@ -855,9 +914,10 @@ def render_review_input(
     people: list[tuple[str, list[int], str | None]] | None,
     memories: list[tuple[int, str]] | None,
     lines: list[str],
+    dm_memories: list[tuple[int, str, bool]] | None = None,
 ) -> str:
     """整理记忆时给模型看的内容。people：[(名字, 他的消息编号, 现在的人设卡或 None)]（None = 这里不整理人设卡）；
-    memories：[(编号, 内容)]（None = 这里不整理长期记忆）。"""
+    memories：[(编号, 内容)]（None = 这里不整理长期记忆）；dm_memories：[(编号, 内容, 敏感)]（None = 不整理私信记忆）。"""
     out: list[str] = []
     if people is not None:
         out.append("【说过话的人】")
@@ -872,6 +932,11 @@ def render_review_input(
     if memories is not None:
         out.append("【长期记忆】")
         out += [f"({no}) {neutralize_record(one_line(text, 300))}" for no, text in memories] or ["（还没有）"]
+    if dm_memories is not None:
+        out.append("【他的私信记忆】")
+        out += [
+            f"({no}) {neutralize_record(one_line(text, 300))}" + ("〔敏感〕" if sensitive else "") for no, text, sensitive in dm_memories
+        ] or ["（还没有）"]
     out.append("【聊天记录】")
     out += lines
     return "\n".join(out)

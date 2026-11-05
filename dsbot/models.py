@@ -135,7 +135,7 @@ class IncomingMessage:
 @dataclass
 class Action:
     # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
-    # | "card" | "memory" | "who" | "music"
+    # | "card" | "memory" | "dm_memory" | "who" | "music" | "desktop"
     kind: str
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
@@ -148,7 +148,8 @@ class Action:
     undo: bool = False  # persona：撤销上一次修改
     image: int | None = None  # pick：发找到的第几张图（从 1 开始）
     op: str | None = None  # memory：add / edit / delete；music：play / skip / pause / resume / stop / queue / remove / clear
-    index: int | None = None  # memory：改、删第几条（长期记忆的编号）；music remove：队列里的第几首
+    index: int | None = None  # memory / dm_memory：改、删第几条（记忆的编号）；music remove：队列里的第几首
+    sensitive: bool | None = None  # dm_memory：敏感（只在他自己的私信里用）；None = 没写（edit 时就是不改）
 
     def to_json(self) -> dict[str, Any]:
         if self.kind == "card":
@@ -159,6 +160,19 @@ class Action:
             if self.op == "edit":
                 return {"type": "memory", "edit": self.index, "text": self.text}
             return {"type": "memory", "delete": self.index}
+        if self.kind == "dm_memory":
+            d = {"type": "dm_memory"}
+            if self.op == "add":
+                d["add"] = self.text
+            elif self.op == "edit":
+                d["edit"] = self.index
+                if self.text is not None:
+                    d["text"] = self.text
+            else:
+                d["delete"] = self.index
+            if self.sensitive is not None and self.op != "delete":
+                d["sensitive"] = self.sensitive
+            return d
         if self.kind == "who":
             return {"type": "who", "name": self.name}
         if self.kind == "music":

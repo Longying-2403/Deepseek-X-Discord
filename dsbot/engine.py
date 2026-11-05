@@ -27,7 +27,7 @@ from .images import MAX_RAW_BYTES, filename_for, to_data_uri, upload_ready
 from .ledger import Ledger
 from .links import site_name
 from .llm import LLMError
-from .memory import CardStore, MemoryStore, clean_card, clean_memory, parse_review
+from .memory import CardStore, MemoryStore, clean_card, clean_memory, parse_review, reveals
 from .models import (
     Action,
     ChannelInfo,
@@ -105,8 +105,11 @@ from .render import (
     neutralize_record,
     own_text,
     public_lines,
+    drop_dm_memory,
+    has_dm_memory,
     render_cards,
     render_channel_list,
+    render_dm_memory,
     render_line,
     render_recall,
     render_review_input,
@@ -155,7 +158,7 @@ def _queue_view(action: Action) -> bool:
 
 # 用完要再问一次模型的动作。read / search / recall / persona / who / music 只在被叫到时能用；image 主动聊天时也能用
 TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who", "music", "desktop")
-MEMORY_KINDS = ("card", "memory")  # 改人设卡、长期记忆：和回话放在一起，不用再问一次模型
+MEMORY_KINDS = ("card", "memory", "dm_memory")  # 改人设卡、长期记忆、私信记忆：和回话放在一起，不用再问一次模型
 MAX_WHO = 2
 MAX_REVIEW_CHUNKS = 4  # 一次整理最多分几段问模型（聊天记录太长时）
 MAX_REVIEW_CARDS = 3  # 一次整理最多改几张人设卡（每张都要整段重写，太多了输出会很长）
@@ -363,6 +366,7 @@ class _ReviewPlan:
     cards_ok: bool
     memory_ok: bool
     last_id: int
+    dm_ok: bool = False  # 私信：顺便整理他的私信记忆
 
 
 @dataclass
@@ -509,6 +513,21 @@ def plan_compaction(contents: list[Any], *, force: bool = False) -> int:
     return removed
 
 
+DM_MEMORY_ATTACH_CHARS = 2000  # 频道里附上某人的私信记忆，最多多少字
+
+
+def _newest(entries: Sequence[Any], max_chars: int, max_count: int) -> list[Any]:
+    """挑最近改过的几条（字数、条数都不超过上限；第一条再长也留着），再按编号排回去。"""
+    picked: list[Any] = []
+    used = 0
+    for e in sorted(entries, key=lambda e: (e.updated_at, e.no), reverse=True):
+        if len(picked) >= max_count or (picked and used + len(e.text) > max_chars):
+            break
+        picked.append(e)
+        used += len(e.text)
+    return sorted(picked, key=lambda e: e.no)
+
+
 @dataclass
 class Interaction:
     """某个人在某个频道跟它的一次对话（几行纯文本）。"""
@@ -554,6 +573,9 @@ class ChannelState:
     listed: tuple[str, ...] | None = None  # 已经写进这个频道记录里的“能翻记录的频道”名单
     last_decision: str = ""
     cards_shown: dict[int, tuple[int, float]] = field(default_factory=dict)  # 人 -> (附上他的卡的那条记录, 卡的版本)
+    # 人 -> (附上他私信记忆的那条记录, 附上的内容)：内容变了、或者那条记录被压缩掉了，再附一次
+    dm_memory_shown: dict[int, tuple[int, str]] = field(default_factory=dict)  # 也记在库里（撤回时要找到那条记录）
+    quiet_dm: bool = False  # 私信这一轮刚记了敏感的事：这一轮的对话不当近况带到频道里
     unreviewed_rounds: int = 0  # 上次整理记忆之后又聊了几轮
     reviewing: bool = False
     last_review_at: float = 0.0
@@ -1042,9 +1064,10 @@ class Engine:
                 log_.popleft()
             if not log_:
                 del self.interactions[key]
+        talked = {person for _, person in self.interactions}  # 跨服务器时，别的服务器的对话也会带过来
         for st in self.states.values():
             # 这个人在别处已经没有可带的对话了，记录“带到哪了”也没用了；以后新的对话序号更大，照样会带
-            for person in [p for p in st.digest_seen if (st.guild_id, p) not in self.interactions]:
+            for person in [p for p in st.digest_seen if p not in talked]:
                 del st.digest_seen[person]
         for st in self.states.values():
             idle = now - max(st.last_activity_at, st.last_eval_at)
@@ -1286,6 +1309,8 @@ class Engine:
             if playing != st.music_seen:  # 换了歌、停了：告诉它一声（只写在这一轮里，system prompt 不变）
                 context.append(playing or MUSIC_IDLE)
         card_lines, card_marks = self._card_context(st, view, conv, numbered, triggers)
+        dm_lines, dm_marks = self._dm_memory_context(st, view, conv, triggers) if kind == "mention" else ([], [])
+        context = context + dm_lines
 
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
             content = render_round(
@@ -1354,6 +1379,7 @@ class Engine:
         self._mark_read(conv, planned)
         self._mark_links(conv, opened)
         self._mark_cards(st, conv, card_marks)
+        self._mark_dm_memory(st, view, conv, dm_marks)
         for mid in noted:
             if st.edit_notes.get(mid) is noted[mid]:
                 del st.edit_notes[mid]  # 已经告诉它了
@@ -1390,7 +1416,9 @@ class Engine:
                 completion, cost, row, actions, seen = step
 
         # 改人设卡、记长期记忆：先办（只是写进数据库），再发消息
-        actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind, seen, conv.turns[:before])
+        # 这一轮只有群友说的话（没看文件、链接、搜索结果……）：私信记忆的敏感标记才能照他说的往下调
+        trusted = not tools and not docs
+        actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind, seen, conv.turns[:before], trusted)
         actions = self._live_actions(st, actions, kind, targets)  # 冲着已经删掉的消息的：不发，也不算开口
         actions, dropped = self._check_stickers(st, actions, info)
         actions, dropped_media = self._check_media(st, view, actions)
@@ -1420,7 +1448,8 @@ class Engine:
             self.store.set_outcome(row, "recited" if row in self._recited_rows else outcome)
             self._recited_rows.discard(row)
             # 对话里附着人设卡时不给管理员看模型的“想法”（里面可能引用了别人的卡）
-            st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=bool(st.cards_shown or card_lines or seen))
+            private_bits = bool(st.cards_shown or card_lines or seen or dm_lines or st.dm_memory_shown or self._dm_memory_in_prompt(st, view))
+            st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=private_bits)
         # 发的时候才被删掉的那几条没发出去，不算“发不出消息”
         decided_text = any(a.kind == "reply" and a.messages for a in self._live_actions(st, actions, kind, targets))
         uploads = {"meme", "pick"}  # 要“附加文件”权限的那两种
@@ -1450,7 +1479,9 @@ class Engine:
             u.hit,
             u.output,
             cost,
-            "（附着人设卡，想法略）" if st.cards_shown or card_lines or seen else one_line(completion.reasoning or "", 160),
+            "（附着人设卡或私信记忆，想法略）"
+            if st.cards_shown or card_lines or seen or dm_lines or st.dm_memory_shown or self._dm_memory_in_prompt(st, view)
+            else one_line(completion.reasoning or "", 160),
         )
         if u.prompt_tokens > view.context_budget_tokens and st.generation == generation:
             # 平时等旧记录攒够一半再压（少让缓存失效）。实在太长（比如连着读了好几个大文件）就不等了：
@@ -1502,7 +1533,7 @@ class Engine:
         actions, ok = parse_actions(completion.content)
         if not ok:
             # 对话里有人设卡时不把输出写进日志（里面可能照抄了别人的卡）
-            shown = "（附着人设卡，内容略）" if st.cards_shown or cards_here else one_line(completion.content, 200)
+            shown = "（附着人设卡或私信记忆，内容略）" if st.cards_shown or st.dm_memory_shown or st.private or cards_here else one_line(completion.content, 200)
             log.warning("频道 %s：模型输出不是合法 JSON：%s", st.channel_id, shown)
             text = completion.content.strip()
             # 不像 JSON 的才当成直接说的话发出去；用 ``` 框起来的是写坏了的 JSON，别把它发到频道里
@@ -2429,9 +2460,16 @@ class Engine:
     def _screen_memory(self, guild_id: int, items: list[Any], text_of: Callable[[Any], str | None], cards: list[str], said: Iterable[str]) -> list[Any]:
         """要记进长期记忆的几条：和已经记着的连起来照抄了人设卡的不记（一张卡拆成几条分开记，拼起来还是原文）。
         长期记忆每个频道的提示词里都有、管理员也看得到。text_of 返回 None 的不是要记的话，原样留着。"""
+        base = [m.text for m in self.memory.entries(guild_id)] if self.memory is not None else []
+        return self._screen_texts(base, items, text_of, cards, said)
+
+    def _screen_texts(
+        self, base: list[str], items: list[Any], text_of: Callable[[Any], str | None], cards: list[str], said: Iterable[str]
+    ) -> list[Any]:
+        """要记下来的几条：和 base（已经记着的）连起来照抄了人设卡的不记。"""
         if not cards or not any(text_of(item) for item in items):
             return items
-        base = [m.text for m in self.memory.entries(guild_id)] if self.memory is not None else []
+        base = list(base)
         # 以前就记着照抄了某张卡的（这个功能之前记的）：那张卡只看新的这条自己；别的卡照常连起来查
         stale = quoted_cards("\n".join(base), cards, said=said)
         fresh = [c for c in cards if c not in stale]
@@ -2484,6 +2522,16 @@ class Engine:
         if len(memo) != len(actions):
             log.info("频道 %s：要记的长期记忆照抄了人设卡的原文，没记", st.channel_id)
             actions, stored = memo, dump_actions(memo)
+        user = self.transport.channel_info(st.channel_id).dm_user if st.private else None
+        if user is not None and self.memory is not None:
+            # 私信记忆本人用 /ds-dm 记忆 看得到：别人的人设卡原文不能抄进来（自己的卡照抄没关系）
+            own = set(self.cards.own_texts(st.guild_id, user)) if self.cards is not None else set()
+            others = [card for card in seen if card not in own]
+            base = [e.text for e in self.memory.dm_entries(user)]
+            memo = self._screen_texts(base, actions, lambda a: a.text if a.kind == "dm_memory" else None, others, heard)
+            if len(memo) != len(actions):
+                log.info("私信 %s：要记的私信记忆照抄了别人的人设卡，没记", st.channel_id)
+                actions, stored = memo, dump_actions(memo)
         if not recited(actions):
             return completion, cost, row, actions, stored
         self.store.set_outcome(row, "recited")
@@ -2533,9 +2581,11 @@ class Engine:
         kind: str,
         seen: Sequence[str] = (),
         history: Sequence[Turn] = (),
+        trusted: bool = False,
     ) -> list[Action]:
-        """改人设卡、长期记忆（只是写进数据库）。改成了就在要求的那条消息上加 📝。返回剩下要执行的动作。
-        seen：这次请求里它看得到的人设卡（不含它这次自己写的）。history：这一轮之前的记录。"""
+        """改人设卡、长期记忆、私信记忆（只是写进数据库）。改成了就在要求的那条消息上加 📝。返回剩下要执行的动作。
+        seen：这次请求里它看得到的人设卡（不含它这次自己写的）。history：这一轮之前的记录。
+        trusted：这一轮只有群友说的话（没有文件、链接、搜索结果之类外来的内容），私信记忆的敏感标记才能往下调。"""
         mine = [a for a in actions if a.kind in MEMORY_KINDS]
         if not mine:
             return actions
@@ -2544,20 +2594,37 @@ class Engine:
         marked: set[int] = set()
         refused: list[Action] = []
         guild = st.guild_id
+        secrets: list[str] = []
+        if st.private:
+            mine, secrets = self._dm_secrets(st, view, mine)
         for action in mine:
             if st.guild_id != guild:
                 # 加 📝 的时候私信换了服务器：剩下的不写（不能写进别的服务器）
                 log.info("私信 %s：写记忆的时候换了服务器，剩下的没写", st.channel_id)
                 break
+            if secrets and action.kind in ("card", "memory") and self._reveals_secret(st, action, by_sid, secrets):
+                # 人设卡、长期记忆服务器里的人看得到：私信里说到敏感的事的不写（那些只记进私信记忆）
+                log.info("私信 %s：要写进%s的说到了敏感的事，没写", st.channel_id, "人设卡" if action.kind == "card" else "长期记忆")
+                if action.kind == "card":
+                    refused.append(action)
+                continue
             if action.kind == "card":
                 mid = self._apply_card(st, view, action, by_sid, now, seen, history)
                 if mid is None and not self._card_is(st, action, by_sid):
                     refused.append(action)
+            elif action.kind == "dm_memory":
+                continue  # 私信记忆下面一起改（一批里先删后加，也要认得出说的是敏感的事）
             else:
                 mid = self._apply_memory(st, view, action, targets, kind, now)
             if mid is not None and mid not in marked:
                 marked.add(mid)
                 await self._safe_react(st, mid, "📝")  # 让人一眼看到真的记下了
+        notes = [a for a in mine if a.kind == "dm_memory"]
+        if notes and st.guild_id == guild:
+            mid = self._apply_dm_memory(st, view, notes, targets, kind, now, by_sid, trusted)
+            if mid is not None and mid not in marked:
+                marked.add(mid)
+                await self._safe_react(st, mid, "📝")
         if refused:
             self._drop_from_record(st, refused)
         return [a for a in actions if a.kind not in MEMORY_KINDS]
@@ -2648,6 +2715,281 @@ class Engine:
             return None
         log.info("频道 %s：长期记忆 %s %s", st.channel_id, action.op, one_line(action.text or str(action.index or ""), 80))
         return st.msg_by_sid.get(live[-1])
+
+    def _dm_secrets(self, st: ChannelState, view: View, actions: list[Action]) -> tuple[list[Action], list[str]]:
+        """私信里这一轮要写的记忆：标着敏感的长期记忆改记进私信记忆（开着的话），不然不写；
+        再返回他敏感的那些事（已经记着的、这一轮要记成敏感的），写人设卡、长期记忆时拿来对照。"""
+        user = self.transport.channel_info(st.channel_id).dm_user
+        if user is None or self.memory is None:
+            return actions, []
+        out: list[Action] = []
+        for a in actions:
+            if a.kind == "memory" and a.sensitive and a.op in ("add", "edit"):
+                if a.op == "add" and a.text and self._dm_memory_on(view):
+                    out.append(Action("dm_memory", a.to, op="add", text=a.text, sensitive=True))
+                log.info("私信 %s：标着敏感的长期记忆没写进长期记忆", st.channel_id)
+                continue
+            out.append(a)
+        secrets = [e.text for e in self.memory.dm_entries(user) if e.sensitive]
+        secrets += [a.text for a in out if a.kind == "dm_memory" and a.op in ("add", "edit") and a.text and a.sensitive is not False]
+        return out, secrets
+
+    def _reveals_secret(self, st: ChannelState, action: Action, by_sid: dict[int, IncomingMessage], secrets: list[str]) -> bool:
+        """要写进人设卡、长期记忆的说到了他敏感的事（他人设卡上本来就有的不算：那是他自己写的）。"""
+        text = action.text or ""
+        if not text:
+            return False
+        already = ""
+        if action.kind == "card" and self.cards is not None:
+            m = by_sid.get(action.to) if action.to is not None else None
+            card = self.cards.get(st.guild_id, m.author_id) if m is not None else None
+            already = card.text if card is not None else ""
+        return reveals(text, secrets, already)
+
+    def _apply_dm_memory(
+        self,
+        st: ChannelState,
+        view: View,
+        actions: list[Action],
+        targets: list[int],
+        kind: str,
+        now: float,
+        by_sid: dict[int, IncomingMessage] | None = None,
+        trusted: bool = False,
+    ) -> int | None:
+        """改私信记忆（这一轮的几条一起改）：只在私信里、他要它记的那一轮。改成了任何一条就返回要加 📝 的消息。
+        内容可能是敏感的，日志里不写。"""
+        live = [t for t in targets if st.msg_by_sid.get(t) not in st.deleted]
+        user = self.transport.channel_info(st.channel_id).dm_user if st.private else None
+        if user is None or not self._dm_memory_on(view) or kind != "mention" or not live:
+            log.info("频道 %s：不是私信、没开私信记忆，或者没人叫它要记，私信记忆没改", st.channel_id)
+            return None
+        assert self.memory is not None
+        cleared = self.memory.dm_cleared_at(user)
+        said = [m.received_at for t in live if (m := (by_sid or {}).get(t)) is not None and m.received_at]
+        if cleared is not None and said and cleared >= max(said):
+            log.info("私信 %s：他说完之后清空过私信记忆，这一轮要记的不记", st.channel_id)
+            return None
+        ops = [(a.op or "", a.index, a.text, a.sensitive) for a in actions]
+        done, secret = self._apply_dm_ops(user, ops, via="chat", now=now, may_lower=trusted)
+        if secret:
+            st.quiet_dm = True  # 刚说了敏感的事：这一轮的对话不当近况带到频道里
+        for (op, no, _, _), ok in zip(ops, done):
+            log.info("私信 %s：私信记忆 %s %s%s", st.channel_id, op, no or "", "" if ok else "（没改成）")
+        return st.msg_by_sid.get(live[-1]) if any(done) else None
+
+    def _dm_memory_on(self, view: View) -> bool:
+        return self.memory is not None and bool(view.dm_memory)
+
+    def _dm_memory_in_prompt(self, st: ChannelState, view: View) -> bool:
+        """这一轮的请求里有私信记忆：私信里（system prompt 里有，敏感的也在），或者频道的记录里附着某人的
+        （从记录里认：重启之后也算）。"""
+        if st.private:
+            return self._dm_memory_on(view)
+        conv = st.conversation
+        return conv is not None and any(t.role == "user" and has_dm_memory(t.content) for t in conv.turns)
+
+    def _apply_dm_ops(
+        self,
+        user_id: int,
+        ops: list[tuple[str, int | None, str | None, bool | None]],
+        *,
+        via: str,
+        now: float,
+        may_lower: bool = False,
+    ) -> tuple[list[bool], bool]:
+        """一批私信记忆的改动（聊天里这一轮的、整理记忆这一次的）：[(add / edit / delete, 编号, 内容, 敏感)]。
+        返回 (每一条改成了没有, 这一批有没有记下、改成敏感的)。
+
+        宁可少说：新记的没写敏感不敏感、改了内容没写，或者说的是敏感的那件事（这一批开始之前就是敏感的、这一批要记成
+        敏感的：先删后加、先删后改也认得出），都当成敏感。敏感标记只有本人能往下调：聊天里“只改敏感标记”的那种写法，
+        而且这一轮只有他说的话（may_lower），或者 /ds-dm 记忆；改内容、整理记忆都只能往上调。
+        频道里附过的撤回：有条目改成了敏感；或者拿掉、改掉了不敏感的条目，又是他自己要的（聊天里），
+        或者这一批同时记了敏感的（多半是把它并进了敏感的那条）。只是整理时改改说法、合并掉的不撤，免得记录老被改写。"""
+        assert self.memory is not None
+        before = {e.no: e for e in self.memory.dm_entries(user_id)}
+        secrets = [e.text for e in before.values() if e.sensitive]
+        secrets += [clean_memory(t) for op, _, t, s in ops if op in ("add", "edit") and t and s is not False]
+        done: list[bool] = []
+        raised = removed = secret = False
+        for op, no, text, sensitive in ops:
+            ok, flag = self._dm_one(user_id, op, no, text, sensitive, secrets, via=via, now=now, may_lower=may_lower)
+            done.append(ok)
+            if not ok:
+                continue
+            old = before.get(no) if no is not None else None
+            if op == "add":
+                secret = secret or flag
+            elif op == "edit" and old is not None and not old.sensitive:
+                raised = raised or flag
+                removed = removed or (text is not None and clean_memory(text) != old.text)
+            elif op == "delete" and old is not None and not old.sensitive:
+                removed = True
+        if raised or (removed and (via == "chat" or secret)):
+            self.withdraw_dm_memory(user_id)
+        if raised or secret:
+            self._forget_dm_talk(user_id)  # 私信里刚说了敏感的事：私信的近况别再带到频道里
+        return done, raised or secret
+
+    def _dm_one(
+        self,
+        user_id: int,
+        op: str,
+        no: int | None,
+        text: str | None,
+        sensitive: bool | None,
+        secrets: list[str],
+        *,
+        via: str,
+        now: float,
+        may_lower: bool,
+    ) -> tuple[bool, bool]:
+        """改一条私信记忆（规矩见 _apply_dm_ops）。返回 (改成了没有, 改完是不是敏感)。"""
+        assert self.memory is not None
+        if op == "add" or (op == "edit" and text is not None):
+            text = clean_memory(text or "")
+            if not text or len(text) > self.ec.dm_memory_entry_chars:
+                return False, False
+        if op == "add":
+            entries = self.memory.dm_entries(user_id)
+            if len(entries) >= self.ec.dm_memory_max_entries or any(e.text == text for e in entries):
+                return False, False
+            flag = sensitive is not False or reveals(text or "", secrets)
+            self.memory.dm_add(user_id, text or "", sensitive=flag, via=via, now=now)
+            return True, flag
+        if op == "edit" and no is not None:
+            current = self.memory.dm_get(user_id, no)
+            if current is None:
+                return False, False
+            if text is not None:
+                flag = True if sensitive is None else bool(sensitive or current.sensitive)
+                flag = flag or reveals(text, secrets)
+            elif sensitive:
+                flag = True
+            elif sensitive is False:
+                flag = False if may_lower and via == "chat" else current.sensitive
+            else:
+                return False, False
+            return self.memory.dm_edit(user_id, no, text, sensitive=flag, via=via, now=now), flag
+        if op == "delete" and no is not None:
+            return self.memory.dm_delete(user_id, no), False
+        return False, False
+
+    def _forget_dm_talk(self, user_id: int) -> None:
+        """他私信里刚说了敏感的事：他私信的近况别再带到频道里（换了说法的认不出来，干脆都不带）。"""
+        for key in [k for k in self.interactions if k[1] == user_id]:
+            kept = [i for i in self.interactions[key] if not ((p := self.transport.locate(i.channel_id)) is not None and p.dm)]
+            if kept:
+                self.interactions[key] = deque(kept, maxlen=INTERACTIONS_PER_PERSON)
+            else:
+                del self.interactions[key]
+
+    def withdraw_dm_memory(self, user_id: int | None = None, *, guild_id: int | None = None) -> int:
+        """把频道记录里附过的私信记忆拿掉（隐私优先，和群友删消息一样直接改记录）：某个人的（他删了、改了、标成敏感、
+        清空了），或者某个服务器的（关掉了私信记忆、跨服务器，私信改挂到别的服务器）。下次他叫它时，照当时能带的重新附。
+        返回改了几条记录。"""
+        rows = self.store.dm_memory_turns(user_id=user_id, guild_id=guild_id)
+        changed = 0
+        for turn_id, channel_id, _, name in rows:
+            content = self.store.turn_content(turn_id)
+            if content is None:
+                continue  # 已经压缩掉、清空了
+            new = drop_dm_memory(content, name)
+            if new == content:
+                continue
+            self.store.update_turn(turn_id, new)
+            changed += 1
+            st = self.states.get(channel_id)
+            if st is not None:
+                if st.conversation is not None:
+                    for turn in st.conversation.turns:
+                        if turn.id == turn_id:
+                            turn.content = new
+                # 同名的人附在这条记录里的那段也一起拿掉了：都记成没附过，下次叫它时重新附
+                for person in [p for p, (t, _) in st.dm_memory_shown.items() if t == turn_id]:
+                    del st.dm_memory_shown[person]
+        if rows:
+            self.store.forget_dm_memory([(turn_id, uid) for turn_id, _, uid, _ in rows])
+        for st in self.states.values():
+            if guild_id is not None and st.guild_id != guild_id:
+                continue
+            if user_id is None:
+                st.dm_memory_shown.clear()
+            else:
+                st.dm_memory_shown.pop(user_id, None)
+        if changed:
+            log.info("撤回了 %d 条记录里附着的私信记忆", changed)
+        return changed
+
+    def _dm_memory_texts(self, st: ChannelState, view: View, user_id: int) -> list[str] | None:
+        """频道里能附上的这个人的私信记忆：不敏感的、最近改过的几条。这里不能带（私信里、没开私信记忆、
+        不是他私信挂的服务器又没开跨服务器）是 None。"""
+        if st.private or not self._dm_memory_on(view):
+            return None
+        home = self.store.dm_home(user_id)
+        if not ((home is not None and home[0] == st.guild_id) or view.cross_server):
+            return None
+        assert self.memory is not None
+        public = [e for e in self.memory.dm_entries(user_id) if not e.sensitive]
+        return [e.text for e in _newest(public, DM_MEMORY_ATTACH_CHARS, max(0, self.ec.dm_memory_attach_entries))]
+
+    def _dm_memory_context(
+        self, st: ChannelState, view: View, conv: Conversation, triggers: list[IncomingMessage]
+    ) -> tuple[list[str], list[tuple[int, str | None, str]]]:
+        """服务器的频道里被叫到时，附上叫它的人私信记忆里不敏感的那些：私信挂在这个服务器的一定带，
+        别的服务器要开了“跨服务器”才带。已经附过、内容没变、那条记录也还在的，不再附。
+        返回 (要附的几行, [(人, 附的内容或 None, 写的名字)])。"""
+        if st.private or not triggers or not self._dm_memory_on(view):
+            return [], []
+        oldest = conv.turns[0].id if conv.turns else None
+        lines: list[str] = []
+        marks: list[tuple[int, str | None, str]] = []
+        done: set[int] = set()
+        for m in triggers:
+            if m.is_bot or m.author_id in done:
+                continue
+            done.add(m.author_id)
+            entries = self._dm_memory_texts(st, view, m.author_id)
+            if entries is None:
+                continue
+            who = neutralize(one_line(m.author_name, 32))  # 和 render_dm_memory 写的一样：撤回时按它找
+            seen = st.dm_memory_shown.get(m.author_id)
+            still = seen is not None and oldest is not None and seen[0] >= oldest  # 附过的那份还在对话里
+            if not entries:
+                if seen is not None:
+                    if still:
+                        lines += render_dm_memory(m.author_name, [])  # 对话里还附着清掉之前的那些：告诉它别再用
+                    marks.append((m.author_id, None, who))
+                continue
+            shown = "\n".join(entries)
+            if still and seen is not None and seen[1] == shown:
+                continue
+            lines += render_dm_memory(m.author_name, entries)
+            marks.append((m.author_id, shown, who))
+        return lines, marks
+
+    def _mark_dm_memory(
+        self, st: ChannelState, view: View, conv: Conversation, marks: list[tuple[int, str | None, str]]
+    ) -> None:
+        """附上过的私信记忆记成“已经在对话里了”（这一轮写进记录之后才记，和人设卡一样），也记进库里（撤回时要找到它）。
+        这一轮进行中他改了、删了、标成敏感（或者这里关掉了）：刚写进记录的那份马上拿掉。"""
+        if not marks or not conv.turns:
+            return
+        turn = conv.turns[-2] if len(conv.turns) >= 2 else conv.turns[-1]
+        for uid, shown, who in marks:
+            if shown is None:
+                st.dm_memory_shown.pop(uid, None)
+                continue
+            now_texts = self._dm_memory_texts(st, view, uid)
+            if now_texts is None or "\n".join(now_texts) != shown:
+                new = drop_dm_memory(turn.content, who)
+                if new != turn.content:
+                    turn.content = new
+                    self.store.update_turn(turn.id, new)
+                st.dm_memory_shown.pop(uid, None)
+                continue
+            st.dm_memory_shown[uid] = (turn.id, shown)
+            self.store.note_dm_memory(turn.id, st.channel_id, uid, who)
 
     def _memory_op(self, guild_id: int, op: str, no: int | None, text: str | None, *, via: str, now: float) -> bool:
         """记一条 / 改一条 / 删一条长期记忆。超出条数、字数，或者编号不存在时不改，返回 False。"""
@@ -2761,20 +3103,21 @@ class Engine:
         last_id = turns[-1].id
         cards_ok = self._cards_on(view) and self.implicit_ok(st.channel_id, "cards")
         memory_ok = self._memory_on(view) and self.implicit_ok(st.channel_id, "long_memory")
+        dm_ok = st.private and info.dm_user is not None and self._dm_memory_on(view)
         live = self._live(st, view)
-        if live and (cards_ok or memory_ok) and self._over_budget(st, view, now)[0]:
+        if live and (cards_ok or memory_ok or dm_ok) and self._over_budget(st, view, now)[0]:
             if upto is not None:
                 self._set_reviewed(st, conv, last_id)  # 这部分马上就压掉了，以后也整理不了
             st.last_review_at = now  # 今天的预算用完了：隔一阵再看（预算是按天算的）
             return None
-        chunks = self._review_chunks(turns, info.bot_name) if live and (cards_ok or memory_ok) else []
+        chunks = self._review_chunks(turns, info.bot_name) if live and (cards_ok or memory_ok or dm_ok) else []
         if not any(chunk.sids for chunk in chunks):
             # 这里不整理（关掉了，或者是私密频道），或者这段时间没有群友说话：以后打开了也不回头整理这些旧的
             self._set_reviewed(st, conv, last_id)
             if upto is None:
                 st.unreviewed_rounds = 0
             return None
-        return _ReviewPlan(chunks, cards_ok, memory_ok, last_id)
+        return _ReviewPlan(chunks, cards_ok, memory_ok, last_id, dm_ok)
 
     def _review_chunks(self, turns: list[Any], bot_name: str) -> list[_ReviewChunk]:
         """把要整理的记录按字数分成几段，每段记下最后一条记录（整理完一段就记一段的进度）。"""
@@ -2834,7 +3177,7 @@ class Engine:
                     return  # 问模型的时候压缩了旧记录：后面的原话已经挑出来排着队了（没压掉的下次再整理）
                 st.review_held = max(st.review_held, chunk.last_turn)  # 这一段归这次整理：压缩时不再挑
             if chunk.sids:
-                result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation)
+                result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation, plan.dm_ok)
                 if st.generation != generation:
                     return  # 整理的时候这个频道的记忆被清空了
                 if result != "ok":
@@ -2860,7 +3203,14 @@ class Engine:
             st.unreviewed_rounds = 0
 
     async def _review_chunk(
-        self, st: ChannelState, info: ChannelInfo, chunk: _ReviewChunk, cards_ok: bool, memory_ok: bool, generation: int
+        self,
+        st: ChannelState,
+        info: ChannelInfo,
+        chunk: _ReviewChunk,
+        cards_ok: bool,
+        memory_ok: bool,
+        generation: int,
+        dm_ok: bool = False,
     ) -> str:
         """问模型这一段聊天里有什么值得长期记住的，照着改。
 
@@ -2881,7 +3231,12 @@ class Engine:
                 if sid not in entry[1]:
                     entry[1].append(sid)
         do_cards = cards_ok and bool(people)
-        if not do_cards and not memory_ok:
+        dm_user = info.dm_user if dm_ok and self.memory is not None else None
+        if dm_user is not None:
+            cleared = self.memory.dm_cleared_at(dm_user) if self.memory is not None else None
+            if cleared is not None and cleared >= chunk.start:
+                dm_user = None  # 这段聊天之后他清空过私信记忆：不拿这些旧话重新写
+        if not do_cards and not memory_ok and dm_user is None:
             return "ok"
         listed: list[tuple[str, list[int], str | None]] | None = None
         versions: dict[int, float | None] = {}  # 给模型看的是哪个版本：写的时候对得上才写（中途被本人改了、删了就不写）
@@ -2903,6 +3258,10 @@ class Engine:
         if memory_ok:
             assert self.memory is not None
             memories = [(m.no, m.text) for m in self.memory.entries(guild)]
+        dm_list = None
+        if dm_user is not None:
+            assert self.memory is not None
+            dm_list = [(e.no, e.text, e.sensitive) for e in self.memory.dm_entries(dm_user)]
         system = build_review_prompt(
             name=neutralize(one_line(info.bot_name, 40)),
             cards=do_cards,
@@ -2912,10 +3271,14 @@ class Engine:
             count=len(memories or []),
             max_entries=self.ec.memory_max_entries,
             dm=st.private,
+            dm_memory=dm_list is not None,
+            dm_count=len(dm_list or []),
+            dm_max_entries=self.ec.dm_memory_max_entries,
+            dm_entry_max=self.ec.dm_memory_entry_chars,
         )
         prompt = [
             {"role": "system", "content": system},
-            {"role": "user", "content": render_review_input(listed, memories, chunk.lines)},
+            {"role": "user", "content": render_review_input(listed, memories, chunk.lines, dm_list)},
         ]
         now = self.clock()
         try:
@@ -2960,8 +3323,13 @@ class Engine:
         if parsed is None:
             log.warning("频道 %s：整理记忆的输出不是合法 JSON", st.channel_id)
             return "ok"  # 当成没东西要记，不重试（免得一直花钱）
-        updates, ops = parsed
-        heard = _member_blocks(chunk.lines)  # 群友自己说的（一条消息连同续行算一整段）
+        updates, ops, dm_ops = parsed
+        heard = _member_blocks(chunk.lines)
+        secrets: list[str] = []  # 私信里他敏感的那些事：人设卡、长期记忆服务器里的人看得到，说到这些的不写
+        if st.private and info.dm_user is not None and self.memory is not None:
+            secrets = [e.text for e in self.memory.dm_entries(info.dm_user) if e.sensitive]
+        if dm_user is not None:
+            secrets += [op.text for op in dm_ops if op.op in ("add", "edit") and op.text and op.sensitive is not False]  # 群友自己说的（一条消息连同续行算一整段）
         cards_changed = 0
         if do_cards:
             assert self.cards is not None
@@ -2985,6 +3353,10 @@ class Engine:
                 deleted = self.cards.deleted_at(guild, who[0])
                 if deleted is not None and deleted >= chunk.start:
                     continue  # 问模型的时候被删掉了
+                current = self.cards.get(guild, who[0])
+                if secrets and reveals(text, secrets, current.text if current is not None else ""):
+                    log.info("频道 %s：整理私信时 #%s 的新人设卡说到了敏感的事，没改", st.channel_id, to)  # 不写内容
+                    continue
                 done.add(who[0])
                 if self.cards.put(guild, who[0], who[1], text, via="review", now=now, expect=versions.get(who[0])):
                     cards_changed += 1
@@ -2997,15 +3369,29 @@ class Engine:
             kept = self._screen_memory(guild, wanted, lambda op: op.text, listed_cards, heard)
             if len(kept) != len(wanted):
                 log.info("频道 %s：整理记忆时要记的照抄了人设卡的原文，没记", st.channel_id)  # 不写内容
+            if secrets:
+                before = len(kept)
+                kept = [op for op in kept if not (op.text and reveals(op.text, secrets))]
+                if len(kept) != before:
+                    log.info("频道 %s：整理私信时要记进长期记忆的说到了敏感的事，没记", st.channel_id)  # 不写内容
             for op in kept:
                 if self._memory_op(guild, op.op, op.no, op.text, via="review", now=now):
                     memory_changed += 1
+        dm_changed = 0
+        if dm_user is not None:
+            assert self.memory is not None
+            cleared = self.memory.dm_cleared_at(dm_user)
+            if cleared is None or cleared < chunk.start:  # 问模型的时候他清空了：不写
+                wanted_dm = [(op.op, op.no, op.text, op.sensitive) for op in dm_ops[:MAX_REVIEW_MEMORY_OPS]]
+                done, _ = self._apply_dm_ops(dm_user, wanted_dm, via="review", now=now)
+                dm_changed = sum(done)
         log.info(
-            "频道 %s：整理了记忆（%d 行聊天）：人设卡改了 %d 张，长期记忆改了 %d 处 | $%.5f",
+            "频道 %s：整理了记忆（%d 行聊天）：人设卡改了 %d 张，长期记忆改了 %d 处%s | $%.5f",
             st.channel_id,
             len(chunk.lines),
             cards_changed,
             memory_changed,
+            f"，私信记忆改了 {dm_changed} 处" if dm_user is not None else "",
             cost,
         )
         return "ok"
@@ -3097,6 +3483,7 @@ class Engine:
             memories = [
                 (m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in self.memory.entries(st.guild_id)
             ]
+        dm_memories, dm_more = self._dm_memory_entries(st, view, info)
         return build_system_prompt(
             guild=neutralize(one_line(info.guild_name, 60)),
             channel=neutralize(one_line(info.channel_name, 60)),
@@ -3122,7 +3509,25 @@ class Engine:
             music=self.music is not None and not st.private,
             dm_with=neutralize(one_line(info.dm_with, 32)) if info.dm_with is not None else None,
             desktop=[neutralize(one_line(n, 40)) for n in self.desktop.app_names()] if self._desktop_here(st, view, info) else None,
+            dm_memories=dm_memories,
+            dm_memory_max=self.ec.dm_memory_max_entries,
+            dm_entry_max=self.ec.dm_memory_entry_chars,
+            dm_memory_more=dm_more,
         )
+
+    def _dm_memory_entries(
+        self, st: ChannelState, view: View, info: ChannelInfo
+    ) -> tuple[list[tuple[int, str, bool]] | None, int]:
+        """私信里给它看的私信记忆（敏感的也在，只在私信里）和没列出来的条数。不是私信、没开私信记忆是 (None, 0)。
+        太多了只列最近改过的那些（最多 dm_memory_prompt_chars 字），按编号排；整理记忆时还是全部都看得到。"""
+        if not st.private or info.dm_user is None or not self._dm_memory_on(view):
+            return None, 0
+        assert self.memory is not None
+        limit = self.ec.dm_memory_entry_chars + 20
+        entries = self.memory.dm_entries(info.dm_user)
+        picked = _newest(entries, max(0, self.ec.dm_memory_prompt_chars), len(entries))
+        shown = [(e.no, neutralize_record(one_line(e.text, limit)), e.sensitive) for e in picked]
+        return shown, len(entries) - len(picked)
 
     def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:
         """贴图名对上服务器里的贴图才发（换成真实名字）；对不上的直接跳过，不当成“发不出消息”。返回 (动作, 有没有跳过)。"""
@@ -3319,29 +3724,66 @@ class Engine:
                     place = self.transport.locate(item.channel_id)
                     if place is not None and place.guild_id == st.guild_id and (place.public if st.private else place.dm):
                         allowed[item.channel_id] = place
+        # 跨服务器：开了“跨服务器”的服务器之间，同一个人跟它的对话跟着他走（私信看它挂的那个服务器开没开：
+        # 私信里聊的会记进那个服务器的人设卡、长期记忆，那边没开就不带）
+        cross = bool(view.cross_server)
         for m in triggers:
             if m.is_bot or m.author_id in marks:
                 continue
             since = st.digest_seen.get(m.author_id, 0)
+            pool = list(self.interactions.get((st.guild_id, m.author_id), ()))
+            if cross:
+                pool += self._elsewhere(st.guild_id, m.author_id, allowed)
+                pool.sort(key=lambda item: item.seq)
             fresh = [
                 item
-                for item in self.interactions.get((st.guild_id, m.author_id), ())
+                for item in pool
                 if item.channel_id in allowed
                 and item.seq > since
                 and now - item.at <= ttl
-                and not (allowed[item.channel_id].dm and _secret(item.lines))
+                and not (allowed[item.channel_id].dm and (_secret(item.lines) or self._dm_sensitive(m.author_id, item.lines[:1])))
             ]
             if not fresh:
                 continue
             marks[m.author_id] = max(item.seq for item in fresh)  # 只带最近两次；更早的就不带了
             for item in fresh[-2:]:
                 place = allowed[item.channel_id]
-                where = "私信里" if place.dm else f" {self._display(place)} "
+                said = item.lines
+                if place.dm:
+                    where = "私信里"
+                    said = item.lines[:1]  # 只带他自己的话：它在私信里的回话可能用到了私信记忆、别的服务器的事
+                elif place.guild_id != st.guild_id:
+                    server = neutralize(one_line(self.transport.channel_info(item.channel_id).guild_name, 40))
+                    where = f"「{server}」服务器的 {self._display(place)} "
+                else:
+                    where = f" {self._display(place)} "
                 block = [f"（{neutralize(one_line(m.author_name, 32))} {_ago(now - item.at)}在{where}跟你聊过："]
-                block += ["  " + neutralize(line) for line in item.lines]
+                block += ["  " + neutralize(line) for line in said]
                 block[-1] += "）"
                 lines += block
         return lines, marks, listed
+
+    def _dm_sensitive(self, user_id: int, lines: list[str]) -> bool:
+        """私信里的这几句说到了他私信记忆里标成敏感的事。"""
+        if self.memory is None:
+            return False
+        secrets = [e.text for e in self.memory.dm_entries(user_id) if e.sensitive]
+        return bool(secrets) and any(reveals(line, secrets) for line in lines)
+
+    def _elsewhere(self, guild_id: int, author_id: int, allowed: dict[int, ChannelPlace]) -> list[Interaction]:
+        """这个人最近在别的服务器跟它的对话：那个服务器开了“跨服务器”，而且是公开频道里的（私密频道、私信不带），
+        说了要保密的不带。带得上的频道顺便记进 allowed。"""
+        out: list[Interaction] = []
+        for (guild, person), log_ in self.interactions.items():
+            if person != author_id or guild == guild_id or not self.settings.view(guild).cross_server:
+                continue
+            for item in log_:
+                place = self.transport.locate(item.channel_id)
+                if place is None or place.dm or not place.public or place.guild_id != guild or _secret(item.lines):
+                    continue
+                allowed[item.channel_id] = place
+                out.append(item)
+        return out
 
     def _remember_interactions(
         self,
@@ -3353,6 +3795,9 @@ class Engine:
         triggers: list[IncomingMessage],
     ) -> None:
         """记下这一轮谁跟它说了什么、它怎么回的（跨频道带近况用）。"""
+        if st.quiet_dm:
+            st.quiet_dm = False  # 私信这一轮刚记了敏感的事：不当近况带到频道里
+            return
         by_sid = {sid: m for sid, m in numbered}
         talks: dict[int, tuple[IncomingMessage, list[str]]] = {}
         for action in actions:
@@ -3944,6 +4389,7 @@ class Engine:
             link_entry.read_turns = {k: v for k, v in link_entry.read_turns.items() if v > last_removed}
         # 附过人设卡的那条记录压掉了：那个人下次说话时再附一次
         st.cards_shown = {uid: v for uid, v in st.cards_shown.items() if v[0] > last_removed}
+        st.dm_memory_shown = {uid: v for uid, v in st.dm_memory_shown.items() if v[0] > last_removed}
         if last_music_line(conv.turns) is None:
             st.music_seen = None  # “正在放什么”那句压掉了：下次被叫到时再写一次
         log.info("频道 %s：已把 %d 条旧记录压成摘要", st.channel_id, remove)
@@ -3984,6 +4430,7 @@ class Engine:
             st.digest_seen.clear()
             st.listed = None
             st.cards_shown.clear()
+            st.dm_memory_shown.clear()
             st.unreviewed_rounds = 0  # 清空的记录不再整理
             st.review_jobs.clear()  # 排着队的是清空前的原话：不整理了（正在问的那一段问完会自己作废）
             st.review_held = 0
@@ -4000,8 +4447,12 @@ class Engine:
 
     def move_dm(self, channel_id: int, guild_id: int) -> None:
         """私信改挂到别的服务器：清掉私信的记录（里面是原来那个服务器的人设卡、记忆），之后用新服务器的。"""
+        user = self.transport.channel_info(channel_id).dm_user
         self.reset_channel(channel_id)
         self.store.move_conversation(channel_id, guild_id)
+        if user is not None:
+            # 原来那个服务器没开跨服务器的话，不该再看到；别的服务器能带的，下次他叫它时会重新附
+            self.withdraw_dm_memory(user)
         st = self.states.get(channel_id)
         if st is not None:
             st.guild_id = guild_id

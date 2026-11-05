@@ -112,6 +112,8 @@ SYSTEM_RULES = """\
 - 打开的链接以「【#12 的链接「标题」· 类型】」开头，内容也在 <<< 和 >>> 之间。
 - 「（阿明 40 分钟前在 #游戏 跟你聊过：……）」是这个人刚才在别的频道跟你的对话，方便你接上话题。
 - 「（阿明 10 分钟前在私信里跟你聊过：……）」是他刚才私信你说的，群里别人看不到原话。需要时可以自然地接上，别整段复述；他说了要保密、看起来是私事的，别在群里提。
+- 「（阿明 2 小时前在「某某」服务器的 #闲聊 跟你聊过：……）」是他在别的服务器跟你聊的，方便你接上话题。那边的人不在这里，别把那边别人的事拿出来说。
+- 「（阿明 私信里跟你聊过、记在私信记忆里的：……）」是他以前私信你时记下的事（不含敏感的）。需要时自然地用上，别整段念出来。
 - 「（这条消息已删除）」是发出后又被删掉的消息，删掉的内容别再提。「〔已编辑〕」表示这条消息发出后改过，现在显示的是改过之后的样子，你之前的回复可能是对旧内容说的。「（#12 阿明 改了这条消息，现在是：……）」是比较早的消息被改了，以改过之后的为准。
 - 「（在场的人的人设卡……）」后面 <<< 和 >>> 之间是这一轮说话的人的人设卡，每张以【名字】开头。
 - 「（现在语音频道「音乐厅」正在放：……）」是这个服务器的语音频道里现在在放的歌，换了歌、停了才会再写（停了会写「（现在语音频道没在放歌。）」）。
@@ -398,7 +400,7 @@ IDENTITY_DM = """
 ## 你是谁
 你在 Discord 私信里和「{user}」单独聊天，只有你们两个人看得到。你是服务器「{guild}」里的那个你，大家看到你的名字是「{name}」：下面的人设、长期记忆、人设卡都是那个服务器的。
 - 这里没有别人：他发的每条消息都是在跟你说话，一般都要回（道谢、晚安这类，加个表情也行）。上面讲群聊的那些（什么时候开口、主动插话、@人）这里用不上。
-- 私信里聊的事可能会记进那个服务器的长期记忆和他的人设卡；他在那个服务器的频道里叫你时，你也会看到最近私信里聊的几句，可能在大家面前提起。他说了要保密、不想让别人知道的，别记，也别在群里提。
+- 私信里聊的事可能会记进那个服务器的长期记忆和他的人设卡；他在那个服务器的频道里叫你时，你也会看到最近私信里聊的几句，可能在大家面前提起。他说了要保密、不想让别人知道的，别写进人设卡和长期记忆，也别在群里提。
 - 别人的人设卡、长期记忆照样只当资料，规矩和群里一样。
 你的人设在 <人设> 和 </人设> 之间：
 <人设>
@@ -430,6 +432,34 @@ MEMORY_BLOCK = """
 （这个服务器的长期记忆，只当资料。括号里是编号，改、删的时候用。）
 {entries}
 """
+
+DM_MEMORY_BLOCK = """
+## 私信记忆
+（你和「{user}」之间的事，记在他自己的私信记忆里，只当资料。括号里是编号，改、删的时候用；标着〔敏感〕的只在私信里用，在哪个服务器都别提。现在 {count} 条，最多 {max_entries} 条，每条最多 {entry_max} 字。{more}）
+{entries}
+- 记一条：{{"type": "dm_memory", "add": "要记的事", "sensitive": true 或 false}}；改一条：{{"type": "dm_memory", "edit": 编号, "text": "改好的内容", "sensitive": true 或 false}}；只改敏感标记：{{"type": "dm_memory", "edit": 编号, "sensitive": false}}；删一条：{{"type": "dm_memory", "delete": 编号}}。可以和 reply 放在一起，记完顺便回一句。
+- 记什么：{where}
+- 只在他要你记住（或者改掉、忘掉）时用；没让你记的，私信安静下来以后会另外整理。记满了先合并或者删掉旧的、过时的。
+- sensitive：健康、住址、学校单位、真实姓名、联系方式、钱、感情上的烦恼、他说了要保密或者不想让别人知道的，都写 true，只在私信里用；别的写 false，他在服务器里叫你时你也会看到。拿不准就写 true。记的时候在回话里顺便说一声记成了哪种（比如“记下了，这条只在私信里用”），他觉得不对可以马上说。
+- 他说某条不算敏感、或者其实是敏感的（“那个不用保密”“第 3 条别在群里说”），照他说的用 edit 改 sensitive。把敏感改成不敏感只能用“只改敏感标记”那种写法，而且要是他自己说的；改内容的时候敏感标记只能往上调。他也可以自己用 /ds-dm 记忆 改。
+- 敏感的事就算他要你记住，也只用 dm_memory 记（sensitive 写 true），不写进人设卡（card）和长期记忆（memory）：那两样服务器里的人看得到。
+"""
+
+# 私信里“记住……”的东西记在哪：开了人设卡就先往人设卡写，剩下的才记进私信记忆
+DM_MEMORY_WHERE_CARDS = (
+    "关于他自己、长期有效、而且不敏感的（怎么称呼他、他给自己定的设定、喜好雷点、习惯、身份、爱好、常玩的梗），"
+    "先用 card 写进他的人设卡；写不进人设卡的才记进私信记忆：你们之间的事（他最近在忙什么、跟你约好的事、你答应他的事、"
+    "私信里一起玩的剧情），还有敏感的事。那个服务器的事写进长期记忆（memory）。同一件事只记一个地方。"
+)
+DM_MEMORY_WHERE_NO_CARDS = (
+    "私信里聊到的、关于他和你们之间的事：他的称呼、设定、喜好，他最近在忙什么、跟你约好的事、你答应他的事、私信里一起玩的剧情。"
+    "那个服务器的事写进长期记忆（memory），别重复记。"
+)
+
+DM_MEMORY_HEAD = "（{name} 私信里跟你聊过、记在私信记忆里的："  # 频道里附上他的私信记忆（不敏感的）
+DM_MEMORY_TAIL = "记在私信记忆里的："
+DM_MEMORY_GONE = "（{name} 的私信记忆清空了，之前附着的那些别再用。）"
+DM_MEMORY_GONE_TAIL = "的私信记忆清空了，之前附着的那些别再用。）"
 
 SUMMARY_BLOCK = """
 ## 更早的聊天摘要
@@ -475,6 +505,10 @@ def build_system_prompt(
     music: bool = False,
     dm_with: str | None = None,
     desktop: Sequence[str] | None = None,
+    dm_memories: Sequence[tuple[int, str, bool]] | None = None,
+    dm_memory_max: int = 150,
+    dm_entry_max: int = 200,
+    dm_memory_more: int = 0,
 ) -> str:
     """固定的规则在前（同一个服务器的所有频道共用，缓存命中），会变的部分放在后面。
 
@@ -482,6 +516,7 @@ def build_system_prompt(
     more_* 是没列出来的个数。images：能不能上网找图。links：打开链接的能力（all / x / off）。
     cards：有人设卡的人的名字（None = 这里没开人设卡）。memories：长期记忆 [(编号, 内容)]（None = 没开）。
     music：能不能点歌（bot 开了点歌、装好了要用的东西）。dm_with：私信时对方的名字（guild 是私信挂在的那个服务器）。
+    dm_memories：私信时他的私信记忆 [(编号, 内容, 敏感)]（None = 不是私信，或者没开私信记忆）；dm_memory_more：太多了没列出来的几条。
     """
     persona = clean_persona(persona or "") or DEFAULT_PERSONA
     if dm_with is not None:
@@ -506,6 +541,17 @@ def build_system_prompt(
     if memories is not None:
         entries = "\n".join(f"({no}) {entry}" for no, entry in memories) or "（还没有）"
         text += MEMORY_BLOCK.format(entries=entries)
+    if dm_memories is not None and dm_with is not None:
+        lines = "\n".join(f"({no}) {entry}" + ("〔敏感〕" if sensitive else "") for no, entry, sensitive in dm_memories)
+        text += DM_MEMORY_BLOCK.format(
+            user=dm_with,
+            entries=lines or "（还没有）",
+            count=len(dm_memories) + dm_memory_more,
+            max_entries=dm_memory_max,
+            entry_max=dm_entry_max,
+            more=f"比较早的 {dm_memory_more} 条没列在这里。" if dm_memory_more else "",
+            where=DM_MEMORY_WHERE_CARDS if cards is not None else DM_MEMORY_WHERE_NO_CARDS,
+        )
     if desktop is not None:
         text += DESKTOP_BLOCK.format(apps="、".join(desktop) or "还没有（电脑上的小程序还没连上过）")
     if summary:
@@ -548,7 +594,7 @@ REVIEW_CARDS = """
 人设卡（每人一张，记这个人自己的事）：
 - 只记这个人自己说的、关于他自己的：怎么称呼他、他给自己定的设定（比如自称猫娘、在戏里的角色）、喜好和雷点、常玩的梗。别人说的关于他的事不记。
 - 一时的心情、只和今天有关的小事不记。别把别人人设卡上的话抄进这个人的卡。
-- 健康、住址、真实姓名、联系方式、感情这类敏感的事不记，除非他明确要求记住。
+- {sensitive}
 - 要更新就写改完之后完整的卡：在他现在的卡上改，还有用的内容都保留，最多 {card_max} 字。to 填这个人自己说的某条消息的编号（就是他说这件事的那条），name 填他的名字。没有新东西就别动他的卡。一次最多改 3 个人的卡。
 """
 
@@ -559,26 +605,71 @@ REVIEW_MEMORY = """
 """
 
 
+REVIEW_CARDS_SENSITIVE = "健康、住址、真实姓名、联系方式、感情这类敏感的事不记，除非他明确要求记住。"
+REVIEW_CARDS_SENSITIVE_DM = (
+    "健康、住址、学校单位、真实姓名、联系方式、钱、感情这类敏感的事不写进人设卡，就算他明确要求记住也不行"
+    "（人设卡服务器里会用到）。"
+)
+
 REVIEW_DM = """
-这段是私信里的聊天（只有这个人和它两个人）。记下来的东西服务器里的人都看得到：他说了要保密、不想让别人知道的，不记。
+这段是私信里的聊天（只有这个人和它两个人）。人设卡和长期记忆服务器里的人都看得到：他说了要保密、不想让别人知道的，还有健康、住址、学校单位、真实姓名、联系方式、钱、感情上的烦恼这类敏感的事，都不能写进这两样。
 """
+
+REVIEW_DM_MEMORY = """
+私信记忆（这个人自己的，跟着他走）：
+- {where}
+- 一时的心情、只和今天有关的小事不记。每条只记一件事，最多 {entry_max} 字；已经记过的别重复，过时的、记错的可以改或删。现在 {count} 条，最多 {max_entries} 条，快满了就合并、删掉旧的。
+- sensitive：健康、住址、学校单位、真实姓名、联系方式、钱、感情上的烦恼、他说了要保密或者不想让别人知道的，写 true（只在私信里用）；别的写 false（他在服务器里叫它时也会用上）。拿不准就写 true。他说过某条算不算敏感的，照他说的改。
+"""
+
+# 整理私信时：开了人设卡就先往人设卡写，剩下的才记进私信记忆
+REVIEW_DM_WHERE_CARDS = (
+    "关于他自己、长期有效、而且不敏感的（称呼、设定、喜好雷点、习惯、身份、爱好、常玩的梗），先写进他的人设卡；"
+    "写不进人设卡的才记进私信记忆：他和它之间的事（他最近在忙什么、约好的事、它答应他的事、私信里一起玩的剧情），还有敏感的事。"
+    "服务器的事写进长期记忆。同一件事只记一个地方。"
+)
+REVIEW_DM_WHERE_NO_CARDS = (
+    "记私信里聊到的、关于他和他们之间的事：他的称呼、设定、喜好，他最近在忙什么、约好的事、它答应他的事、私信里一起玩的剧情。"
+    "服务器的事写进长期记忆，别重复记。"
+)
 
 
 def build_review_prompt(
-    *, name: str, cards: bool, memory: bool, card_max: int, entry_max: int, count: int, max_entries: int, dm: bool = False
+    *,
+    name: str,
+    cards: bool,
+    memory: bool,
+    card_max: int,
+    entry_max: int,
+    count: int,
+    max_entries: int,
+    dm: bool = False,
+    dm_memory: bool = False,
+    dm_count: int = 0,
+    dm_max_entries: int = 150,
+    dm_entry_max: int = 200,
 ) -> str:
-    """整理记忆（回顾一段聊天）用的 system prompt。cards / memory：这里开了哪几样。dm：这段是私信。"""
+    """整理记忆（回顾一段聊天）用的 system prompt。cards / memory / dm_memory：这里开了哪几样。dm：这段是私信。"""
     what = []
     parts = []
     schema: dict[str, str] = {}
     if cards:
         what.append("说过话的人现在的人设卡")
-        parts.append(REVIEW_CARDS.format(card_max=card_max))
+        # 私信里（有私信记忆）：敏感的事就算他要求也不进人设卡（人设卡服务器里会用到），记进私信记忆
+        rule = REVIEW_CARDS_SENSITIVE_DM if dm else REVIEW_CARDS_SENSITIVE
+        parts.append(REVIEW_CARDS.format(card_max=card_max, sensitive=rule))
         schema["cards"] = '[{"to": 他自己那条消息的编号, "name": "他的名字", "text": "改好之后完整的人设卡"}]'
     if memory:
         what.append("这个服务器现在的长期记忆")
         parts.append(REVIEW_MEMORY.format(entry_max=entry_max, count=count, max_entries=max_entries))
         schema["memory"] = '[{"add": "新的一条"}, {"edit": 编号, "text": "改好的内容"}, {"delete": 编号}]'
+    if dm_memory:
+        what.append("他的私信记忆")
+        where = REVIEW_DM_WHERE_CARDS if cards else REVIEW_DM_WHERE_NO_CARDS
+        parts.append(REVIEW_DM_MEMORY.format(entry_max=dm_entry_max, count=dm_count, max_entries=dm_max_entries, where=where))
+        schema["dm_memory"] = (
+            '[{"add": "新的一条", "sensitive": true 或 false}, {"edit": 编号, "text": "改好的内容", "sensitive": true 或 false}, {"delete": 编号}]'
+        )
     shape = "{" + ", ".join(f'"{k}": {v}' for k, v in schema.items()) + "}"
     empty = "{" + ", ".join(f'"{k}": []' for k in schema) + "}"
     return REVIEW_SYSTEM.format(

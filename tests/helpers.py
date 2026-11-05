@@ -95,10 +95,12 @@ class FakeTransport:
         self.mentions: list[tuple[int, ...]] = []  # 每条发出去的文字真的提醒了谁（和 sent 一一对应）
         self.dm_with: dict[int, str] = {}  # 私信频道 -> 对方的名字（还要在 places 里登记成 dm=True）
         self.dm_users: dict[int, int] = {}  # 私信频道 -> 对方的用户 ID
+        self.guild_names: dict[int, str] = {}  # 服务器 -> 名字（没登记的叫“测试服”）
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
+        place = self.places.get(channel_id)
         return ChannelInfo(
-            guild_name="测试服",
+            guild_name=self.guild_names.get(place.guild_id if place is not None else GUILD, "测试服"),
             channel_name=self.names.get(channel_id, f"频道{channel_id}"),
             bot_name="小D",
             emojis=list(self.emojis),

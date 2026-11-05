@@ -73,6 +73,7 @@ LINK_MODES = {
 NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
 # 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
+GUILD_ONLY_KEYS = ("dm", "dm_memory", "cross_server")  # 只看全服务器这一级的参数
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
 
 
@@ -390,6 +391,14 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         )
     else:
         lines.append("私信：关")
+    if bot.settings.get("dm_memory", guild_id=interaction.guild_id):
+        lines.append("私信记忆：开（私信挂在这里的人，私信里聊的记进他自己的私信记忆；他在这里叫它时带上不敏感的那些）")
+    else:
+        lines.append("私信记忆：关")
+    if bot.settings.get("cross_server", guild_id=interaction.guild_id):
+        lines.append("跨服务器：开（和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的会跟着他走）")
+    else:
+        lines.append("跨服务器：关")
     if st["music_on"]:
         playing = f" · 现在{st['playing']}" if st["playing"] else ""
         lines.append(f"点歌：开（/ds-music，只能放 B站的，按歌名找算一次联网搜索）{discord_safe(playing)}")
@@ -481,8 +490,56 @@ def dm_channel_of(bot: "DSBot", interaction: discord.Interaction) -> int | None:
 
 DM_WARNING = (
     "⚠️ 私信里聊的事可能会记进那边的长期记忆和你的人设卡；你在那边的频道里叫它时，它也可能提起刚在私信里聊的，"
-    "频道里的人都看得到。不想让别人知道的，跟它说一声“保密”。"
+    "频道里的人都看得到。不想让别人知道的，跟它说一声“保密”。\n"
+    "📒 你们之间的事会记进你的私信记忆：标着敏感的只在私信里用；不敏感的，你在服务器里叫它时也会用上，可能被提起。"
+    "敏感不敏感是它自己判断的，可能判错：用 `/ds-dm 记忆` 查看、删掉或者改成敏感。"
 )
+
+
+def dm_memory_text(bot: "DSBot", user_id: int) -> str:
+    """某个人的私信记忆（只给他自己看）。"""
+    assert bot.memory is not None
+    entries = bot.memory.dm_entries(user_id)
+    cap = bot.cfg.engine.dm_memory_max_entries
+    lines = [f"**你的私信记忆**（{len(entries)} / {cap} 条）"]
+    lines += [f"({e.no}) {e.text}" + ("〔敏感〕" if e.sensitive else "") for e in entries] or [
+        "还没有。私信里叫它记住你们之间的事，或者私信安静下来后它整理时觉得值得记，就会记在这里。"
+    ]
+    if entries:
+        lines.append("标着〔敏感〕的只在私信里用；别的你在服务器里叫它时也会用上。")
+        lines.append(
+            "判错了就改：`/ds-dm 记忆 操作:设为不敏感 编号:3`（编号一栏输入几个字就能从你的记忆里选），"
+            "或者私信里直接跟它说“第 3 条不算敏感”。"
+        )
+    return "\n".join(lines)
+
+
+def withdraw_dm_memory(bot: "DSBot", user_id: int | None = None, *, guild_id: int | None = None) -> None:
+    """频道记录里附过的私信记忆撤回（下次照新的样子、新的设置重新附）。"""
+    withdraw = getattr(getattr(bot, "engine", None), "withdraw_dm_memory", None)
+    if withdraw is not None:
+        withdraw(user_id, guild_id=guild_id)
+
+
+def settings_changed(bot: "DSBot", key: str, scope: str, scope_id: int) -> None:
+    """改了私信记忆、跨服务器这两个参数：这个服务器（全局的话是所有服务器）频道里附过的私信记忆先撤回。"""
+    if key in ("dm_memory", "cross_server"):
+        withdraw_dm_memory(bot, guild_id=scope_id if scope == "guild" else None)
+
+
+def dm_memory_choices(bot: "DSBot", user_id: int, current: str) -> list[Choice[int]]:
+    """/ds-dm 记忆 的编号：从自己的私信记忆里选（输入的字能筛选；只有自己看得到）。"""
+    memory = getattr(bot, "memory", None)
+    if memory is None:
+        return []
+    words = current.strip().casefold()
+    out: list[Choice[int]] = []
+    for e in memory.dm_entries(user_id):
+        label = f"({e.no}) {e.text}" + ("〔敏感〕" if e.sensitive else "")
+        if words and words not in label.casefold():
+            continue
+        out.append(Choice(name=label if len(label) <= 100 else label[:99] + "…", value=e.no))
+    return out[:25]
 
 
 def register_dm_commands(bot: "DSBot") -> None:
@@ -585,6 +642,14 @@ def register_dm_commands(bot: "DSBot") -> None:
         spent = bot.store.channel_spent(bot.ledger.day(now), channel_id) if channel_id is not None else 0.0
         cap = bot.settings.get("dm_daily_budget_usd", guild_id=guild.id)
         lines = [f"私信用的是「{discord_safe(guild.name)}」的人设、长期记忆和人设卡。", DM_WARNING]
+        memory = getattr(bot, "memory", None)
+        if memory is not None:
+            entries = memory.dm_entries(user_id)
+            hidden = sum(1 for e in entries if e.sensitive)
+            if not bot.settings.get("dm_memory", guild_id=guild.id):
+                lines.append("私信记忆：那个服务器关掉了（已经记下的还在，用 `/ds-dm 记忆` 看）")
+            else:
+                lines.append(f"私信记忆：{len(entries)} 条（{hidden} 条敏感），用 `/ds-dm 记忆` 查看和管理")
         if user_id == bot.secrets.owner_id:
             lines.append(f"今天私信花了 ${spent:.4f}（你是 bot 的主人，不受每人上限限制）")
         else:
@@ -595,6 +660,59 @@ def register_dm_commands(bot: "DSBot") -> None:
             lines.append("⚠️ 你已经不在那个服务器里了。" + await switch_note(user_id, home))
         await _reply(interaction, "\n".join(lines))
 
+    async def memory_numbers(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
+        return dm_memory_choices(bot, interaction.user.id, current)
+
+    @dm.command(name="记忆", description="你的私信记忆（它和你之间记下的事）：查看、删掉某条、改成敏感，或者全部清空")
+    @app_commands.rename(op="操作", no="编号")
+    @app_commands.describe(op="不选 = 查看", no="删除、改敏感标记时选第几条（输入几个字可以筛选）")
+    @app_commands.choices(
+        op=[
+            Choice(name="查看", value="view"),
+            Choice(name="删除", value="delete"),
+            Choice(name="设为敏感（只在私信里用）", value="private"),
+            Choice(name="设为不敏感", value="public"),
+            Choice(name="清空", value="clear"),
+        ]
+    )
+    @app_commands.autocomplete(no=memory_numbers)
+    async def dm_memory(interaction: discord.Interaction, op: Optional[Choice[str]] = None, no: Optional[int] = None) -> None:
+        if getattr(bot, "memory", None) is None:
+            await _reply(interaction, "私信记忆没有启用。")
+            return
+        user_id = interaction.user.id
+        what = op.value if op is not None else "view"
+        if what == "view":
+            await _reply_long(interaction, dm_memory_text(bot, user_id))
+            return
+        if what == "clear":
+            n = bot.memory.dm_clear(user_id)
+            withdraw_dm_memory(bot, user_id)
+            await _reply(interaction, f"已清空你的私信记忆（{n} 条）。之后整理聊天时，也不会拿清空之前的聊天把它们重新记回来。")
+            return
+        if no is None:
+            await _reply(interaction, "填上编号（先用 `/ds-dm 记忆` 查看，每条前面括号里的数字就是编号）。")
+            return
+        if what == "delete":
+            current = bot.memory.dm_get(user_id, no)
+            ok = bot.memory.dm_delete(user_id, no)
+            if ok and current is not None and not current.sensitive:
+                withdraw_dm_memory(bot, user_id)  # 频道里可能附过它
+            await _reply(interaction, f"已删掉第 {no} 条。" if ok else f"没有第 {no} 条（用 `/ds-dm 记忆` 看看编号）。")
+            return
+        sensitive = what == "private"
+        current = bot.memory.dm_get(user_id, no)
+        if current is None:
+            await _reply(interaction, f"没有第 {no} 条（用 `/ds-dm 记忆` 看看编号）。")
+            return
+        bot.memory.dm_edit(user_id, no, None, sensitive=sensitive, via="command")
+        if sensitive and not current.sensitive:
+            withdraw_dm_memory(bot, user_id)  # 改成敏感：频道里附过的撤回
+        await _reply(
+            interaction,
+            f"第 {no} 条改成了" + ("敏感：只在私信里用。" if sensitive else "不敏感：你在服务器里叫它时也会用上。"),
+        )
+
     @dm.command(name="清空", description="清空私信里的聊天记录（服务器的长期记忆和你的人设卡不受影响）")
     async def dm_reset(interaction: discord.Interaction) -> None:
         channel_id = dm_channel_of(bot, interaction)
@@ -602,7 +720,10 @@ def register_dm_commands(bot: "DSBot") -> None:
             await _reply(interaction, "你还没私信过它，没有私信记录。")
             return
         bot.engine.reset_channel(channel_id)
-        await _reply(interaction, "私信记录清空了，它从头开始（服务器的长期记忆和你的人设卡不受影响）。")
+        await _reply(
+            interaction,
+            "私信记录清空了，它从头开始（服务器的长期记忆、你的人设卡和私信记忆不受影响；私信记忆用 `/ds-dm 记忆` 管）。",
+        )
 
     bot.tree.add_command(dm)
 
@@ -905,8 +1026,9 @@ def register_commands(bot: "DSBot") -> None:
     async def set_cmd(
         interaction: discord.Interaction, key: Choice[str], value: str, scope: Optional[Choice[str]] = None
     ) -> None:
-        # 私信不在任何频道、类别里：只看全服务器这一级
-        target = _target(interaction, scope) if key.value != "dm" else ("guild", interaction.guild_id, "全服务器")
+        # 私信、私信记忆、跨服务器不在任何频道、类别里：只看全服务器这一级
+        whole = key.value in GUILD_ONLY_KEYS
+        target = _target(interaction, scope) if not whole else ("guild", interaction.guild_id, "全服务器")
         if target is None:
             await _reply(interaction, NO_CATEGORY)
             return
@@ -914,6 +1036,7 @@ def register_commands(bot: "DSBot") -> None:
         spec = SPECS[key.value]
         if value.strip() in RESET_WORDS:
             bot.settings.unset(scope_name, scope_id, key.value)
+            settings_changed(bot, key.value, scope_name, scope_id)
             await _reply(interaction, f"{where}：「{spec.label}」已恢复默认。")
             return
         try:
@@ -921,6 +1044,7 @@ def register_commands(bot: "DSBot") -> None:
         except ValueError as exc:
             await _reply(interaction, f"没改成：{exc}")
             return
+        settings_changed(bot, key.value, scope_name, scope_id)
         await _reply(interaction, f"{where}：「{spec.label}」= {format_value(spec, parsed)}\n（{spec.help}）")
 
     @admin.command(name="人设", description="修改人设（会弹出编辑框）")
@@ -1050,6 +1174,7 @@ def register_commands(bot: "DSBot") -> None:
         spec = SPECS[key.value]
         if value.strip() in RESET_WORDS:
             bot.settings.unset(scope_name, scope_id, key.value)
+            settings_changed(bot, key.value, scope_name, scope_id)
             await _reply(interaction, f"{where}：「{spec.label}」已恢复 config.toml 里的默认值。")
             return
         try:
@@ -1057,6 +1182,7 @@ def register_commands(bot: "DSBot") -> None:
         except ValueError as exc:
             await _reply(interaction, f"没改成：{exc}")
             return
+        settings_changed(bot, key.value, scope_name, scope_id)
         await _reply(interaction, f"{where}：「{spec.label}」= {format_value(spec, parsed)}\n（{spec.help}）")
 
     @owner.command(name="总览", description="今天各服务器的花费和调用情况")
@@ -1081,7 +1207,7 @@ def register_commands(bot: "DSBot") -> None:
             lines.append("⚠️ DeepSeek 调用暂停中（余额不足或 key 无效，详见日志）")
         await _reply(interaction, "\n".join(lines))
 
-    @owner.command(name="删除人设卡", description="按用户 ID 删掉一个人在所有服务器的人设卡（看不到内容）")
+    @owner.command(name="删除人设卡", description="按用户 ID 删掉一个人在所有服务器的人设卡和他的私信记忆（看不到内容）")
     @app_commands.rename(user="用户id")
     @app_commands.describe(user="那个人的用户 ID（开发者模式下右键他的头像 → 复制用户 ID）")
     async def owner_delete_card(interaction: discord.Interaction, user: str) -> None:
@@ -1094,13 +1220,19 @@ def register_commands(bot: "DSBot") -> None:
             await _reply(interaction, "用户 ID 应该是一串数字（开发者模式下右键头像 → 复制用户 ID）。")
             return
         cards_deleted, versions_deleted = bot.cards.delete_user(int(user.strip()))
-        log.info("bot 主人删掉了用户 %s 的人设卡（%d 张，旧版本 %d 个）", user.strip(), cards_deleted, versions_deleted)
+        memory = getattr(bot, "memory", None)
+        notes = memory.dm_clear(int(user.strip())) if memory is not None else 0
+        withdraw_dm_memory(bot, int(user.strip()))
+        log.info(
+            "bot 主人删掉了用户 %s 的人设卡（%d 张，旧版本 %d 个）和私信记忆（%d 条）", user.strip(), cards_deleted, versions_deleted, notes
+        )
         if cards_deleted:
             text = f"已删掉这个人的 {cards_deleted} 张人设卡（连同旧版本）。"
         elif versions_deleted:
             text = "这个人现在没有人设卡，已删掉留着的旧版本。"
         else:
             text = "这个人没有人设卡。"
-        await _reply(interaction, text + "\n之后整理聊天时，也不会拿删掉之前的聊天把卡重新写回来。")
+        text += f"\n私信记忆：删掉了 {notes} 条。" if notes else "\n这个人没有私信记忆。"
+        await _reply(interaction, text + "\n之后整理聊天时，也不会拿删掉之前的聊天把它们重新写回来。")
 
     bot.tree.add_command(owner, guild=discord.Object(id=bot.secrets.control_guild_id))

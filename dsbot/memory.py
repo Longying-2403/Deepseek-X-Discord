@@ -3,6 +3,8 @@
 - 人设卡：每个服务器里每人一张，记本人说的、关于自己的事（称呼、设定、喜好、梗）。管理员看不到；
   本人用 /ds-rp 查看、修改、清空；bot 主人只能按用户 ID 整个删掉（看不到内容）。每人保留最近几个旧版本。
 - 长期记忆：每个服务器一份带编号的清单，记群里的事（约定、大事、长期的梗、进行中的剧情）。
+- 私信记忆：每人一份带编号的清单（不分服务器，跟着人走），记私信里聊到的、他和 bot 之间的事。每条标着敏感不敏感：
+  敏感的只在他自己的私信里用；不敏感的，他在服务器里叫 bot 时也会带上。本人用 /ds-dm 记忆 查看、删除、清空。
 """
 
 from __future__ import annotations
@@ -58,6 +60,24 @@ CREATE TABLE IF NOT EXISTS memory_seq (
     guild_id INTEGER PRIMARY KEY,
     next_no INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dm_memories (
+    user_id INTEGER NOT NULL,
+    no INTEGER NOT NULL,          -- 这个人的编号（删掉的不再用，免得改错）
+    text TEXT NOT NULL,
+    sensitive INTEGER NOT NULL,   -- 1 = 敏感：只在他自己的私信里用
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    via TEXT NOT NULL,            -- chat / review / command
+    PRIMARY KEY (user_id, no)
+);
+CREATE TABLE IF NOT EXISTS dm_memory_seq (
+    user_id INTEGER PRIMARY KEY,
+    next_no INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dm_memory_cleared (
+    user_id INTEGER PRIMARY KEY,
+    cleared_at REAL NOT NULL      -- 整理记忆时，这之前的聊天不再拿来写他的私信记忆（免得清掉的又被“想起来”）
+);
 """
 
 
@@ -75,6 +95,15 @@ class Card:
 class Memory:
     no: int
     text: str
+    updated_at: float
+    via: str
+
+
+@dataclass
+class DmMemory:
+    no: int
+    text: str
+    sensitive: bool
     updated_at: float
     via: str
 
@@ -312,12 +341,109 @@ class MemoryStore:
             cur = self.db.execute("DELETE FROM memories WHERE guild_id = ?", (guild_id,))
         return cur.rowcount
 
+    # ---------------------------------------------------------------- 私信记忆（每人一份）
+
+    @staticmethod
+    def _dm(r: Any) -> DmMemory:
+        return DmMemory(r["no"], r["text"], bool(r["sensitive"]), r["updated_at"], r["via"])
+
+    def dm_entries(self, user_id: int) -> list[DmMemory]:
+        rows = self.db.execute(
+            "SELECT no, text, sensitive, updated_at, via FROM dm_memories WHERE user_id = ? ORDER BY no", (user_id,)
+        )
+        return [self._dm(r) for r in rows]
+
+    def dm_get(self, user_id: int, no: int) -> DmMemory | None:
+        r = self.db.execute(
+            "SELECT no, text, sensitive, updated_at, via FROM dm_memories WHERE user_id = ? AND no = ?", (user_id, no)
+        ).fetchone()
+        return self._dm(r) if r is not None else None
+
+    def dm_add(self, user_id: int, text: str, *, sensitive: bool, via: str, now: float | None = None) -> int:
+        """记一条，返回编号。调用方先检查条数上限和字数。"""
+        now = time.time() if now is None else now
+        with self.db:
+            row = self.db.execute("SELECT next_no FROM dm_memory_seq WHERE user_id = ?", (user_id,)).fetchone()
+            no = row["next_no"] if row is not None else 1
+            self.db.execute(
+                "INSERT INTO dm_memories (user_id, no, text, sensitive, created_at, updated_at, via) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, no, clean_memory(text), int(bool(sensitive)), now, now, via),
+            )
+            self.db.execute(
+                "INSERT INTO dm_memory_seq (user_id, next_no) VALUES (?, ?) ON CONFLICT (user_id) DO UPDATE SET next_no = excluded.next_no",
+                (user_id, no + 1),
+            )
+        return no
+
+    def dm_edit(
+        self, user_id: int, no: int, text: str | None, *, sensitive: bool | None = None, via: str, now: float | None = None
+    ) -> bool:
+        """改一条：text 是 None 就不改内容，sensitive 是 None 就不改敏感标记。"""
+        current = self.dm_get(user_id, no)
+        if current is None:
+            return False
+        new_text = clean_memory(text) if text is not None else current.text
+        new_sensitive = current.sensitive if sensitive is None else bool(sensitive)
+        if new_text == current.text and new_sensitive == current.sensitive:
+            return False
+        now = time.time() if now is None else now
+        with self.db:
+            cur = self.db.execute(
+                "UPDATE dm_memories SET text = ?, sensitive = ?, updated_at = ?, via = ? WHERE user_id = ? AND no = ?",
+                (new_text, int(new_sensitive), now, via, user_id, no),
+            )
+        return cur.rowcount > 0
+
+    def dm_delete(self, user_id: int, no: int) -> bool:
+        with self.db:
+            cur = self.db.execute("DELETE FROM dm_memories WHERE user_id = ? AND no = ?", (user_id, no))
+        return cur.rowcount > 0
+
+    def dm_clear(self, user_id: int, *, now: float | None = None) -> int:
+        """全部清掉，记下清空的时间（整理记忆时，这之前的聊天不再拿来写他的私信记忆）。"""
+        now = time.time() if now is None else now
+        with self.db:
+            cur = self.db.execute("DELETE FROM dm_memories WHERE user_id = ?", (user_id,))
+            self.db.execute(
+                "INSERT INTO dm_memory_cleared (user_id, cleared_at) VALUES (?, ?) "
+                "ON CONFLICT (user_id) DO UPDATE SET cleared_at = excluded.cleared_at",
+                (user_id, now),
+            )
+        return cur.rowcount
+
+    def dm_cleared_at(self, user_id: int) -> float | None:
+        r = self.db.execute("SELECT cleared_at FROM dm_memory_cleared WHERE user_id = ?", (user_id,)).fetchone()
+        return float(r["cleared_at"]) if r is not None else None
+
 
 # ---------------------------------------------------------------------------
 # 整理记忆（模型回顾一段聊天之后的输出）
 # ---------------------------------------------------------------------------
 
 _INDEX = re.compile(r"[0-9]{1,9}")
+
+
+def _squash(text: str) -> str:
+    return "".join(text.split()).casefold()
+
+
+def overlaps(text: str, secret: str) -> bool:
+    """text 是不是说到了 secret 这件事：原话（4 个字以上）出现在里面，或者 secret 六成以上的两字组合都出现了。
+    只是兜底（换个说法就认不出来），主要还是靠提示词。"""
+    s, t = _squash(secret), _squash(text)
+    if not s or not t:
+        return False
+    if len(s) >= 4 and s in t:
+        return True
+    grams = {s[i : i + 2] for i in range(len(s) - 1)}
+    if len(grams) < 3:
+        return False
+    return sum(1 for g in grams if g in t) / len(grams) >= 0.6
+
+
+def reveals(text: str, secrets: list[str], already: str = "") -> bool:
+    """text 说到了哪件敏感的事（already 里本来就说到的不算：比如本人自己写在人设卡上的）。"""
+    return any(overlaps(text, s) and not (already and overlaps(already, s)) for s in secrets)
 
 
 def coerce_no(value: Any) -> int | None:
@@ -341,6 +467,33 @@ class MemoryOp:
     op: str  # add / edit / delete
     no: int | None = None
     text: str | None = None
+    sensitive: bool | None = None  # 私信记忆：敏感不敏感（None = 没写；edit 时 None 就是不改）
+
+
+_TRUE = ("true", "yes", "1", "是", "对", "敏感")
+_FALSE = ("false", "no", "0", "否", "不", "不敏感")
+
+
+def coerce_flag(value: Any) -> bool | None:
+    """true / "true" / "是" / 1 都认；看不懂就是 None。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+    return None
+
+
+def _sensitive(item: dict[str, Any]) -> bool | None:
+    for key in ("sensitive", "private", "secret", "敏感"):
+        if key in item:
+            return coerce_flag(item[key])
+    return None
 
 
 def parse_memory_op(item: Any) -> MemoryOp | None:
@@ -348,14 +501,17 @@ def parse_memory_op(item: Any) -> MemoryOp | None:
     if not isinstance(item, dict):
         return None
     op = str(item.get("op", "")).strip().lower()
+    sensitive = _sensitive(item)
     if "add" in item or op == "add":
         text = item.get("add") if isinstance(item.get("add"), str) else item.get("text")
-        return MemoryOp("add", text=text.strip()) if isinstance(text, str) and text.strip() else None
+        return MemoryOp("add", text=text.strip(), sensitive=sensitive) if isinstance(text, str) and text.strip() else None
     if "edit" in item or op == "edit":
         no = coerce_no(item.get("edit", item.get("no")))
         text = item.get("text")
         if no is not None and isinstance(text, str) and text.strip():
-            return MemoryOp("edit", no=no, text=text.strip())
+            return MemoryOp("edit", no=no, text=text.strip(), sensitive=sensitive)
+        if no is not None and text is None and sensitive is not None:
+            return MemoryOp("edit", no=no, sensitive=sensitive)  # 只改敏感标记
         return None
     for key in ("delete", "remove"):
         if key in item or op == key:
@@ -389,8 +545,8 @@ def _items(value: Any) -> list[Any]:
     return []
 
 
-def parse_review(content: str) -> tuple[list[tuple[int, str, str | None]], list[MemoryOp]] | None:
-    """整理记忆的输出 → ([(消息编号, 新的完整人设卡, 写的是谁)], [长期记忆的改动])。不是合法 JSON 时返回 None。"""
+def parse_review(content: str) -> tuple[list[tuple[int, str, str | None]], list[MemoryOp], list[MemoryOp]] | None:
+    """整理记忆的输出 → ([(消息编号, 新的完整人设卡, 写的是谁)], [长期记忆的改动], [私信记忆的改动])。不是合法 JSON 时返回 None。"""
     data = _load_json(content)
     if not isinstance(data, dict):
         return None
@@ -404,4 +560,6 @@ def parse_review(content: str) -> tuple[list[tuple[int, str, str | None]], list[
         if to is not None and isinstance(text, str) and text.strip():
             cards.append((to, text, name.strip() if isinstance(name, str) and name.strip() else None))
     ops = [op for op in (parse_memory_op(item) for item in _items(data.get("memory"))) if op is not None]
-    return cards, ops
+    raw_dm = next((data[k] for k in ("dm_memory", "private_memory", "私信记忆") if k in data), None)
+    dm_ops = [op for op in (parse_memory_op(item) for item in _items(raw_dm)) if op is not None]
+    return cards, ops, dm_ops

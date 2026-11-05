@@ -373,7 +373,8 @@ class Homes(BotCase):
         guild, note = await bot.dm_home(NS(id=11), DM)
         self.assertEqual(guild.id, GUILD)
         self.assertIn("「测试服」", note)
-        self.assertNotIn("/ds-dm", note)
+        self.assertNotIn("/ds-dm 服务器", note)  # 只有一个共同的服务器：不提换服务器
+        self.assertIn("/ds-dm 记忆", note)  # 私信记忆怎么看、怎么改
         self.assertEqual((bot.store.dm_home(11), bot.dm_guild(DM)), ((GUILD, DM), GUILD))
         again, note = await bot.dm_home(NS(id=11), DM)
         self.assertEqual((again.id, note), (GUILD, None))  # 定下来以后不再说

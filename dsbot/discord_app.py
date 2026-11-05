@@ -448,6 +448,12 @@ class DiscordVoice:
             await vc.disconnect(force=True)
 
 
+DM_MEMORY_NOTE = (
+    "📒 我们之间的事会记进你的私信记忆：敏感的只在私信里用；不敏感的，你在服务器里叫我时我也会用上。"
+    "敏感不敏感是我自己判断的，可能判错：用 `/ds-dm 记忆` 查看、删掉或者改成敏感，也可以直接跟我说。"
+)
+
+
 class DSBot(discord.Client):
     def __init__(
         self,
@@ -763,8 +769,20 @@ class DSBot(discord.Client):
         return (
             f"私信里我会用「{name}」这个服务器的人设、长期记忆和你的人设卡来聊。\n"
             f"⚠️ 这里聊的事可能会记进那边的长期记忆和你的人设卡；你在「{name}」的频道里叫我时，我也可能提起刚在私信里聊的，"
-            "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。"
+            "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。\n" + DM_MEMORY_NOTE
         )
+
+    def _memory_notice(self, user_id: int, guild: Any, note: str | None) -> str | None:
+        """私信记忆（2.6.0 起）：以前就私信过它的人，下一次私信时说明一次；第一次私信的说明里本来就有。"""
+        if self.store.dm_noticed(user_id, "dm_memory"):
+            return note
+        if note is not None:
+            self.store.mark_dm_noticed(user_id, "dm_memory")
+            return note
+        if getattr(self, "memory", None) is None or not self.settings.get("dm_memory", guild_id=guild.id):
+            return None  # 那个服务器没开私信记忆：开了以后再说
+        self.store.mark_dm_noticed(user_id, "dm_memory")
+        return "📒 新功能：" + DM_MEMORY_NOTE.removeprefix("📒 ")
 
     async def _on_dm(self, message: discord.Message) -> None:
         if message.author.bot or not isinstance(message.channel, discord.DMChannel):
@@ -782,6 +800,7 @@ class DSBot(discord.Client):
                     self._dm_noticed[message.author.id] = now
                     await self.transport.send(channel_id, note, reply_to=None, ping=False)
                 return
+            note = self._memory_notice(message.author.id, guild, note)
             if note is not None:
                 await self.transport.send(channel_id, note, reply_to=None, ping=False)
             try:

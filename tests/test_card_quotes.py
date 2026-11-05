@@ -449,7 +449,7 @@ class CardQuotes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(llm.calls), 3)
         self.assertNotIn("想法", engine.states[CHANNEL].last_decision)  # 记录里有卡：想法照样不给管理员看
         line = [x for x in logs.output if "点名 →" in x][-1]
-        self.assertIn("（附着人设卡，想法略）", line)
+        self.assertIn("（附着人设卡或私信记忆，想法略）", line)
 
     async def test_broken_output_after_restart_is_not_logged(self):
         cards, memory = stores()
@@ -464,7 +464,7 @@ class CardQuotes(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("dsbot.engine", "INFO") as logs:
             await engine.drain()
         text = "\n".join(logs.output)
-        self.assertIn("（附着人设卡，内容略）", text)
+        self.assertIn("（附着人设卡或私信记忆，内容略）", text)
         self.assertNotIn("奶糖", text)
 
     async def test_cards_in_old_history_are_protected(self):

@@ -50,6 +50,8 @@ images = true                     # 让它自己发表情包库里的图、上�
 cards = true                      # 人设卡：记住群友自己说的称呼、设定、喜好（群友用 /ds-rp 管自己的卡，管理员看不到）
 long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/ds 长期记忆 管理）
 dm = true                         # 私信：服务器成员可以私信它（私信里用这个服务器的人设、记忆和人设卡；/ds 设置 私信 关掉）
+dm_memory = true                  # 私信记忆：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时带上不敏感的那些
+cross_server = false              # 跨服务器：和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的跟着他走
 
 # —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
@@ -109,6 +111,10 @@ cards_per_round = 6               # 一轮最多附几个人的人设卡
 card_list_limit = 100             # 告诉它哪些人有人设卡，最多列多少个名字
 memory_max_entries = 50           # 每个服务器的长期记忆最多几条
 memory_entry_chars = 200          # 每条长期记忆最多多少字
+dm_memory_max_entries = 150       # 每个人的私信记忆最多几条（满了它会自己合并、删掉旧的）
+dm_memory_entry_chars = 200       # 每条私信记忆最多多少字
+dm_memory_prompt_chars = 6000     # 私信里最多列出多少字的私信记忆（太多了只列最近改过的；整理记忆时全都看得到）
+dm_memory_attach_entries = 20     # 他在服务器里叫它时，最多附上几条不敏感的私信记忆（最近改过的）
 review_idle_seconds = 600         # 频道安静 10 分钟、又攒了几轮新聊天，就整理一次记忆
 review_min_rounds = 3             # 至少攒了几轮新聊天才整理
 review_max_chars = 16000          # 整理记忆时一次给它看多少字的聊天（更长的分几次）

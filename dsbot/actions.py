@@ -16,7 +16,9 @@ MAX_QUERY_CHARS = 200
 MAX_PERSONA_PARSE_CHARS = 8000  # 解析时先留这么多；超过人设上限（4000 字）的由引擎拒绝并告诉模型
 MAX_CARD_PARSE_CHARS = 4000  # 人设卡同理（上限由引擎按配置检查）
 MAX_MEMORY_OPS = 3  # 一轮里最多改几条长期记忆
+MAX_DM_MEMORY_OPS = 3  # 一轮里最多改几条私信记忆
 _MEMORY_KINDS = ("memory", "memo", "long_memory", "note", "长期记忆")
+_DM_MEMORY_KINDS = ("dm_memory", "private_memory", "dm_note", "私信记忆")
 _CARD_KINDS = ("card", "set_card", "update_card", "persona_card", "人设卡")
 _WHO_KINDS = ("who", "lookup_card", "find_card", "card_lookup", "查人设卡")
 _MUSIC_KINDS = ("music", "play_music", "song", "play", "点歌", "放歌")
@@ -215,10 +217,14 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
             raw = item.get("text", item.get("card", item.get("content")))
             if isinstance(raw, str) and to is not None and not any(a.kind == "card" and a.to == to for a in actions):
                 actions.append(Action("card", to, text=raw.strip()[:MAX_CARD_PARSE_CHARS]))
+        elif kind in _DM_MEMORY_KINDS:
+            op = parse_memory_op(item)
+            if op is not None and sum(a.kind == "dm_memory" for a in actions) < MAX_DM_MEMORY_OPS:
+                actions.append(Action("dm_memory", op=op.op, index=op.no, text=op.text, sensitive=op.sensitive))
         elif kind in _MEMORY_KINDS or (kind == "remember" and not any(k in item for k in ("channel", "from", "where"))):
             op = parse_memory_op(item)
             if op is not None and sum(a.kind == "memory" for a in actions) < MAX_MEMORY_OPS:
-                actions.append(Action("memory", op=op.op, index=op.no, text=op.text))
+                actions.append(Action("memory", op=op.op, index=op.no, text=op.text, sensitive=op.sensitive))
         elif kind in _WHO_KINDS:
             name = _text_field(item, "name", "who", "user", "query")
             if name and not any(a.kind == "who" and a.name == name for a in actions):

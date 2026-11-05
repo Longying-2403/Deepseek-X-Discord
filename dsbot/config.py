@@ -48,6 +48,8 @@ _SPEC_LIST = [
     Spec("cards", "人设卡", bool, "admin", "记住群友自己说的称呼、设定、喜好，聊天时用上（群友用 /ds-rp 管自己的卡，管理员看不到）"),
     Spec("long_memory", "长期记忆", bool, "admin", "记住这个服务器的约定、大事、长期的梗和剧情（用 /ds 长期记忆 管理）"),
     Spec("dm", "私信", bool, "admin", "让服务器成员私信它：私信里用这个服务器的人设、长期记忆和人设卡；私信里聊的可能记进来，也可能在他叫它的频道里被提起（只看全服务器这一级）"),
+    Spec("dm_memory", "私信记忆", bool, "admin", "私信挂在这个服务器的人：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时，带上不敏感的那些（只看全服务器这一级）"),
+    Spec("cross_server", "跨服务器", bool, "admin", "和别的也开了这项的服务器之间，同一个人跟它聊过的会跟着他走：他最近几小时在那边跟它的对话、私信记忆里不敏感的那些（只看全服务器这一级）"),
     # —— 主人 ——
     Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
@@ -85,6 +87,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "cards": True,
     "long_memory": True,
     "dm": True,
+    "dm_memory": True,
+    "cross_server": False,
     "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
@@ -236,6 +240,10 @@ class EngineConfig:
     card_list_limit: int = 100  # 告诉它哪些人有人设卡，最多列多少个名字
     memory_max_entries: int = 50  # 每个服务器的长期记忆最多几条
     memory_entry_chars: int = 200  # 每条长期记忆最多多少字
+    dm_memory_max_entries: int = 150  # 每个人的私信记忆最多几条（满了它会自己合并、删掉旧的）
+    dm_memory_entry_chars: int = 200  # 每条私信记忆最多多少字
+    dm_memory_prompt_chars: int = 6000  # 私信里最多列出多少字的私信记忆（太多了只列最近改过的；整理记忆时全都看得到）
+    dm_memory_attach_entries: int = 20  # 他在服务器里叫它时，最多附上几条不敏感的私信记忆（最近改过的）
     review_idle_seconds: float = 600  # 频道安静这么久、又攒了几轮新聊天，就整理一次记忆
     review_min_rounds: int = 3  # 至少攒了几轮新聊天才整理
     review_max_chars: int = 16000  # 整理记忆时一次给它看多少字的聊天记录（更长的分几次）
