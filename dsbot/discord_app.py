@@ -31,6 +31,7 @@ from .desktop import DesktopHub
 from .engine import Engine
 from .images import MAX_RAW_BYTES
 from .ledger import Ledger
+from .dstools import DeepSeekTools
 from .links import LinkReader
 from .llm import DeepSeekClient
 from .memes import MemeLibrary
@@ -474,20 +475,14 @@ class DSBot(discord.Client):
         self.llm = llm
         self.tree = app_commands.CommandTree(self)
         self.transport = DiscordTransport(self)
-        self.searcher = WebSearch(
-            api_key=secrets.deepseek_api_key,
-            url=cfg.deepseek.anthropic_url,
-            model=cfg.deepseek.model,
-            timeout=cfg.deepseek.search_timeout_seconds,
-            max_uses=cfg.deepseek.search_max_uses,
-            tavily_key=secrets.tavily_api_key,
-        )
-        # 读链接、找图：推文走 FxTwitter（不用 key），网页和找图要 Tavily。
+        # 联网搜索、读链接、按歌名找歌：先用 DeepSeek 的 Search / Fetch 接口，不行再用 Tavily；推文走 FxTwitter；找图只有 Tavily。
         # 注意别叫 self.http：那是 discord.py 自己连 Discord 用的客户端，覆盖掉就登录不了
         self.web = HttpClient()
+        self.ds_tools = DeepSeekTools(self.web, secrets.deepseek_api_key, cfg.deepseek.base_url)
         tavily = Tavily(self.web, secrets.tavily_api_key) if secrets.tavily_api_key else None
         self.tavily = tavily
-        self.links = LinkReader(self.web, tavily, tz=cfg.bot.timezone)
+        self.searcher = WebSearch(self.ds_tools, tavily, tz=cfg.bot.timezone)
+        self.links = LinkReader(self.web, tavily, tz=cfg.bot.timezone, tools=self.ds_tools)
         self.pictures = (
             PictureFinder(
                 self.web,
@@ -586,7 +581,7 @@ class DSBot(discord.Client):
             log.warning("点歌用不了：%s", problem)
             return
         try:
-            source = BiliSource(Path(tempfile.gettempdir()) / "dsbot-music", self.tavily, self.web)
+            source = BiliSource(Path(tempfile.gettempdir()) / "dsbot-music", self.tavily, self.web, tools=self.ds_tools)
             source.reset_cache()
         except OSError as exc:
             self.music_problem = f"建不了下载目录（{exc}）"
@@ -595,7 +590,7 @@ class DSBot(discord.Client):
         self.music = MusicPlayer(source, DiscordVoice(self), announce=self._music_say)
         self.engine.music = self.music
         self.music_problem = ""
-        log.info("点歌：开（B站%s）", "，按歌名找歌用 Tavily" if self.tavily is not None else "，按歌名找歌用 B站自己的搜索")
+        log.info("点歌：开（B站，按歌名找歌先用 DeepSeek 的搜索%s）", "，再用 Tavily" if self.tavily is not None else "")
 
     async def _music_say(self, channel_id: int, text: str) -> None:
         """点歌的提示（自动放下一首、下载失败、离开语音频道）。"""
@@ -638,7 +633,6 @@ class DSBot(discord.Client):
                 except Exception as exc:
                     log.warning("关闭桌面操作出错：%r", exc)
             await self.llm.close()
-            await self.searcher.close()
             await self.web.close()
             if self._cdn is not None:
                 await self._cdn.close()

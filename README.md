@@ -19,9 +19,9 @@
 - **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
-- **能打开链接**：平时看 Discord 生成的链接预览；被叫到时真的打开：X（推特）的推文走 FxTwitter（不用账号），别的网页交给 Tavily。要登录才能看的网站只看预览。
+- **能打开链接**：平时看 Discord 生成的链接预览；被叫到时真的打开：X（推特）的推文走 FxTwitter（不用账号），别的网页交给 DeepSeek 读（读不了再交给 Tavily）。要登录才能看的网站只看预览。
 - **会发表情包和图**：有表情包库（通用的放在 NAS 上，各服务器也能自己上传），也会上网找图——找到的图它先看一遍，合适才发。
-- **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 自带的搜索查一下再回答。每个服务器每天有次数上限。
+- **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 的搜索查一下再回答（不到 1 秒）。每个服务器每天有次数上限。
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **会点歌**：进语音频道后叫它“放首晴天”，或者用 `/ds-music 播放`，它会进你所在的语音频道放 B站视频的声音；同一个语音频道里的人都能切歌、暂停、停止。只能放 B站的，不放直播。
 - **能私信**：和它同在一个服务器的人可以直接私信它。私信里它用那个服务器的人设、长期记忆和你的人设卡，聊的事也会记回去，你在那个服务器的频道里叫它时也可能被提起（说“保密”的不会）；连着发几条，它等你说完再一起回；每人每天有花费上限（见“十四、私信”）。
@@ -45,9 +45,9 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
-- **Opens links**: normally it sees the link previews Discord generates; when it's called it really opens them: posts on X (Twitter) through FxTwitter (no account needed), other web pages through Tavily. Sites you have to log in to see only get the preview.
+- **Opens links**: normally it sees the link previews Discord generates; when it's called it really opens them: posts on X (Twitter) through FxTwitter (no account needed), other web pages through DeepSeek (Tavily as the backup). Sites you have to log in to see only get the preview.
 - **Sends memes and pictures**: it has a meme library (a shared one on your NAS, and each server can upload its own), and it can also look for pictures online. It looks at what it finds first and only sends one if it fits.
-- **Searches the web**: when it's called with a question about news, prices, scores, weather or anything else recent that it doesn't know, it looks it up with DeepSeek's built-in search first, then answers. Each server has a daily search cap.
+- **Searches the web**: when it's called with a question about news, prices, scores, weather or anything else recent that it doesn't know, it looks it up with DeepSeek's search first (in under a second), then answers. Each server has a daily search cap.
 - **Cross-channel memory** (turned on by admins): what you talked about with it in channel A carries over when you talk to it in channel B, and it can look through the history of other channels that share. Private channels don't share by default.
 - **Plays music**: join a voice channel and ask it to "play some Jay Chou", or use `/ds-music 播放`, and it joins your voice channel and plays the audio of a Bilibili video; anyone in the same voice channel can skip, pause or stop. Bilibili only, no live streams.
 - **Direct messages**: anyone who shares a server with it can DM it. In DMs it uses that server's persona, long-term memory and your profile card, and what you talk about can be remembered there too. When you call it in that server's channels, it may bring up what you just said in DMs (not the parts you asked to keep secret). If you send several messages in a row, it waits until you're done and answers them together. Each person has a daily spending cap.
@@ -89,7 +89,7 @@ cp .env.example .env
 | `OWNER_ID` | 你自己的 Discord 用户 ID（开发者模式下右键头像 → 复制用户 ID） |
 | `CONTROL_GUILD_ID` | 想在 Discord 里改主人参数（预算、联网搜索等）就要填：放 `/dsowner` 的服务器 ID（右键服务器图标 → 复制服务器 ID）。平时聊天的服务器就行（朋友的也可以），命令和 `/ds` 一样只有有“管理服务器”权限的人看得到，也只有 `OWNER_ID` 本人能用。只填 `OWNER_ID` 不会有 `/dsowner` |
 | `DISCORD_PROXY` | 可选。连 Discord 需要代理时填，如 `http://127.0.0.1:7890` |
-| `TAVILY_API_KEY` | 可选，推荐填。打开群友发的网页链接、上网找图都靠 [Tavily](https://tavily.com)；DeepSeek 自带的搜索用不了时也改用它（每月免费 1000 次额度）。不填也能读 X 的推文，表情包库也照常能用 |
+| `TAVILY_API_KEY` | 可选。上网找图要靠 [Tavily](https://tavily.com)（每月免费 1000 次额度）；DeepSeek 没搜到、打不开的网页（比如 PDF），也会交给它再试一次。不填的话，联网搜索、读链接、按歌名找歌都照样能用，只是不能上网找图（表情包库照常能用） |
 
 ---
 
@@ -108,9 +108,9 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 **更新到新版本**：代码是构建时复制进镜像的，所以要把新代码放进项目原来的文件夹，再重新构建：
 
-1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.3.2 之间的版本更新到 2.4.0 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）（`config.toml` 里新加的 `dm`、`dm_daily_budget_usd` 不加也行，有默认值）。
+1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.4.0 之间的版本更新到 2.5.0 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.4.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`、`/ds-dm`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.5.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/ds`、`/ds-rp`、`/ds-music`、`/ds-dm`；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -120,7 +120,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m dsbot --check         # 离线自检：配置、斜杠命令定义（不连 Discord、不花钱）
 python -m dsbot --test-search "台北 今天 天气"   # 可选：真的搜一次，确认联网搜索能用（花一点点钱）
-python -m dsbot --test-link https://x.com/…/status/…   # 可选：真的打开一个链接
+python -m dsbot --test-link https://x.com/…/status/…   # 可选：真的打开一个链接（网页花一点点钱）
 python -m dsbot --test-image "水豚"              # 可选：真的找一次图（用掉 1 次 Tavily 额度），候选图存到 data/找图测试/
 python -m dsbot
 ```
@@ -249,7 +249,7 @@ python -m dsbot
 | 读文件 | 开 | 是否读取群友上传的文件 |
 | 联网搜索 | 开 | 被叫到时，需要最新信息就上网搜 |
 | 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。按歌名点歌也算一次（见“十三”）。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
-| 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily） |
+| 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页由 DeepSeek 读，Tavily 备用） |
 | 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
 | 桌面操作 | 开 | 你私信它时替你开关电脑上登记过的程序、打开网址（要填 `DESKTOP_TOKEN`、电脑上运行桌面小程序，见“十五”） |
 | 每人每日私信预算美元 | 0.2 | 每个人每天私信它最多花多少，也算进私信挂的那个服务器的预算；你自己私信不受限（见“十四”） |
@@ -307,12 +307,13 @@ python -m dsbot
 
 它的知识大约只到 2025 年中。被叫到时，如果问题需要最新或实时的信息（新闻、价格、汇率、比分、天气、新出的产品……），它会先上网搜一下再回答。要不要搜由它自己判断，闲聊和常识不会去搜。
 
-- **用的是 DeepSeek 自带的搜索**（它的 Anthropic 兼容接口里的 web_search，Claude Code 也是用这个），不需要别的 key，费用按 token 算，一次大约 0.1–0.5 美分，算进每日预算。
-- 只有被叫到时才搜，主动聊天时不搜。一轮最多搜 2 次，每次搜索里它最多查 3 轮网页。
+- **用的是 DeepSeek 的 Search 接口**（2026-10-17 开放的 `/v1/tools/search`），用的就是 `DEEPSEEK_API_KEY`，不需要别的 key。一次通常不到 1 秒。按次收费：每 1000 次 0.75 美元（一次 0.075 美分），只有搜到结果才算钱，算进每日预算。
+- 搜到的几条（标题、网站、日期、摘要）交给它自己读，挑对得上的用自己的话说；问最近的事，它会在关键词里写上具体日期。
+- 只有被叫到时才搜，主动聊天时不搜。一轮最多搜 2 次。
 - 每个服务器每天最多搜 30 次，用 `/dsowner 设置 参数:每日搜索上限` 改（可以指定服务器）；`/dsowner 设置 参数:联网搜索 值:关` 关掉。超了预算也不搜。
 - 回答里带的链接不会展开预览，免得刷屏。
 - 搜到的网页内容和文件一样当成资料处理，里面写的“忽略之前的设定”之类不会照做。
-- 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。如果 DeepSeek 自带的搜索用不了（比如接口改了），在 `.env` 里填 `TAVILY_API_KEY`（填完 `docker compose up -d --force-recreate`），会自动改用 Tavily。
+- 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。DeepSeek 没搜到、或者出错了（比如余额不够），填了 `TAVILY_API_KEY` 的话会自动改用 Tavily 再搜一次（填完 `docker compose up -d --force-recreate`）。
 
 ## 九、读链接
 
@@ -321,11 +322,11 @@ python -m dsbot
 - **平时**（包括主动聊天）：只看 Discord 自己生成的链接预览：标题、作者、开头一段描述，预览图也会看（排在群友发的图后面）。不额外花钱。
 - **被叫到时真的打开**：叫它的那条消息里的链接、叫它时回复的那条消息里的链接、同一个人两分钟内刚发的链接，会直接打开再回答；“帮我看看上面那个链接”这种，它会自己去打开（和看文件一样，多一次调用，慢几秒）。B站的视频链接（包括 `b23.tv` 短链接）不打开，只看 Discord 的预览（标题、简介、封面）：视频它本来就看不了，要放歌就叫它点歌（见“十三”）。
   - **X（推特）的推文**：走 [FxTwitter](https://github.com/FxEmbed/FxEmbed) 的免费接口，不用账号、不用 key。能拿到全文、引用的推文、投票、社区笔记和图片（图片交给它看图）。视频只看得到时长和封面。
-  - **别的网页**：交给 [Tavily](https://tavily.com) 去抓，要在 `.env` 里填 `TAVILY_API_KEY`。每打开 5 个网页算 1 次额度（免费每月 1000 次）。没填的话，别的网站只看预览。
+  - **别的网页**：先交给 DeepSeek 的 Fetch 接口（`/v1/tools/fetch`）去读，用的也是 `DEEPSEEK_API_KEY`。读到了按次收费（每 1000 个 0.75 美元，读不到不算钱），算进每日预算。DeepSeek 读不了的（PDF、有的网站不让它看），填了 `TAVILY_API_KEY` 的话再交给 [Tavily](https://tavily.com) 试一次（每打开 5 个网页算 1 次额度，免费每月 1000 次）。
   - **要登录才能看的网站**（Threads、IG、Facebook、小红书……）多半打不开，它会照实说只看到了预览，不会照着标题瞎猜。
-- 每个链接最多读 4000 字，一轮最多打开 3 个，每个服务器每天最多打开 100 个（都在 `config.toml` 的 `[engine]` 里改）。打不开的链接（要登录、被删了）只说一次，之后不会每次都再试，除非明确让它再打开。
-- **安全**：NAS 自己不去打开网页。推文由 FxTwitter 读，网页由 Tavily 的服务器读，所以群友发的链接碰不到你家的内网，对方网站也看不到你家的 IP。只有推文里的图片由 bot 自己下载，而且只从 X 的图片服务器下载。图片、视频、压缩包、Discord 自己的链接、内网地址（192.168.x.x、xxx.local 之类）不会被当成网页打开。网页里写的“忽略之前的设定”之类，和文件一样只当资料。
-- 推文和网页的内容会经过 FxTwitter / Tavily，再和聊天记录一样发给 DeepSeek。
+- 每个链接最多读 4000 字，一轮最多打开 3 个，每个服务器每天最多打开 100 个（都在 `config.toml` 的 `[engine]` 里改）。打不开的链接（要登录、被删了）只说一次，之后不会每次都再试，除非明确让它再打开。超了每日预算时不用 DeepSeek 读网页（它按次收费），推文和 Tavily 照常。
+- **安全**：NAS 自己不去打开网页。推文由 FxTwitter 读，网页由 DeepSeek（或 Tavily）的服务器读，所以群友发的链接碰不到你家的内网，对方网站也看不到你家的 IP。只有推文里的图片由 bot 自己下载，而且只从 X 的图片服务器下载。图片、视频、压缩包、Discord 自己的链接、内网地址（192.168.x.x、xxx.local 之类）不会被当成网页打开。网页里写的“忽略之前的设定”之类，和文件一样只当资料。
+- 推文和网页的内容会经过 FxTwitter / DeepSeek / Tavily，再和聊天记录一样发给 DeepSeek。
 - 开关：`/dsowner 设置 参数:读链接 值:关`。部署后可以先试一下：`docker compose exec dsbot python -m dsbot --test-link 网址`。
 
 ## 十、发表情包和图
@@ -436,7 +437,7 @@ python -m dsbot
   - 或者用 `/ds-music`：`播放`（填歌名或者 B站链接）、`切歌`、`暂停`、`继续`、`停止`、`队列`、`删除`、`清空`。不经过 DeepSeek，不花钱。
 - **点错了、不想听某一首**：跟它说“刚才那首不要了”（不说哪首，就删你自己最近点的那首）、“把第 2 首删了”“把稻香删了”，或者用 `/ds-music 删除`（点“歌”那一栏会列出队列里的歌，选一首就行）。编号就是 `/ds-music 队列` 里前面的数字，1 是接下来要放的那首；一次可以删好几首（“删掉第 2 和第 4 首”“把 2 到 5 删了”，或者填 `2 4`、`2-5`）。删到正在放的那首就等于切歌。后面排着的全都不要了，用 `/ds-music 清空`（正在放的接着放完）。一句话里说好几件事（“放 X，然后把它删了”“先清空，再放 X”），它会照你说的顺序办。
 - 它会进你所在的那个语音频道（耳机图标是关着的：它只放歌，听不到大家说话）。它正在别的语音频道放歌时，会请你过去一起听，或者等那边放完。
-- 写歌名时，它会上网找 B站上的视频，挑标题最对得上的：原曲、官方 MV 优先，翻唱、伴奏、教学、合集往后（你自己说要那种的除外）。没填 `TAVILY_API_KEY`、用 B站自己的搜索时，B站的搜索结果没有标题，就照 B站的排序。找错了就直接贴 B站链接（`bilibili.com/video/…`、`b23.tv/…` 短链接，带不带 `https://` 都行；只写 BV 号、av 号也行），或者把歌手说清楚。分 P 的视频放链接里那一 P。
+- 写歌名时，它会上网找 B站上的视频，挑标题最对得上的：原曲、官方 MV 优先，翻唱、伴奏、教学、讲解分析、合集往后（你自己说要那种的除外）。DeepSeek 和 Tavily 都没找到、改用 B站自己的搜索时，B站的搜索结果没有标题，就照 B站的排序。找错了就直接贴 B站链接（`bilibili.com/video/…`、`b23.tv/…` 短链接，带不带 `https://` 都行；只写 BV 号、av 号也行），或者把歌手说清楚。分 P 的视频放链接里那一 P。
 - 不限时长，不限队列长短。直播不放。
 - 第一首要先下载才能放，一般几秒；很长的视频要久一点，它会先说“正在下载”，下好了自己开始放。每个服务器只先下载接下来的两首，后面的轮到了再下载，所以队列再长，NAS 上也只存着几首。
 
@@ -451,7 +452,7 @@ python -m dsbot
 
 **次数和费用**
 - 写歌名点歌算一次联网搜索，和“八、联网搜索”共用每个服务器每天的次数（`每日搜索上限`，默认 30）。用完了直接贴 B站链接还能点。每个人每分钟最多按歌名点“每人每分钟点名”那么多次（默认 3 次），免得一个人一下子把全服务器的次数用光；贴链接不受这个限制。
-- 找歌优先用 Tavily（填了 `TAVILY_API_KEY` 时，每次用掉 1 次额度）；没填就用 B站自己的搜索，但它很容易被 B站风控拦下来，建议填。
+- 找歌先用 DeepSeek 的搜索（只搜 B站，搜到了按次算钱，一次 0.075 美分）；没找到再用 Tavily（填了 `TAVILY_API_KEY` 时，每次用掉 1 次额度）；最后才用 B站自己的搜索，它很容易被 B站风控拦下来。超了每日预算时不用 DeepSeek 的搜索，Tavily 和 B站自己的搜索照常。
 - 在聊天里叫它点歌，它要先点歌再回话，会多一次调用（很便宜）。
 - 下载和播放都在 NAS 上，不用 B站账号：音质最高 192 kbps（更高的要大会员）。要登录、开大会员、付费才能看的视频，在你那里看不了的视频（地区限制），放不了，它会照实说原因。
 - 下载的音频存在容器里的临时文件夹，放完、切掉、停止就删，重启时也会清空，不占 `data/`。
@@ -461,7 +462,7 @@ python -m dsbot
 - 舞台频道放不了，要用普通的语音频道。频道满员时它进不去（除非它有“移动成员”权限）。
 
 **出问题时**
-- 它说“B站暂时把请求拦下来了（风控）”：B站觉得请求太多了，过几分钟再试。多半发生在没填 `TAVILY_API_KEY`、用 B站自己的搜索的时候；直接贴链接比较不容易被拦。队列排得很长时，后面的歌下载前可能要重新向 B站拿一次信息，这时被拦的话，它会说一声，过 3 分钟再接着下载，排着的歌不会被跳过。
+- 它说“B站暂时把请求拦下来了（风控）”：B站觉得请求太多了，过几分钟再试。多半发生在 DeepSeek 和 Tavily 都没找到、改用 B站自己的搜索的时候；直接贴链接比较不容易被拦。队列排得很长时，后面的歌下载前可能要重新向 B站拿一次信息，这时被拦的话，它会说一声，过 3 分钟再接着下载，排着的歌不会被跳过。
 - 突然所有歌都放不了（多半是 B站改版了）：要更新 yt-dlp。SSH 进 NAS，在项目文件夹里跑 `sudo docker compose build --no-cache && sudo docker compose up -d`（要加 `--no-cache` 才会装上新版的 yt-dlp）。
 - 关掉点歌：`config.toml` 的 `[bot]` 里写 `music = false`，再 `docker compose up -d --force-recreate`。
 - `docker compose exec dsbot python -m dsbot --check` 会显示点歌要用的东西（yt-dlp、ffmpeg、语音库）在不在；`/ds 状态` 里也有一行点歌的状态。
@@ -562,7 +563,7 @@ python -m dsbot
 
 **表情显示成 :名字: / 贴图没发出来**：那个表情或贴图可能刚被删掉，或者只给某些身份组用。名单里没有的贴图它不会发，日志里会写“没有叫 XX 的贴图”。
 
-**它说链接打不开**：要登录才能看的网站（Threads、IG、Facebook 之类）打不开；别的网站要填 `TAVILY_API_KEY`（`/ds 状态` 里能看到读链接是哪种模式）。推文打不开，可能是被删了、私密账号，或者 FxTwitter 暂时出问题。
+**它说链接打不开**：要登录才能看的网站（Threads、IG、Facebook 之类）打不开；PDF 这类 DeepSeek 读不了的，填了 `TAVILY_API_KEY` 会再交给 Tavily 试。它说“读网页的服务这边出了问题”，多半是 DeepSeek 的余额不够或者 key 不对，看日志。推文打不开，可能是被删了、私密账号，或者 FxTwitter 暂时出问题。
 
 **表情包、找到的图没发出来**：先看 bot 在那个频道有没有“附加文件”权限（日志里会有“发图失败”）。连着两轮发不出去时，那个频道 30 分钟内先不发图、也不上网找图（`/ds 状态` 里会显示），补上权限后过一会儿会自己恢复。表情包名对不上库里的名字时不会发（日志里有“表情包库里没有…”）。网上找的候选图它都觉得不合适时，会选择不发。
 
@@ -607,11 +608,12 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 | `dsbot/memory.py` | 人设卡、长期记忆的存储（各一个 SQLite 文件），整理记忆的输出解析 |
 | `dsbot/textutil.py` / `hanzi.py` | 文字整理；照念人设卡原文的检查（`hanzi.py` 是繁简对照的字表，来自 OpenCC） |
 | `dsbot/mentions.py` | 把它话里的 @名字、#频道名 换成真的 @ 和频道链接 |
-| `dsbot/music.py` | 点歌：找歌（Tavily / B站搜索）、yt-dlp 下载音频、每个服务器的播放队列；Discord 语音那一层在 `discord_app.py` 的 `DiscordVoice` |
+| `dsbot/music.py` | 点歌：找歌（DeepSeek 的搜索 / Tavily / B站搜索）、yt-dlp 下载音频、每个服务器的播放队列；Discord 语音那一层在 `discord_app.py` 的 `DiscordVoice` |
 | `dsbot/llm.py` | DeepSeek HTTP 客户端（思考开关、JSON 模式、用量解析） |
 | `dsbot/files.py` | 读文件：分类、解码、PDF / Office 解析、解析子进程 |
-| `dsbot/search.py` | 联网搜索：DeepSeek 自带的 web_search（Anthropic 兼容接口），Tavily 备用 |
-| `dsbot/links.py` / `tavily.py` | 读链接：推文走 FxTwitter，网页走 Tavily Extract |
+| `dsbot/dstools.py` | DeepSeek 的 Search / Fetch 接口（2026-10-17 开放，按次收费）：联网搜索、读网页、按歌名找歌都先用它 |
+| `dsbot/search.py` | 联网搜索：DeepSeek 的 Search 接口，Tavily 备用 |
+| `dsbot/links.py` / `tavily.py` | 读链接：推文走 FxTwitter，网页先用 DeepSeek 的 Fetch，读不了再用 Tavily Extract |
 | `dsbot/pictures.py` / `memes.py` | 上网找图（Tavily）、表情包库 |
 | `dsbot/net.py` | 调用外部 API；下载网上的图时只连公网地址 |
 | `dsbot/discord_app.py` / `convert.py` | Discord 事件（含删除、编辑）与消息转换、发送、表情和贴图、“正在输入” |

@@ -7,10 +7,7 @@ base_url = "https://api.deepseek.com"
 model = "deepseek-flash"          # V4.1 Flash
 timeout_seconds = 90
 max_retries = 2                   # 429 / 5xx 时自动重试几次
-# 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search），留空 = base_url 后面加 /anthropic
-search_base_url = ""
-search_timeout_seconds = 60
-search_max_uses = 3               # 一次搜索里最多让它搜几轮
+# 联网搜索、打开网页、按歌名找歌都先用 DeepSeek 的 Search / Fetch 接口（base_url 后面加 /v1/tools/…），按次收费，价格见 [pricing]
 
 [bot]
 timezone = "Asia/Taipei"          # 每日预算按这个时区的自然日算；聊天记录里的时间也用它
@@ -33,6 +30,8 @@ cache_miss = 0.30
 output = 1.20
 offpeak_factor = 0.5
 peak_hours_utc = [[1, 4], [6, 10]]  # 周一到周五，UTC
+search_per_1000 = 0.75            # DeepSeek 的 Search 接口：美元 / 千次（搜到结果才算，不分峰谷）
+fetch_per_1000 = 0.75             # DeepSeek 的 Fetch 接口：美元 / 千次（读到内容才算，不分峰谷）
 
 [defaults]
 # —— 管理员可以在 Discord 里用 /ds 改的 ——
@@ -61,9 +60,9 @@ global_daily_budget_usd = 3.0     # 所有服务器加起来的上限
 context_budget_tokens = 30000     # 上下文超过这么多 token，就把最早的一半压成摘要（最大 200000）
 vision = true                     # 是否把群里的图片发给模型
 files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
-web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 自带的搜索）
+web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 的搜索，填了 TAVILY_API_KEY 就拿它当备用）
 daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
-links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页要填 TAVILY_API_KEY）
+links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页由 DeepSeek 读，填了 TAVILY_API_KEY 就拿它当备用）
 daily_image_limit = 10            # 每个服务器每天最多上网找几次图（要 TAVILY_API_KEY；0 = 不找，表情包库照常能用）
 dm_daily_budget_usd = 0.2         # 每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）
 desktop = true                    # 桌面操作：你私信叫它时替你开关电脑上登记过的程序、打开网址（没填 DESKTOP_TOKEN 时不管这项）
@@ -100,7 +99,7 @@ emoji_list_limit = 100            # 告诉它服务器里有哪些表情，最�
 sticker_list_limit = 30           # 告诉它服务器里有哪些贴图，最多列多少个
 link_max_chars = 4000             # 打开一个链接，最多读多少字
 max_links_per_round = 3           # 一轮最多打开几个链接
-daily_link_limit = 100            # 每个服务器每天最多打开多少个链接（Tavily 每打开 5 个网页算 1 次额度）
+daily_link_limit = 100            # 每个服务器每天最多打开多少个链接（DeepSeek 每读到一个网页算一次钱）
 image_cooldown_seconds = 600      # 同一个频道两次上网找图至少隔 10 分钟
 image_candidates = 4              # 上网找图时给它看几张候选
 image_max_bytes = 8000000         # 发出去的图最大 8 MB（Discord 默认上传上限 10 MB）

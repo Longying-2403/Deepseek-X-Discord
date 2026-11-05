@@ -1,6 +1,7 @@
-"""读链接：X（Twitter）的推文走 FxTwitter 的免费接口（不用账号），别的网页交给 Tavily 去抓。
+"""读链接：X（Twitter）的推文走 FxTwitter 的免费接口（不用账号），别的网页先交给 DeepSeek 的 Fetch 接口
+（dstools.py），读不了再交给 Tavily（填了 TAVILY_API_KEY 的话）。
 
-NAS 自己不去打开网页：推文由 FxTwitter 读，网页由 Tavily 的服务器读，家里的内网和 IP 都不会暴露给群友发的链接。
+NAS 自己不去打开网页：推文由 FxTwitter 读，网页由 DeepSeek / Tavily 的服务器读，家里的内网和 IP 都不会暴露给群友发的链接。
 只有推文里的图片会由 bot 自己下载（只从 X 的图片服务器 pbs.twimg.com 下载，走 net.py 的公网检查）。
 要登录才能看的网站（Threads、IG、Facebook……）多半打不开，那就只看 Discord 生成的预览。
 """
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from .images import to_data_uri
+from .dstools import DeepSeekTools, ToolError
 from .models import FileText, LinkResult
 from .net import FetchError, HttpClient, check_url, host_of
 from .tavily import Tavily, TavilyError
@@ -28,6 +30,8 @@ TWEET_IMAGE_HOSTS = frozenset({"pbs.twimg.com"})
 MAX_TWEET_PHOTOS = 2
 MAX_LINKS_PER_MESSAGE = 5
 IMAGE_MAX_BYTES = 8_000_000
+_NOT_OPEN = "网站可能要登录，或者不让机器人看"  # 网页打不开时最常见的原因
+_OVER = "今天的预算用完了，没有打开"  # 超了预算：不用按次收费的 DeepSeek Fetch
 
 # 群友发的链接：遇到空白、尖括号、引号、反引号、|（剧透 ||…||）、全角标点就算结束
 # （浏览器复制出来的网址里，中文都是 %E6%B0%B4 这样编码过的，不会有全角标点；“网址。还有”这种要在句号前断开）
@@ -263,7 +267,7 @@ def raw_limit(limit: int) -> int:
 
 
 def tidy_markdown(raw: str, limit: int | None = None) -> tuple[str, bool]:
-    """Tavily 给的网页正文（markdown）：去掉图片、链接只留文字、去掉残留的 HTML 标签和多余的空行。
+    """DeepSeek / Tavily 给的网页正文（markdown）：去掉图片、链接只留文字、去掉残留的 HTML 标签和多余的空行。
 
     limit：最后只要这么多字的话，先截掉后面用不到的部分（markdown 的标记会占不少字，所以多留几倍）。
     返回 (整理好的文字, 有没有截掉)。嵌在网页里的图（一大串 base64）和超长网址整篇先去掉再截，免得占了要读的字数。"""
@@ -293,29 +297,36 @@ def page_title(text: str) -> str:
 
 
 class LinkReader:
-    """打开一个链接。推文不需要任何 key；别的网页需要 Tavily。"""
+    """打开一个链接。推文不需要任何 key；别的网页先用 DeepSeek 的 Fetch，读不了再用 Tavily。"""
 
-    def __init__(self, http: HttpClient, tavily: Tavily | None, *, tz: str = "UTC"):
+    def __init__(
+        self, http: HttpClient, tavily: Tavily | None, *, tz: str = "UTC", tools: DeepSeekTools | None = None
+    ):
         self.http = http
+        self.tools = tools
         self.tavily = tavily
         self.tz = tz
 
+    def _pages(self) -> bool:
+        return self.tools is not None or self.tavily is not None
+
     def mode(self) -> str:
-        """all：推文和一般网页都能打开；x：只能打开推文（没配置 Tavily）。"""
-        return "all" if self.tavily is not None else "x"
+        """all：推文和一般网页都能打开；x：只能打开推文（DeepSeek、Tavily 都没有）。"""
+        return "all" if self._pages() else "x"
 
     def readable(self, url: str) -> bool:
         if tweet_id(url) is not None:
             return check_url(url) is None
-        return self.tavily is not None and openable(url)
+        return self._pages() and openable(url)
 
-    async def read(self, url: str, *, max_chars: int, image_side: int | None = None) -> LinkResult:
+    async def read(self, url: str, *, max_chars: int, image_side: int | None = None, pay: bool = True) -> LinkResult:
+        """pay=False：今天的预算用完了，不用要花钱的 DeepSeek Fetch（推文、Tavily 不花钱，照常）。"""
         tid = tweet_id(url)
         if tid is not None:
             return await self._tweet(tid, max_chars, image_side)
-        if self.tavily is None or not openable(url):
+        if not self._pages() or not openable(url):
             return LinkResult("", FileText(error="这个链接打不开，只能看 Discord 的预览"))
-        return await self._page(url, max_chars)
+        return await self._page(url, max_chars, pay)
 
     async def _tweet(self, tid: str, max_chars: int, image_side: int | None) -> LinkResult:
         try:
@@ -354,29 +365,63 @@ class LinkReader:
         results = await asyncio.gather(*(one(u) for u in urls))
         return [uri for uri in results if uri]
 
-    async def _page(self, url: str, max_chars: int) -> LinkResult:
-        assert self.tavily is not None
-        try:
-            raw = await self.tavily.extract(url)
-        except TavilyError as exc:
-            if exc.transient:
-                reason = "读网页的服务暂时出错了"
-                log.info("Tavily 打开 %s 失败：%s", site_name(url), exc)
-            elif exc.status in (401, 403, 432, 433):
-                reason = "读网页的服务这边出了问题"
-                log.warning("Tavily 打开 %s 失败：%s", site_name(url), exc)  # key 不对、额度用完：要你处理
+    async def _page(self, url: str, max_chars: int, pay: bool = True) -> LinkResult:
+        """先用 DeepSeek 的 Fetch，读不了（要登录、PDF、出错……）再用 Tavily。两个都读不了时，
+        只要有一边是暂时的问题（超时、出错、key 不对、余额或额度用完、今天的预算用完），就不算链接打不开：之后还能再试。"""
+        reasons: list[str] = []
+        transient = False
+        paid = 0  # DeepSeek 读到了内容就算钱，后面改用 Tavily 了也要记账
+        empty: LinkResult | None = None  # DeepSeek 读到了，但没有能读的文字（比如整页都是图）
+        if self.tools is not None and not pay:
+            reasons.append(_OVER)
+            transient = True
+        elif self.tools is not None:
+            try:
+                title, raw = await self.tools.fetch(url)
+            except ToolError as exc:
+                reasons.append(self._why(exc.transient, exc.ours))
+                transient = transient or exc.transient or exc.ours  # key 不对、余额不够是这边的问题，不是链接打不开
+                log.log(logging.WARNING if exc.ours else logging.INFO, "DeepSeek 打开 %s 失败：%s", site_name(url), exc)
             else:
-                reason = "网站可能要登录，或者不让机器人看"
-                log.info("Tavily 打开 %s 失败：%s", site_name(url), exc)
-            # key 不对、额度用完是这边的问题，不是链接打不开：之后修好了还要能再打开
-            transient = exc.transient or exc.status in (401, 403, 432, 433)
-            return LinkResult("", FileText(error=f"打不开（{reason}）", transient=transient))
+                paid = 1  # 读到了：按次算钱
+                got = await self._tidy(url, raw, max_chars, title, paid=paid)
+                if not got.result.error or self.tavily is None:
+                    return got
+                empty = got  # 再让 Tavily 试试
+        if self.tavily is not None:
+            try:
+                raw = await self.tavily.extract(url)
+            except TavilyError as exc:
+                ours = exc.status in (401, 403, 432, 433)  # key 不对、额度用完：要你处理
+                reasons.append(self._why(exc.transient, ours))
+                transient = transient or exc.transient or ours
+                log.log(logging.WARNING if ours else logging.INFO, "Tavily 打开 %s 失败：%s", site_name(url), exc)
+            else:
+                got = await self._tidy(url, raw, max_chars, "", paid=paid)
+                if not got.result.error or empty is None:
+                    return got
+        if empty is not None:  # 两边都没读到能读的文字；Tavily 那边是暂时的问题的话，之后还能再试
+            return LinkResult("", FileText(error=empty.result.error, transient=empty.result.transient or transient), paid=paid)
+        reason = next((r for r in reasons if r != _NOT_OPEN), reasons[0] if reasons else _NOT_OPEN)
+        return LinkResult("", FileText(error=f"打不开（{reason}）", transient=transient), paid=paid)
+
+    @staticmethod
+    def _why(transient: bool, ours: bool) -> str:
+        if transient:
+            return "读网页的服务暂时出错了"
+        if ours:
+            return "读网页的服务这边出了问题"
+        return _NOT_OPEN
+
+    async def _tidy(self, url: str, raw: str, max_chars: int, title: str, *, paid: int = 0) -> LinkResult:
         # 网页可能很长：放到线程里整理，别卡住别的频道
         text, cut = await asyncio.to_thread(tidy_markdown, raw, max_chars)  # cut：原文太长，后面的没整理
         text = clean_text(text)
         if not text:
             # 只看了开头、开头又全是标记的：这一轮额度小才会这样，之后还能再试
-            return LinkResult("", FileText(error="打开了，但是没有能读的文字（可能是视频、图片，或者要登录）", transient=cut))
+            error = "打开了，但是没有能读的文字（可能是视频、图片，或者要登录）"
+            return LinkResult("", FileText(error=error, transient=cut), paid=paid)
         truncated = len(text) > max_chars or cut
         detail = site_name(url) + ("，太长只读了前面" if truncated else "")
-        return LinkResult(page_title(text), FileText(kind="网页", text=text[:max_chars], detail=detail, truncated=truncated))
+        result = FileText(kind="网页", text=text[:max_chars], detail=detail, truncated=truncated)
+        return LinkResult(clean_text(title) or page_title(text), result, paid=paid)

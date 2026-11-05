@@ -82,6 +82,7 @@ class LinkResult:
 
     title: str
     result: FileText
+    paid: int = 0  # DeepSeek 的 Fetch 算了钱的次数（读到了内容才算）
 
 
 @dataclass
@@ -263,3 +264,4 @@ class SearchResult:
     sources: list[tuple[str, str]] = field(default_factory=list)  # (标题, 网址)
     usage: Usage = field(default_factory=lambda: Usage())
     provider: str = ""
+    paid: int = 0  # DeepSeek 的 Search 算了钱的次数（搜到了结果才算）

@@ -77,14 +77,18 @@ def check(config_path: str) -> int:
         print(f"✗ {exc}")
         secrets = Secrets("x", "x", 0, control_guild_id=1)
     check_files()
-    print(f"✓ 联网搜索：DeepSeek 自带的搜索（{cfg.deepseek.anthropic_url}）"
-          + ("，失败时改用 Tavily" if secrets.tavily_api_key else "")
-          + "。想实际搜一次试试：python -m dsbot --test-search 关键词")
+    from .dstools import tools_base
+
+    base = tools_base(cfg.deepseek.base_url)
+    backup = "，没搜到、出错了改用 Tavily" if secrets.tavily_api_key else ""
+    print(f"✓ 联网搜索：DeepSeek 的 Search 接口（{base}/v1/tools/search）{backup}。想实际搜一次试试：python -m dsbot --test-search 关键词")
+    backup = "，读不了改用 Tavily" if secrets.tavily_api_key else ""
+    print(f"✓ 读链接：推文走 FxTwitter，网页走 DeepSeek 的 Fetch 接口（{base}/v1/tools/fetch）{backup}。"
+          "想试试：python -m dsbot --test-link 网址")
     if secrets.tavily_api_key:
-        print("✓ 读链接：推文走 FxTwitter，网页走 Tavily；上网找图：Tavily。"
-              "想试试：python -m dsbot --test-link 网址 / --test-image 关键词")
+        print("✓ 上网找图：Tavily。想试试：python -m dsbot --test-image 关键词")
     else:
-        print("! 没填 TAVILY_API_KEY：只能打开 X 的推文（别的网站只看 Discord 的预览），也不能上网找图（表情包库照常能用）")
+        print("! 没填 TAVILY_API_KEY：不能上网找图（表情包库照常能用）；DeepSeek 搜不到、打不开的网页也没有备用的")
     from .music import missing_parts
 
     if str(cfg.bot.music).strip().lower() in ("false", "0", "no", "off", ""):
@@ -92,8 +96,8 @@ def check(config_path: str) -> int:
     elif missing := missing_parts():
         print(f"! 点歌用不了：{missing}")
     else:
-        how = "Tavily" if secrets.tavily_api_key else "B站自己的搜索（容易被风控，建议填 TAVILY_API_KEY）"
-        print(f"✓ 点歌：yt-dlp、ffmpeg、语音库都在（只能放 B站的；按歌名找歌用 {how}）")
+        how = "DeepSeek 的搜索" + ("，找不到再用 Tavily" if secrets.tavily_api_key else "") + "，最后用 B站自己的搜索"
+        print(f"✓ 点歌：yt-dlp、ffmpeg、语音库都在（只能放 B站的；按歌名找歌先用 {how}）")
     port = int(cfg.bot.desktop_port or 0)
     if not secrets.desktop_token:
         print("· 桌面操作：没填 DESKTOP_TOKEN，不开（可选）")
@@ -144,28 +148,23 @@ def check(config_path: str) -> int:
 def test_search(config_path: str, query: str) -> int:
     """用 .env 里的 key 真的搜一次（花一点点钱），确认联网搜索能用。"""
     import asyncio
-    import time
 
-    from .search import SearchError, WebSearch, today_text
+    from .dstools import DeepSeekTools
+    from .net import HttpClient
+    from .search import SearchError, WebSearch
+    from .tavily import Tavily
 
     cfg = load_config(config_path)
     secrets = load_secrets()
-    searcher = WebSearch(
-        api_key=secrets.deepseek_api_key,
-        url=cfg.deepseek.anthropic_url,
-        model=cfg.deepseek.model,
-        timeout=cfg.deepseek.search_timeout_seconds,
-        max_uses=cfg.deepseek.search_max_uses,
-        tavily_key=secrets.tavily_api_key,
-    )
 
     async def run():  # type: ignore[no-untyped-def]
+        http = HttpClient()
         try:
-            return await searcher.search(
-                query, today=today_text(time.time(), cfg.bot.timezone), max_chars=cfg.engine.search_max_chars
-            )
+            tavily = Tavily(http, secrets.tavily_api_key) if secrets.tavily_api_key else None
+            searcher = WebSearch(DeepSeekTools(http, secrets.deepseek_api_key, cfg.deepseek.base_url), tavily, tz=cfg.bot.timezone)
+            return await searcher.search(query, max_chars=cfg.engine.search_max_chars)
         finally:
-            await searcher.close()
+            await http.close()
 
     print(f"搜索「{query}」……")
     try:
@@ -173,18 +172,18 @@ def test_search(config_path: str, query: str) -> int:
     except SearchError as exc:
         print(f"✗ 搜索失败：{exc}")
         return 1
-    u = result.usage
     print(f"✓ 用 {result.provider} 搜到了：\n{result.summary}")
     for title, url in result.sources:
         print(f"  - {title} {url}")
-    print(f"用量：输入 {u.prompt_tokens} token（命中 {u.hit}），输出 {u.output} token，约 ${cfg.pricing.cost(u, time.time()):.5f}")
+    print(f"花费：约 ${cfg.pricing.search_cost(result.paid):.5f}（DeepSeek 按次收费，Tavily 用的是免费额度）")
     return 0
 
 
 def test_link(config_path: str, url: str) -> int:
-    """真的打开一个链接（推文走 FxTwitter，网页用掉一点 Tavily 额度），确认读链接能用。"""
+    """真的打开一个链接（推文走 FxTwitter，网页先用 DeepSeek 的 Fetch，花一点点钱），确认读链接能用。"""
     import asyncio
 
+    from .dstools import DeepSeekTools
     from .links import LinkReader, openable
     from .net import HttpClient
     from .tavily import Tavily
@@ -199,7 +198,8 @@ def test_link(config_path: str, url: str) -> int:
         http = HttpClient()
         try:
             tavily = Tavily(http, secrets.tavily_api_key) if secrets.tavily_api_key else None
-            reader = LinkReader(http, tavily, tz=cfg.bot.timezone)
+            tools = DeepSeekTools(http, secrets.deepseek_api_key, cfg.deepseek.base_url)
+            reader = LinkReader(http, tavily, tz=cfg.bot.timezone, tools=tools)
             if not reader.readable(url):
                 return None
             return await reader.read(url, max_chars=cfg.engine.link_max_chars, image_side=cfg.engine.image_max_side)
@@ -209,7 +209,7 @@ def test_link(config_path: str, url: str) -> int:
     print(f"打开 {url} ……")
     got = asyncio.run(run())
     if got is None:
-        print("✗ 没填 TAVILY_API_KEY：只能打开 X 的推文")
+        print("✗ 这个网址打不开")
         return 1
     if got.result.error:
         print(f"✗ {got.result.error}")
@@ -278,7 +278,7 @@ def main() -> int:
     parser.add_argument("--config", default=os.environ.get("DSBOT_CONFIG", "config.toml"))
     parser.add_argument("--check", action="store_true", help="只做离线自检，不启动")
     parser.add_argument("--test-search", metavar="关键词", help="真的搜一次，确认联网搜索能用（花一点点钱）")
-    parser.add_argument("--test-link", metavar="网址", help="真的打开一个链接，确认读链接能用（网页会用掉一点 Tavily 额度）")
+    parser.add_argument("--test-link", metavar="网址", help="真的打开一个链接，确认读链接能用（网页按次花一点点钱）")
     parser.add_argument("--test-image", metavar="关键词", help="真的找一次图，候选图存到 data/找图测试/（用掉 1 次 Tavily 额度）")
     args = parser.parse_args()
     _load_dotenv()

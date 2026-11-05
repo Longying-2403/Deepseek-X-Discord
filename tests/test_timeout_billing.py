@@ -9,13 +9,12 @@ from unittest import mock
 from helpers import CHANNEL, GUILD, FakeSearcher, make_engine, msg
 from test_memory import ACTIONS, REPLY, chat, is_review, stores, three_rounds
 
-from dsbot.config import DeepSeekConfig
 from dsbot.ledger import Ledger
 from dsbot.llm import LLMError
 from dsbot.models import Usage
 from dsbot.prompts import TOOL_FAILED
 from dsbot.render import content_tokens, estimate_tokens
-from dsbot.search import SearchError, WebSearch, add_usage
+from dsbot.search import SearchError
 
 try:
     import aiohttp  # 只有测 WebSearch._post 时要用（discord.py 自带）
@@ -31,29 +30,6 @@ def billed(message="请求超时（90 秒）", usage=None, *, timeout=True):
     exc = LLMError(message, timeout=timeout)
     exc.usage = usage
     return exc
-
-
-def search_timeout(message="搜索超时（60 秒）"):
-    """_post 超时（对方可能照样算了钱）。maybe_billed 另外设，理由同上。"""
-    exc = SearchError(message)
-    exc.maybe_billed = True
-    return exc
-
-
-def search_client(responses, tavily_key=None):
-    """WebSearch，_post 换成按顺序给出 responses（是 Exception 的就抛出）。"""
-    client = WebSearch(api_key="sk-test", url=DeepSeekConfig().anthropic_url, model="deepseek-flash", tavily_key=tavily_key)
-    sent = []
-
-    async def fake_post(url, payload, headers):
-        sent.append((url, json.loads(json.dumps(payload)), headers))
-        item = responses.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    client._post = fake_post
-    return client, sent
 
 
 def rows(engine, where="1"):
@@ -260,7 +236,6 @@ class Client(unittest.IsolatedAsyncioTestCase):
     async def test_connect_deadline_is_well_before_the_total(self):
         """连接的时限要比总时限早一截：aiohttp 把时限凑成整秒，挨得太近就总是总时限先到，连不上的也被当成“发出去了”。"""
         from dsbot.llm import DeepSeekClient
-        from dsbot.search import WebSearch as Search
 
         class Recorder:
             closed = False
@@ -288,9 +263,6 @@ class Client(unittest.IsolatedAsyncioTestCase):
                 client = DeepSeekClient(api_key="sk-test", base_url="https://api.example", model="m", timeout=total)
                 client._session = rec
                 await client._post({}, total)
-                search = Search(api_key="sk-test", url="https://api.example", model="m", timeout=total)
-                search._session = rec
-                await search._post("https://api.example", {}, {})
                 for limits in rec.timeouts:
                     self.assertLessEqual(limits.connect, limits.total / 2)
 
@@ -632,139 +604,39 @@ class Background(unittest.IsolatedAsyncioTestCase):
 
 
 class SearchBilling(unittest.IsolatedAsyncioTestCase):
-    def test_estimate_search(self):
-        from dsbot.search import SEARCH_USE_TOKENS, estimate_search
+    """2.5.0 起联网搜索用 DeepSeek 的 Search 接口：按次收费（搜到结果才算），超时、出错、没结果都不算钱。"""
 
-        payload = {
-            "model": "deepseek-flash",
-            "max_tokens": 1500,
-            "system": "你是一个搜索助手。今天是 2026-10-07",
-            "messages": [{"role": "user", "content": "台北 明天 天气"}],
-            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
-        }
-        u = estimate_search(payload, 3)
-        self.assertEqual((u.hit, u.prompt_tokens, u.output, u.reasoning), (0, u.miss, 750, 0))  # 全按没命中；输出按上限的一半
-        none = estimate_search(payload, 0)
-        self.assertEqual(u.miss - none.miss, 3 * SEARCH_USE_TOKENS)  # 每搜一次塞进去的网页
-        self.assertGreaterEqual(none.miss, estimate_tokens(payload["system"]) + estimate_tokens("台北 明天 天气"))
-        self.assertEqual(estimate_search(payload, -2), none)
-        self.assertEqual(estimate_search({**payload, "metadata": {"user_id": "guild-1"}, "tools": []}, 3), u)  # 只看发出去的内容
-        resent = {**payload, "messages": [*payload["messages"], {"role": "assistant", "content": [{"type": "text", "text": "搜到了" * 200}]}]}
-        self.assertGreater(estimate_search(resent, 3).miss, u.miss + 300)  # pause_turn 之后发回去的也算
-        self.assertEqual(estimate_search({"messages": []}, 1).output, 0)
-
-    @unittest.skipIf(aiohttp is None, "没装 aiohttp")
-    async def test_post_flags_what_may_be_billed(self):
-        client = WebSearch(api_key="sk-test", url="https://api.example", model="m", timeout=60)
-        not_connected = getattr(aiohttp, "ConnectionTimeoutError", aiohttp.ServerTimeoutError)
-        cases = (
-            (asyncio.TimeoutError(), "enter", 200, True, "搜索超时（60 秒）"),
-            (aiohttp.ClientPayloadError("Response payload is not completed"), "read", 200, True, "传到一半"),
-            (aiohttp.ClientPayloadError("Response payload is not completed"), "read", 503, False, "传到一半"),  # 错误响应
-            (asyncio.TimeoutError(), "read", 429, False, "搜索超时"),
-            (not_connected("connect"), "enter", 200, False, "连不上"),  # 连都没连上：请求没发出去
-            (aiohttp.ClientConnectionError("refused"), "enter", 200, False, "网络错误"),
-            (OSError("unreachable"), "enter", 200, False, "网络错误"),
-        )
-        for exc, at, status, maybe, text in cases:
-            with self.subTest(f"{type(exc).__name__} {status}"):
-                client._session = _BrokenSession(exc, at, status)
-                with self.assertRaises(SearchError) as ctx:
-                    await client._post("https://api.example", {}, {})
-                self.assertIs(getattr(ctx.exception, "maybe_billed", False), maybe)
-                self.assertIn(text, str(ctx.exception))
-                self.assertIsNone(ctx.exception.usage)  # _post 只做标记，不估（Tavily 也走这里）
-        self.assertFalse(getattr(SearchError("x", Usage(miss=1)), "maybe_billed", False))  # 原来的写法照样能用
-
-    async def test_timeout_is_billed_by_estimate(self):
-        client, sent = search_client([search_timeout()])
-        with self.assertLogs("dsbot.search", "WARNING"):
-            with self.assertRaises(SearchError) as ctx:
-                await client.search("q", today="d", max_chars=500)
-        self.assertIn("搜索超时", str(ctx.exception))
-        got = ctx.exception.usage
-        self.assertGreater(got.miss, 0)  # 超时也记一笔
-
-        from dsbot.search import SEARCH_USE_TOKENS, estimate_search
-
-        self.assertEqual(got, estimate_search(sent[0][1], 3))
-        self.assertEqual((got.hit, got.output), (0, 750))
-        self.assertGreaterEqual(got.miss, 3 * SEARCH_USE_TOKENS)
-
-    async def test_unbilled_transport_error_has_no_estimate(self):
-        client, sent = search_client([SearchError("网络错误：ClientOSError()")])
-        with self.assertLogs("dsbot.search", "WARNING"):
-            with self.assertRaises(SearchError) as ctx:
-                await client.search("q", today="d", max_chars=500)
-        self.assertEqual(ctx.exception.usage, Usage())
-
-    async def test_pause_turn_usage_survives_a_later_error(self):
-        paused = {"stop_reason": "pause_turn", "content": [{"type": "server_tool_use", "id": "s", "name": "web_search", "input": {}}],
-                  "usage": {"input_tokens": 4000, "output_tokens": 20}}
-        first = Usage(prompt_tokens=4000, miss=4000, output=20)
-        client, sent = search_client([(200, paused), SearchError("网络错误：ClientOSError()")])
-        with self.assertLogs("dsbot.search", "WARNING"):
-            with self.assertRaises(SearchError) as ctx:
-                await client.search("q", today="d", max_chars=500)
-        self.assertEqual(ctx.exception.usage, first)  # 前面那段已经算的钱不丢，也不多估
-        client, sent = search_client([(200, paused), search_timeout()])
-        with self.assertLogs("dsbot.search", "WARNING"):
-            with self.assertRaises(SearchError) as ctx:
-                await client.search("q", today="d", max_chars=500)
-        self.assertEqual(sent[1][1]["messages"][-1], {"role": "assistant", "content": paused["content"]})
-
-        from dsbot.search import estimate_search
-
-        self.assertEqual(ctx.exception.usage, add_usage(first, estimate_search(sent[1][1], 3)))  # 估的是第二次发出去的（带着发回去的内容）
-
-    async def test_timeout_then_tavily_keeps_the_estimate(self):
-        tavily = {"results": [{"title": "标题", "url": "https://t.example", "content": "内容"}]}
-        client, sent = search_client([search_timeout(), (200, tavily)], tavily_key="tvly-1")
-        with self.assertLogs("dsbot.search", "WARNING"):
-            result = await client.search("q", today="d", max_chars=500)
-        self.assertEqual(result.provider, "Tavily")
-        self.assertGreater(result.usage.miss, 0)  # DeepSeek 那边超时估的那笔也带上
-
-        from dsbot.search import estimate_search
-
-        self.assertEqual(result.usage, estimate_search(sent[0][1], 3))
-
-    async def test_tavily_timeout_is_not_billed(self):
-        client, sent = search_client([(401, {"error": {"message": "bad key"}}), search_timeout()], tavily_key="tvly-1")
-        with self.assertLogs("dsbot.search", "WARNING"):
-            with self.assertRaises(SearchError) as ctx:
-                await client.search("q", today="d", max_chars=500)
-        self.assertEqual(sent[1][0], "https://api.tavily.com/search")
-        self.assertEqual(ctx.exception.usage, Usage())  # Tavily 的超时不是 DeepSeek 的钱
-
-    async def test_search_timeout_reaches_the_ledger(self):
-        searcher, sent = search_client([search_timeout()])
+    async def search_once(self, error):
         outputs = [ACTIONS({"type": "search", "query": "明天天气"}), ACTIONS(REPLY(1, "没搜到"))]
-        engine, llm, transport, clock = make_engine(chat(outputs), searcher=searcher)
+        engine, llm, transport, clock = make_engine(chat(outputs), searcher=FakeSearcher({"明天天气": error}))
         with self.assertLogs("dsbot", "WARNING"):
             await engine.handle_message(msg(501, "@小D 明天天气怎样", mentions_bot=True))
             await engine.drain()
         self.assertEqual(transport.sent[-1][1], "没搜到")
+        return engine, clock
+
+    async def test_billed_failure_reaches_the_ledger(self):
+        """DeepSeek 返回了结果（算了钱），这边却一条都用不了、Tavily 也没搜成：这笔钱照样记上。"""
+        engine, clock = await self.search_once(SearchError("DeepSeek：什么都没搜到", paid=1))
         got = rows(engine, "kind = 'search'")
         self.assertEqual([r["outcome"] for r in got], ["error"])
-        self.assertGreater(got[0]["cost"], 0)
+        self.assertAlmostEqual(got[0]["cost"], engine.pricing.search_cost(1))
+        self.assertEqual((got[0]["hit"], got[0]["miss"], got[0]["output"]), (0, 0, 0))
         self.assertAlmostEqual(engine.ledger.guild_spent(GUILD, clock()), sum(r["cost"] for r in rows(engine)))
 
-        from dsbot.search import estimate_search
-
-        want = estimate_search(sent[0][1], searcher.max_uses)
-        self.assertEqual((got[0]["hit"], got[0]["miss"], got[0]["output"]), (0, want.miss, want.output))
-        self.assertAlmostEqual(got[0]["cost"], engine.pricing.cost(want, clock()))
+    async def test_unbilled_failure_costs_nothing(self):
+        engine, clock = await self.search_once(SearchError("DeepSeek：连不上 DeepSeek（超时）"))
+        got = rows(engine, "kind = 'search'")
+        self.assertEqual([(r["outcome"], r["cost"]) for r in got], [("error", 0)])
 
     async def test_search_across_midnight_is_dated_when_it_ends(self):
         """搜的时候跨过了午夜：这笔记在搜完的那天，账本和数据库一致（重启后从库里读的预算也对得上）。"""
-        guess = Usage(prompt_tokens=15000, miss=15000, output=750)
         box = {}
 
         class SlowSearcher(FakeSearcher):
             async def search(self, query, **kw):
                 box["clock"].advance(90)  # 搜了 90 秒，跨过了台北的午夜
-                raise SearchError("搜索超时（60 秒）", guess)
+                raise SearchError("DeepSeek：什么都没搜到", paid=1)
 
         outputs = [ACTIONS({"type": "search", "query": "明天天气"}), ACTIONS(REPLY(1, "没搜到"))]
         engine, llm, transport, clock = make_engine(chat(outputs), searcher=SlowSearcher())
@@ -778,7 +650,7 @@ class SearchBilling(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(day, start_day)
         row = rows(engine, "kind = 'search'")[0]
         self.assertEqual(row["day"], day)
-        self.assertAlmostEqual(row["cost"], engine.pricing.cost(guess, row["ts"]))
+        self.assertAlmostEqual(row["cost"], engine.pricing.search_cost(1))
         self.assertAlmostEqual(engine.ledger.guild_spent(GUILD, clock()), engine.store.spend_by_guild(day)[GUILD])
         self.assertAlmostEqual(Ledger(engine.store, engine.tz).guild_spent(GUILD, clock()), engine.ledger.guild_spent(GUILD, clock()))
 

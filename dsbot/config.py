@@ -57,9 +57,9 @@ _SPEC_LIST = [
     Spec("context_budget_tokens", "上下文预算", int, "owner", "上下文超过这么多 token 就把旧记录压成摘要", 8000, 200000),
     Spec("vision", "看图", bool, "owner", "是否把群里的图片发给模型"),
     Spec("files", "读文件", bool, "owner", "是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）"),
-    Spec("web_search", "联网搜索", bool, "owner", "被叫到时，需要最新信息就上网搜（用 DeepSeek 自带的搜索）"),
+    Spec("web_search", "联网搜索", bool, "owner", "被叫到时，需要最新信息就上网搜（用 DeepSeek 的搜索，Tavily 备用）"),
     Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
-    Spec("links", "读链接", bool, "owner", "被叫到时打开消息里的链接（推文走 FxTwitter，别的网页要 Tavily）"),
+    Spec("links", "读链接", bool, "owner", "被叫到时打开消息里的链接（推文走 FxTwitter，别的网页由 DeepSeek 读，Tavily 备用）"),
     Spec("daily_image_limit", "每日找图上限", int, "owner", "每个服务器每天最多上网找几次图（0 = 不找，表情包库照常能用）", 0, 1000),
     Spec("desktop", "桌面操作", bool, "owner", "替你开关电脑上登记过的程序、打开网址（只认你本人；要在电脑上运行桌面小程序）"),
     Spec("dm_daily_budget_usd", "每人每日私信预算美元", float, "owner", "每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）", 0, 100),
@@ -176,15 +176,7 @@ class DeepSeekConfig:
     model: str = "deepseek-flash"
     timeout_seconds: float = 90.0
     max_retries: int = 2
-    # 联网搜索走 DeepSeek 的 Anthropic 兼容接口（自带 web_search 工具）；留空 = base_url + "/anthropic"
-    search_base_url: str = ""
-    search_timeout_seconds: float = 60.0
-    search_max_uses: int = 3  # 一次搜索里最多让它搜几轮
-
-    @property
-    def anthropic_url(self) -> str:
-        base = (self.search_base_url or self.base_url.rstrip("/") + "/anthropic").rstrip("/")
-        return base + "/v1/messages"
+    # 联网搜索、打开网页用 DeepSeek 的 Search / Fetch 接口：base_url 后面加 /v1/tools/search、/v1/tools/fetch
 
 
 @dataclass
@@ -234,7 +226,7 @@ class EngineConfig:
     sticker_list_limit: int = 30  # 告诉它服务器里有哪些贴图，最多列多少个
     link_max_chars: int = 4000  # 打开一个链接，最多读多少字
     max_links_per_round: int = 3  # 一轮最多打开几个链接
-    daily_link_limit: int = 100  # 每个服务器每天最多打开多少个链接（Tavily 每打开 5 个网页算 1 次额度）
+    daily_link_limit: int = 100  # 每个服务器每天最多打开多少个链接（DeepSeek 每读到一个网页算一次钱）
     image_cooldown_seconds: float = 600  # 同一个频道两次上网找图至少隔多久
     image_candidates: int = 4  # 上网找图时给它看几张候选
     image_max_bytes: int = 8_000_000  # 发出去的图最大多少（Discord 默认上传上限 10 MB）
@@ -260,10 +252,18 @@ class AppConfig:
     unknown: list[str] = field(default_factory=list)
 
 
+# 以前有、现在不用了的配置项：旧的 config.toml 里还留着也不提醒（删掉也行）
+RETIRED = {
+    "deepseek": {"search_base_url", "search_timeout_seconds", "search_max_uses"},  # 2.5.0 起联网搜索改用 Search 接口
+}
+
+
 def _fill(cls: type, data: dict[str, Any], section: str, unknown: list[str]) -> Any:
     known = {f.name: f for f in fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
+        if key in RETIRED.get(section, ()):
+            continue
         if key not in known:
             unknown.append(f"[{section}] {key}")
             continue
@@ -326,7 +326,7 @@ class Secrets:
     owner_id: int
     control_guild_id: int | None = None
     discord_proxy: str | None = None
-    tavily_api_key: str | None = None  # 可选：打开网页、上网找图都靠它；DeepSeek 自带搜索用不了时也改用它
+    tavily_api_key: str | None = None  # 可选：上网找图靠它；DeepSeek 搜不到、打不开网页时也改用它
     desktop_token: str | None = None  # 可选：桌面小程序连过来时核对的密钥（不填就不开桌面操作）
 
 

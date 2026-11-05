@@ -15,6 +15,7 @@ from helpers import CHANNEL, GUILD, T0, make_engine, msg
 from dsbot.actions import parse_actions
 from dsbot.config import ADMIN_KEYS, BUILTIN_DEFAULTS, OWNER_KEYS, AppConfig, load_config
 from dsbot.convert import convert_message
+from dsbot.dstools import DeepSeekTools
 from dsbot.links import (
     LinkReader,
     clean_markdown,
@@ -104,6 +105,7 @@ class FakeReader:
         self._mode = mode
         self.results = results or {}
         self.calls = []
+        self.pays = []  # 每次能不能用要花钱的读法（超了预算是 False）
 
     def mode(self):
         return self._mode
@@ -111,8 +113,9 @@ class FakeReader:
     def readable(self, url):
         return self._mode == "all" or tweet_id(url) is not None
 
-    async def read(self, url, *, max_chars, image_side=None):
+    async def read(self, url, *, max_chars, image_side=None, pay=True):
         self.calls.append((url, max_chars, image_side))
+        self.pays.append(pay)
         out = self.results.get(url)
         if isinstance(out, Exception):
             raise out
@@ -456,6 +459,97 @@ class Readers(unittest.IsolatedAsyncioTestCase):
         got = await LinkReader(http, Tavily(http, "k")).read(PAGE, max_chars=4000)
         self.assertEqual(got.result.text.count("正文"), 1500)
         self.assertFalse(got.result.truncated)
+
+    async def test_page_through_deepseek_first(self):
+        fetch = "https://api.deepseek.com/v1/tools/fetch"
+        extract = "https://api.tavily.com/extract"
+        page = {"title": "深度求索 - 维基百科", "content": "# 深度求索\n\n" + "正文" * 3}
+        http = FakeHttp({fetch: (200, page), extract: (200, {"results": [{"url": PAGE, "raw_content": "Tavily 的"}]})})
+        reader = LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk-test"))
+        got = await reader.read(PAGE, max_chars=4000)
+        self.assertEqual((got.title, got.result.kind, got.result.text, got.paid), ("深度求索 - 维基百科", "网页", "# 深度求索\n\n正文正文正文", 1))
+        self.assertEqual([call[1] for call in http.api_calls], [fetch])  # 读到了就不找 Tavily
+        method, url, payload, headers = http.api_calls[0]
+        self.assertEqual((method, payload, headers["Authorization"]), ("POST", {"url": PAGE}, "Bearer sk-test"))
+
+    async def test_deepseek_cannot_open_then_tavily(self):
+        fetch = "https://api.deepseek.com/v1/tools/fetch"
+        extract = "https://api.tavily.com/extract"
+        failed = (404, {"error": {"message": "failed to fetch URL", "type": "not_found_error"}})  # PDF、要登录的网站……
+        http = FakeHttp({fetch: failed, extract: (200, {"results": [{"url": PAGE, "raw_content": "# PDF 标题\n\n内容"}]})})
+        with self.assertLogs("dsbot.links", "INFO"):
+            got = await LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=4000)
+        self.assertEqual((got.title, got.result.text, got.paid), ("PDF 标题", "# PDF 标题\n\n内容", 0))  # DeepSeek 没读到不算钱
+        self.assertEqual([call[1] for call in http.api_calls], [fetch, extract])
+        http = FakeHttp({fetch: failed, extract: (500, {})})  # 都没读到，Tavily 那边是暂时的：之后还能再试
+        got = await LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100)
+        self.assertIn("暂时出错", got.result.error)
+        self.assertTrue(got.result.transient)
+
+    async def test_deepseek_failures_without_tavily(self):
+        fetch = "https://api.deepseek.com/v1/tools/fetch"
+        cases = [
+            ((404, {"error": {"message": "failed to fetch URL", "type": "not_found_error"}}), "网站可能要登录", False, "INFO"),
+            ((403, {"error": {"message": "rejected"}}), "网站可能要登录", False, "INFO"),
+            ((200, {"title": "空的", "content": "  "}), "网站可能要登录", False, "INFO"),
+            # 余额不够、key 不对：要你处理；不算链接打不开（修好以后还能再打开）
+            ((402, {"error": {"message": "Insufficient Balance"}}), "读网页的服务这边出了问题", True, "WARNING"),
+            ((401, {"error": {"message": "bad key"}}), "读网页的服务这边出了问题", True, "WARNING"),
+            ((504, {}), "暂时出错", True, "INFO"),
+            (FetchError("超时", transient=True), "暂时出错", True, "INFO"),
+        ]
+        for response, words, transient, level in cases:
+            with self.subTest(response=response):
+                http = FakeHttp({fetch: response})
+                reader = LinkReader(http, None, tools=DeepSeekTools(http, "sk"))
+                self.assertEqual(reader.mode(), "all")  # 没有 Tavily 也能打开一般网页
+                self.assertTrue(reader.readable(PAGE))
+                with self.assertLogs("dsbot.links", level):
+                    got = await reader.read(PAGE, max_chars=100)
+                self.assertIn(words, got.result.error)
+                self.assertEqual((got.result.transient, got.paid), (transient, 0))
+
+    async def test_paid_fetch_without_text_tries_tavily(self):
+        """DeepSeek 读到了（算了钱）但整页都是图：再让 Tavily 试一次，别直接记成打不开。"""
+        fetch = "https://api.deepseek.com/v1/tools/fetch"
+        extract = "https://api.tavily.com/extract"
+        pictures = (200, {"title": "相册", "content": "![a](https://x.example/a.png)\n![b](https://x.example/b.png)"})
+        http = FakeHttp({fetch: pictures, extract: (200, {"results": [{"url": PAGE, "raw_content": "Tavily 读到的文字"}]})})
+        got = await LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100)
+        self.assertEqual((got.result.error, got.result.text, got.paid), ("", "Tavily 读到的文字", 1))  # DeepSeek 那次照样算钱
+        http = FakeHttp({fetch: pictures, extract: (500, {})})  # Tavily 暂时出错：之后还能再试
+        got = await LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100)
+        self.assertIn("没有能读的文字", got.result.error)
+        self.assertEqual((got.result.transient, got.paid), (True, 1))
+        http = FakeHttp({fetch: pictures, extract: (200, {"results": [{"url": PAGE, "raw_content": "![c](d)"}]})})  # 两边都只有图
+        got = await LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100)
+        self.assertIn("没有能读的文字", got.result.error)
+        self.assertEqual((got.result.transient, got.paid), (False, 1))
+        http = FakeHttp({fetch: pictures})  # 没有 Tavily
+        got = await LinkReader(http, None, tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100)
+        self.assertEqual((got.result.transient, got.paid), (False, 1))
+
+    async def test_wrong_endpoint_is_not_a_dead_link(self):
+        """不是 DeepSeek 读网页时说的那种 404（接口地址不对）：是这边的问题，不算链接打不开。"""
+        fetch = "https://api.deepseek.com/v1/tools/fetch"
+        http = FakeHttp({fetch: (404, {"detail": "Not Found"})})
+        with self.assertLogs("dsbot.links", "WARNING"):
+            got = await LinkReader(http, None, tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100)
+        self.assertIn("读网页的服务这边出了问题", got.result.error)
+        self.assertTrue(got.result.transient)
+
+    async def test_over_budget_skips_the_paid_fetch(self):
+        fetch = "https://api.deepseek.com/v1/tools/fetch"
+        extract = "https://api.tavily.com/extract"
+        http = FakeHttp({fetch: (200, {"title": "t", "content": "正文"})})
+        got = await LinkReader(http, None, tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100, pay=False)
+        self.assertIn("今天的预算用完了", got.result.error)
+        self.assertTrue(got.result.transient)  # 明天还能再打开
+        self.assertEqual(http.api_calls, [])
+        http = FakeHttp({fetch: (200, {"title": "t", "content": "正文"}), extract: (200, {"results": [{"url": PAGE, "raw_content": "Tavily 读的"}]})})
+        got = await LinkReader(http, Tavily(http, "k"), tools=DeepSeekTools(http, "sk")).read(PAGE, max_chars=100, pay=False)
+        self.assertEqual((got.result.text, got.paid), ("Tavily 读的", 0))  # Tavily 不花钱，照常
+        self.assertEqual([call[1] for call in http.api_calls], [extract])
 
     async def test_without_tavily_only_tweets(self):
         reader = LinkReader(FakeHttp(), None)
@@ -966,6 +1060,38 @@ class EngineLinks(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(502, "@小D 还有呢", mentions_bot=True, reply_to_id=501))
         await engine.drain()
         self.assertEqual(len(reader.calls), 1)
+
+    async def test_deepseek_fetch_is_charged(self):
+        """DeepSeek 的 Fetch 读到了网页：按次算钱，记在这次打开链接的那一行上（读到了但没有能读的文字也算）。"""
+        other = "https://news.example.com/b/2"
+        reader = FakeReader(results={
+            PAGE: LinkResult("网页标题", FileText(kind="网页", text="正文", detail="example.com"), paid=1),
+            other: LinkResult("", FileText(error="打开了，但是没有能读的文字（可能是视频、图片，或者要登录）"), paid=1),
+        })
+        engine, llm, transport, clock = make_engine(scripted([ACTIONS(REPLY(1, "看完了"))]), link_reader=reader)
+        await engine.handle_message(link_msg(501, f"@小D 看看 {PAGE} {other}", [PAGE, other], mentions_bot=True))
+        await engine.drain()
+        got = engine.store.db.execute("SELECT outcome, cost FROM usage WHERE kind = 'link' ORDER BY id").fetchall()
+        self.assertEqual([r["outcome"] for r in got], ["link", "error"])
+        for row in got:
+            self.assertAlmostEqual(row["cost"], engine.pricing.fetch_cost(1))
+        day = engine.ledger.day(clock())
+        self.assertAlmostEqual(engine.ledger.guild_spent(GUILD, clock()), engine.store.spend_by_guild(day)[GUILD])
+
+    async def test_over_budget_opens_without_paying(self):
+        reader = FakeReader()
+        engine, llm, transport, clock = make_engine(
+            scripted([ACTIONS(REPLY(1, "好")), ACTIONS(REPLY(2, "好"))]), link_reader=reader, defaults={"daily_budget_usd": 0.001}
+        )
+        await engine.handle_message(link_msg(501, f"@小D 看看 {PAGE}", [PAGE], mentions_bot=True))
+        await engine.drain()
+        engine.ledger.add(GUILD, 0.0015, clock())  # 超了预算，但还没到连点名都不回的两倍
+        clock.advance(60)
+        other = "https://news.example.com/b/2"
+        await engine.handle_message(link_msg(502, f"@小D 这个呢 {other}", [other], mentions_bot=True))
+        await engine.drain()
+        self.assertEqual([c[0] for c in reader.calls], [PAGE, other])
+        self.assertEqual(reader.pays, [True, False])
 
     async def test_not_opened_in_proactive_rounds(self):
         reader = FakeReader()

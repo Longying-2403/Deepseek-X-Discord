@@ -90,7 +90,6 @@ from .prompts import (
 from .mentions import link, merge_tiers, name_forms
 from .music import pick_link
 from .quota import QuotaBucket, SlidingWindow, TurnTracker
-from .search import today_text
 from .render import (
     Gallery,
     assistant_text,
@@ -225,7 +224,7 @@ class Transport(Protocol):
 
 
 class Searcher(Protocol):
-    async def search(self, query: str, *, today: str, max_chars: int, user_id: str | None = None) -> SearchResult: ...
+    async def search(self, query: str, *, max_chars: int) -> SearchResult: ...  # 没搜成抛异常（可以带 paid：已经算了钱的次数）
 
 
 class LinkOpener(Protocol):
@@ -233,7 +232,8 @@ class LinkOpener(Protocol):
 
     def readable(self, url: str) -> bool: ...
 
-    async def read(self, url: str, *, max_chars: int, image_side: int | None = None) -> LinkResult: ...
+    # pay=False：今天的预算用完了，不用要花钱的读法（DeepSeek 的 Fetch），推文和不花钱的照常
+    async def read(self, url: str, *, max_chars: int, image_side: int | None = None, pay: bool = True) -> LinkResult: ...
 
 
 class PictureSource(Protocol):
@@ -603,7 +603,7 @@ class Engine:
         self.music = music  # 点歌（没开、或者缺 yt-dlp / ffmpeg / 语音库时是 None）
         self.cards = cards  # 人设卡（data/cards.sqlite3）
         self.memory = memory  # 长期记忆（data/memory.sqlite3）
-        self.link_reader = link_reader  # 打开链接（推文走 FxTwitter，网页走 Tavily）
+        self.link_reader = link_reader  # 打开链接（推文走 FxTwitter，网页由 DeepSeek 读，Tavily 备用）
         self.pictures = pictures  # 上网找图（要 Tavily）
         self.memes = memes  # 表情包库
         self.owner_id = owner_id  # OWNER_ID：聊天记录里标〔dsowner〕，只有他能在聊天里改人设
@@ -1104,7 +1104,11 @@ class Engine:
             await asyncio.gather(*pending, return_exceptions=True)
 
     def _over_budget(self, st: ChannelState, view: View, now: float) -> tuple[bool, bool]:
-        guild = self.ledger.guild_spent(st.guild_id, now)
+        return self._guild_over(st.guild_id, view, now)
+
+    def _guild_over(self, guild_id: int, view: View, now: float) -> tuple[bool, bool]:
+        """(超了每日预算, 超了好几倍连点名也不回)。"""
+        guild = self.ledger.guild_spent(guild_id, now)
         total = self.ledger.total_spent(now)
         g_budget = view.daily_budget_usd
         t_budget = self.settings.get("global_daily_budget_usd")  # 全局上限只认全局设置
@@ -1556,7 +1560,7 @@ class Engine:
         async def work() -> tuple[list[tuple[int, DocBlock, _Planned, FileText]], list[tuple[_LinkPlan, DocBlock, FileText]]]:
             nonlocal gallery
             results = await self._read_planned(st, plan, budget)
-            opened = await self._read_links(st, link_plan, budget, now)
+            opened = await self._read_links(st, view, link_plan, budget, now)
             # 点歌的动作照模型写的顺序一个一个办（“放 X，然后删掉”就是先放再删；看队列放在最后），同一轮共用一份记录
             # （music.RoundState）：编号按这一轮开始时的队列算，切歌只切那时正在放的那首，清空只清那时排着的。
             # 同一个人接连写的几个删歌一起删
@@ -1745,9 +1749,6 @@ class Engine:
             and self.ec.max_searches_per_round > 0
         )
 
-    def _today(self, now: float) -> str:
-        return today_text(now, self.tz)
-
     async def _search_section(self, st: ChannelState, view: View, action: Action, now: float) -> str:
         query = action.query or ""
         shown = neutralize(one_line(query, 60))
@@ -1763,17 +1764,16 @@ class Engine:
         # 先记一笔占住名额，再去搜：别的频道同时在搜时，也不会一起超过上限
         row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="search", outcome="pending")
         try:
-            result = await self.searcher.search(
-                query, today=self._today(now), max_chars=self.ec.search_max_chars, user_id=f"guild-{st.guild_id}"
-            )
+            result = await self.searcher.search(query, max_chars=self.ec.search_max_chars)
         except asyncio.CancelledError:
             self._finish_search(st, row, Usage(), "error")  # 关机时被取消：别留下一笔一直“进行中”的记录
             raise
-        except Exception as exc:  # SearchError，以及意料之外的错误：都只算这次没搜成
+        except Exception as exc:  # SearchError，以及意料之外的错误：都只算这次没搜成（已经算了钱的照样记账）
             log.warning("频道 %s：搜索「%s」失败：%s", st.channel_id, one_line(query, 60), exc)
-            self._finish_search(st, row, getattr(exc, "usage", None) or Usage(), "error")
+            paid = getattr(exc, "paid", 0)
+            self._finish_search(st, row, getattr(exc, "usage", None) or Usage(), "error", paid if isinstance(paid, int) else 0)
             return f"（搜「{shown}」失败了。凭你已有的知识回答，拿不准就直说。）"
-        self._finish_search(st, row, result.usage, "search")
+        self._finish_search(st, row, result.usage, "search", result.paid)
         log.info("频道 %s：搜了「%s」（%s，%d 个来源）", st.channel_id, one_line(query, 60), result.provider, len(result.sources))
         return render_search(query, result.summary, result.sources, self.ec.search_max_chars)
 
@@ -1852,13 +1852,16 @@ class Engine:
             return "点歌没有启用"
         try:
             if op == "play":
+                ticket: dict[str, int] = {}  # 这次找歌记账的那一行（row）、DeepSeek 算了几次钱（paid）
                 return await music.play(
                     guild_id,
                     channel_id,
                     user_id,
                     user_name,
                     query,
-                    can_search=lambda: self._music_search(guild_id, channel_id, user_id, view),
+                    can_search=lambda: self._music_search(guild_id, channel_id, user_id, view, ticket),
+                    paid=lambda: self._music_paid(guild_id, ticket),
+                    pay=not self._guild_over(guild_id, view, self.clock())[0],  # 超了预算不用要花钱的搜索
                     state=state,
                 )
             if op == "skip":
@@ -1920,7 +1923,9 @@ class Engine:
         log.info("私信 %s：电脑 %s %s → %s", st.channel_id, op, one_line(target, 80), one_line(text, 80))
         return DESKTOP_RESULT.format(text=neutralize(one_line(("" if ok else "没办成：") + text, 300)))
 
-    def _music_search(self, guild_id: int, channel_id: int, user_id: int, view: View) -> str | None:
+    def _music_search(
+        self, guild_id: int, channel_id: int, user_id: int, view: View, ticket: dict[str, int] | None = None
+    ) -> str | None:
         """按歌名找歌算一次联网搜索（和 search 共用每日次数）。能搜就记一次、返回 None；不能搜返回原因。
         每人每分钟最多按歌名找“每人每分钟点名”那么多次（/ds-music 不经过点名限速，免得一个人一下子把全服务器的次数用光）。"""
         limit = int(view.daily_search_limit)
@@ -1932,12 +1937,24 @@ class Engine:
             return f"今天这个服务器的搜索次数用完了（{limit} 次），按歌名找不了；直接贴 B站链接还能放"
         if not self.limiter.allow(("music-search", guild_id, user_id), max(1, int(view.mention_rate_limit)), 60.0, now):
             return "按歌名点歌太频繁了，过一分钟再点；直接贴 B站链接不受影响"
-        self.store.record_usage(ts=now, day=day, guild_id=guild_id, channel_id=channel_id, kind="search", outcome="music")
+        row = self.store.record_usage(ts=now, day=day, guild_id=guild_id, channel_id=channel_id, kind="search", outcome="music")
+        if ticket is not None:
+            ticket["row"] = row  # 搜到了要算钱时，记在这一行上（见 _music_paid）
         return None
 
-    def _finish_search(self, st: ChannelState, row: int, usage: Usage, outcome: str) -> None:
+    def _music_paid(self, guild_id: int, ticket: dict[str, int]) -> None:
+        """按歌名找歌时 DeepSeek 的 Search 搜到了结果：按次算钱，记在这次找歌的那一行上。"""
         now = self.clock()
-        cost = self.pricing.cost(usage, now)
+        self.ledger.add(guild_id, self.pricing.search_cost(1), now)
+        ticket["paid"] = ticket.get("paid", 0) + 1
+        if "row" in ticket:  # 记在花钱的这一刻（跨过午夜的话，和账本记在同一天）
+            cost = self.pricing.search_cost(ticket["paid"])
+            self.store.update_usage(ticket["row"], outcome="music", cost=cost, ts=now, day=self.ledger.day(now))
+
+    def _finish_search(self, st: ChannelState, row: int, usage: Usage, outcome: str, paid: int = 0) -> None:
+        """paid：DeepSeek 的 Search 接口算了钱的次数（按次收费，不看 token）。"""
+        now = self.clock()
+        cost = self.pricing.cost(usage, now) + self.pricing.search_cost(paid)
         self.ledger.add(st.guild_id, cost, now)
         # 记录也挪到搜完的这一刻：搜的时候跨过了午夜，账本和数据库也记在同一天（重启后从库里读的预算才对得上）
         self.store.update_usage(
@@ -1947,7 +1964,7 @@ class Engine:
     # ------------------------------------------------------------------ 链接
 
     def _links_mode(self, view: View) -> str:
-        """打开链接的能力：all（推文和网页）/ x（只有推文，没配置 Tavily）/ off。"""
+        """打开链接的能力：all（推文和网页）/ x（只有推文：DeepSeek、Tavily 都没有）/ off。"""
         if not view.links or self.link_reader is None:
             return "off"
         return self.link_reader.mode()
@@ -2021,17 +2038,19 @@ class Engine:
             _LinkPlan(anchor, entry, link)
             for entry, anchor in self._auto_links(st, shown, triggers)
             for link in entry.unread()
-            if self.link_reader.readable(link.url)  # 没配置 Tavily 时，一般网页就只看预览，不用提
+            if self.link_reader.readable(link.url)  # 打不开的网页（比如媒体文件）就只看预览，不用提
         ]
-        return await self._read_links(st, plan, budget, now)
+        return await self._read_links(st, view, plan, budget, now)
 
     async def _read_links(
-        self, st: ChannelState, plan: list[_LinkPlan], budget: _Budget, now: float
+        self, st: ChannelState, view: View, plan: list[_LinkPlan], budget: _Budget, now: float
     ) -> list[tuple[_LinkPlan, DocBlock, FileText]]:
-        """打开这些链接（同时打开，最多几秒）。名额、字数、每日次数不够的，告诉模型没打开。"""
+        """打开这些链接（同时打开，最多几秒）。名额、字数、每日次数不够的，告诉模型没打开。
+        超了预算就不用要花钱的读法（DeepSeek 的 Fetch 按次收费），和超了预算不搜一样；推文、Tavily 不花钱，照常。"""
         if not plan:
             return []
         assert self.link_reader is not None
+        pay = not self._over_budget(st, view, now)[0]
         day = self.ledger.day(now)
         limit = max(0, int(self.ec.daily_link_limit))
         used = self.store.count_usage(day, guild_id=st.guild_id, kind="link")
@@ -2059,7 +2078,7 @@ class Engine:
         async def open_one(item: _LinkPlan, cap: int) -> LinkResult:
             assert self.link_reader is not None
             side = self.ec.image_max_side if budget.allow_images and not item.link.preview_image else None
-            return await self.link_reader.read(item.link.url, max_chars=cap, image_side=side)
+            return await self.link_reader.read(item.link.url, max_chars=cap, image_side=side, pay=pay)
 
         jobs = [(i, item, cap) for i, (item, skipped, _, cap) in enumerate(slots) if skipped is None]
         try:
@@ -2087,7 +2106,16 @@ class Engine:
                 got = results[i]
                 result = got.result
                 title = got.title or title
-                self.store.update_usage(row, outcome="error" if result.error else "link")
+                cost = self.pricing.fetch_cost(got.paid)  # DeepSeek 读到了网页：按次算钱（没读成的不算）
+                if cost:
+                    done = self.clock()
+                    self.ledger.add(st.guild_id, cost, done)
+                    # 记在花钱的这一刻：读的时候跨过了午夜，账本和数据库也记在同一天
+                    self.store.update_usage(
+                        row, outcome="error" if result.error else "link", cost=cost, ts=done, day=self.ledger.day(done)
+                    )
+                else:
+                    self.store.update_usage(row, outcome="error" if result.error else "link")
                 budget.chars += cap - len(result.text)  # 先按上限占的字数，没用完的还回去
                 result, trimmed = self._fit_images(result, budget, link=True)
                 # 网页本身比单个链接的上限还长、只能读前面的，不算没读完；是这一轮的额度不够才算

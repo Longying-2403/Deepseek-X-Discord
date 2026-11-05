@@ -1,4 +1,4 @@
-"""连外网：调用 API（Tavily、FxTwitter），以及下载网上的图。
+"""连外网：调用 API（DeepSeek 的 Search / Fetch、Tavily、FxTwitter），以及下载网上的图。
 
 下载网上的图时只连公网地址。bot 跑在家里的 NAS 上，要是有人能让它去下载 http://192.168.1.1/… 或者群晖后台，
 就等于借它的手翻家里的内网。所以下载时：
@@ -9,7 +9,7 @@
 - 不走代理（走代理的话，解析和连接都在代理那边，上面的检查就管不到了）；
 - 限制大小和时间，不存 cookie。
 
-调用 API 的网址是固定的（api.tavily.com、api.fxtwitter.com），照常走 HTTPS_PROXY 之类的代理设置。
+调用 API 的网址是固定的（api.deepseek.com、api.tavily.com、api.fxtwitter.com），照常走 HTTPS_PROXY 之类的代理设置。
 """
 
 from __future__ import annotations
@@ -223,7 +223,7 @@ def _decode(raw: bytes) -> Any:
 
 
 class HttpClient:
-    """两个连接池：api() 调 Tavily、FxTwitter；fetch() 下载网上的图（只连公网）。"""
+    """两个连接池：api() 调 DeepSeek 的 Search / Fetch、Tavily、FxTwitter；fetch() 下载网上的图（只连公网）。"""
 
     def __init__(self, *, api_timeout: float = 25.0, fetch_timeout: float = 12.0):
         self.api_timeout = api_timeout

@@ -1,7 +1,7 @@
-"""Tavily：打开网页（extract）、上网找图（search 带图片）、点歌时找 B站链接（search）。都要 .env 里的 TAVILY_API_KEY。
+"""Tavily：上网找图（search 带图片）只能靠它；联网搜索、打开网页（extract）、点歌时找 B站链接，
+都是 DeepSeek 的 Search / Fetch 接口（dstools.py）不行了才用它。都要 .env 里的 TAVILY_API_KEY。
 
-额度（免费每月 1000）：打开网页每 5 个算 1 次，找一次图、找一次歌各算 1 次。DeepSeek 自带的搜索用不了时，
-联网搜索也会改用 Tavily（那部分在 search.py 里）。
+额度（免费每月 1000）：打开网页每 5 个算 1 次，搜一次、找一次图、找一次歌各算 1 次。
 """
 
 from __future__ import annotations
@@ -142,6 +142,11 @@ class Tavily:
             payload.pop("safe_search")
             data = await self._post("/search", payload, timeout=30)
         return parse_images(data)
+
+    async def search(self, query: str, *, max_results: int = 5) -> Any:
+        """普通的网页搜索（DeepSeek 搜不了时的备用），返回 Tavily 的原始结果（search.parse_tavily_response 整理）。算 1 次额度。"""
+        payload = {"query": query, "max_results": max_results, "search_depth": "basic", "include_answer": False}
+        return await self._post("/search", payload, timeout=30)
 
     async def links(self, query: str, *, domains: list[str], max_results: int = 8) -> list[tuple[str, str]]:
         """只在这几个网站里搜（点歌时搜 bilibili.com），返回 [(网址, 标题)]。算 1 次额度。"""

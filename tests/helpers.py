@@ -151,14 +151,14 @@ class FakeTransport:
 
 
 class FakeSearcher:
-    """假的联网搜索：记录调用，按关键词返回结果；结果是 Exception 时抛出。"""
+    """假的联网搜索：记录搜了什么，按关键词返回结果；结果是 Exception 时抛出。默认的结果算 DeepSeek 一次钱。"""
 
     def __init__(self, results: dict[str, Any] | None = None):
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[str] = []
         self.results = results or {}
 
-    async def search(self, query: str, *, today: str, max_chars: int, user_id: str | None = None) -> SearchResult:
-        self.calls.append((query, today))
+    async def search(self, query: str, *, max_chars: int) -> SearchResult:
+        self.calls.append(query)
         out = self.results.get(query)
         if isinstance(out, Exception):
             raise out
@@ -166,8 +166,8 @@ class FakeSearcher:
             out = SearchResult(
                 summary=f"关于「{query}」搜到的内容",
                 sources=[("示例网站", "https://example.com/a")],
-                usage=Usage(prompt_tokens=3000, hit=0, miss=3000, output=200),
                 provider="DeepSeek",
+                paid=1,
             )
         return out
 

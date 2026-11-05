@@ -16,6 +16,7 @@ from helpers import CHANNEL, GUILD, FakeClock, make_engine, msg
 
 import dsbot.music as music
 from dsbot.actions import parse_actions
+from dsbot.dstools import Hit, ToolError
 from dsbot.music import (
     BiliSource,
     MusicError,
@@ -117,19 +118,24 @@ class FakeSource:
         self.gates: dict[str, asyncio.Event] = {}  # 网址 -> 下载要等它
         self.fail: dict[str, Exception] = {}  # 网址 -> 下载时抛的异常
         self.searches: list[str] = []
+        self.pays: list[bool] = []  # 每次按歌名找歌能不能用要花钱的搜索（超了预算是 False）
         self.resolves: list[str] = []
         self.downloads: list[str] = []
         self.discarded: list[str] = []
+        self.billed = False  # 按歌名找歌时算不算钱（像 DeepSeek 的 Search 搜到了结果那样）
 
     def add(self, url, title, uploader="UP", duration=200.0):
         self.infos[url] = (title, uploader, duration)
         return url
 
-    async def search(self, query):
+    async def search(self, query, *, paid=None, pay=True):
         self.searches.append(query)
+        self.pays.append(pay)
         out = self.found.get(query, [])
         if isinstance(out, Exception):
             raise out
+        if self.billed and paid is not None:
+            paid()
         return list(out)
 
     async def resolve(self, url):
@@ -470,6 +476,13 @@ class Helpers(unittest.TestCase):
         )
         self.assertEqual(rank("周杰伦晴天", results[1:3])[0], "https://www.bilibili.com/video/av1000002")  # 没有空格也对得上
         self.assertEqual(rank("晴天 钢琴", results[1:3])[0], "https://www.bilibili.com/video/av1000001")  # 自己要钢琴版
+        talks = [  # DeepSeek 真的搜到过的：讲这首歌的视频标题里也有 MV、歌名
+            ("https://www.bilibili.com/video/BV1KdgK6xESE", "你从来没有真的听懂过！藏着遗憾的和弦？MV里的神秘彩蛋？｜周杰伦《晴天》全面分析_哔哩哔哩_bilibili"),
+            ("https://www.bilibili.com/video/BV1j442197tw", "日推神曲丨虽然叫晴天，但整个故事都在下雨丨『4K无损』周杰伦–晴天_哔哩哔哩_bilibili"),
+            ("https://www.bilibili.com/video/BV1uAwcemE4M", "周杰伦「晴天」-MappleZS钢琴演奏_哔哩哔哩_bilibili"),
+        ]
+        self.assertEqual(rank("周杰伦 晴天", talks)[0], "https://www.bilibili.com/video/BV1j442197tw")
+        self.assertEqual(rank("晴天 分析", talks)[0], "https://www.bilibili.com/video/BV1KdgK6xESE")  # 自己要分析的
         self.assertEqual(rank("晴天", [("https://www.bilibili.com/video/av9", ""), ("https://www.bilibili.com/video/av8", "")]),
                          ["https://www.bilibili.com/video/av9", "https://www.bilibili.com/video/av8"])  # 没有标题：照原来的顺序
 
@@ -592,6 +605,21 @@ class FakeTavily:
         return self.results
 
 
+class FakeTools:
+    """假的 DeepSeek Search：返回 hits（空的就是没搜到、不算钱）；error 不为空时抛出。"""
+
+    def __init__(self, hits):
+        self.hits = hits
+        self.error = None
+        self.calls = []
+
+    async def search(self, query, *, count=8):
+        self.calls.append((query, count))
+        if self.error is not None:
+            raise self.error
+        return list(self.hits), bool(self.hits)
+
+
 class BilibiliCase(unittest.IsolatedAsyncioTestCase):
     """BiliSource 配上假的 yt_dlp 模块。"""
 
@@ -665,6 +693,37 @@ class Bilibili(BilibiliCase):
         self.assertTrue(FakeYDL.opened[-1]["extract_flat"])
 
 
+    async def test_search_prefers_deepseek(self):
+        tools = FakeTools([
+            Hit("周杰伦的空间", "https://space.bilibili.com/1", ""),
+            Hit("周杰伦《晴天》MV_哔哩哔哩_bilibili", "https://www.bilibili.com/video/av1000002/?spm_id_from=333.788#1", ""),
+        ])
+        self.source.tools = tools
+        self.source.tavily = FakeTavily([("https://www.bilibili.com/video/av9", "别的")])
+        paid = []
+        found = await self.source.search("周杰伦  晴天", paid=lambda: paid.append(1))
+        self.assertEqual(found, ["https://www.bilibili.com/video/av1000002"])
+        self.assertEqual(tools.calls, [("周杰伦 晴天 site:bilibili.com", 10)])  # 只搜 B站
+        self.assertEqual(paid, [1])  # 搜到了：算一次钱
+        self.assertEqual(self.source.tavily.calls, [])  # DeepSeek 找到了就不用 Tavily
+        tools.hits = [Hit("空间", "https://space.bilibili.com/1", "")]  # 只搜到不是视频的网页（照样算钱）：改用 Tavily
+        paid.clear()
+        self.assertEqual(await self.source.search("稻香", paid=lambda: paid.append(1)), ["https://www.bilibili.com/video/av9"])
+        self.assertEqual(paid, [1])
+        tools.error = ToolError("DeepSeek 的余额不够了", status=402)  # 出错（不算钱）：改用 Tavily
+        paid.clear()
+        with self.assertLogs("dsbot.music", "WARNING"):
+            self.assertEqual(await self.source.search("七里香", paid=lambda: paid.append(1)), ["https://www.bilibili.com/video/av9"])
+        self.assertEqual(paid, [])
+        tools.error = None
+        await self.source.search("x" * 300)
+        self.assertEqual(len(tools.calls[-1][0]), 100 + len(" site:bilibili.com"))  # Search 的 query 最多 128 个字
+        before = len(tools.calls)
+        paid.clear()
+        found = await self.source.search("稻香", paid=lambda: paid.append(1), pay=False)  # 超了预算：不用要花钱的搜索
+        self.assertEqual((found, len(tools.calls), paid), (["https://www.bilibili.com/video/av9"], before, []))
+
+
 class InChatCase(unittest.IsolatedAsyncioTestCase):
     """引擎配上真的 MusicPlayer（假的语音、假的 B站）。"""
 
@@ -706,6 +765,35 @@ class InChat(InChatCase):
         self.assertEqual(engine.store.count_usage(day, guild_id=GUILD, kind="search"), 1)  # 按歌名找算一次搜索
         await self.chat(engine, clock, 502, "@小D 现在放的什么")
         self.assertIn("（现在语音频道「语音500」正在放：《晴天》（UP主：周杰伦） [4:30]，阿明 点的）", llm.calls[2]["messages"][-1]["content"])
+
+    async def test_name_search_is_charged_when_deepseek_found_it(self):
+        play = json.dumps({"actions": [{"type": "music", "op": "play", "query": "周杰伦 晴天"}]}, ensure_ascii=False)
+        reply = json.dumps({"actions": [{"type": "reply", "to": 1, "messages": ["放上了"]}]}, ensure_ascii=False)
+        engine, llm, transport, clock, voice, source = self.make([play, reply, json.dumps({"actions": []})])
+        source.found["周杰伦 晴天"] = [LINK]
+        source.billed = True
+        source.add(LINK, "晴天", "周杰伦", 270)
+        await self.chat(engine, clock, 501, "@小D 放首晴天")
+        got = engine.store.db.execute("SELECT outcome, cost FROM usage WHERE kind = 'search'").fetchall()
+        self.assertEqual([r["outcome"] for r in got], ["music"])
+        self.assertAlmostEqual(got[0]["cost"], engine.pricing.search_cost(1))  # 记在这次找歌的那一行上
+        day = engine.ledger.day(clock())
+        self.assertAlmostEqual(engine.ledger.guild_spent(GUILD, clock()), engine.store.spend_by_guild(day)[GUILD])
+        source.billed = False
+        source.found["稻香"] = [LINK]
+        await engine.music.play(GUILD, CHANNEL, 11, "阿明", "稻香", can_search=lambda: None)  # 没算钱的找歌：不记账
+        self.assertAlmostEqual(engine.ledger.guild_spent(GUILD, clock()), engine.store.spend_by_guild(day)[GUILD])
+
+    async def test_over_budget_name_search_does_not_pay(self):
+        engine, llm, transport, clock, voice, source = self.make([json.dumps({"actions": []})], defaults={"daily_budget_usd": 0.01})
+        source.found["晴天"] = [LINK]
+        source.add(LINK, "晴天")
+        view = engine.settings.view(GUILD, CHANNEL, None, None)
+        await engine.music_request(GUILD, CHANNEL, 11, "阿明", "play", "晴天", view=view)
+        engine.ledger.add(GUILD, 0.02, clock())  # 超了预算
+        source.found["稻香"] = [LINK]
+        await engine.music_request(GUILD, CHANNEL, 11, "阿明", "play", "稻香", view=view)
+        self.assertEqual(source.pays, [True, False])  # Tavily、B站自己的搜索不花钱，照常能找
 
     async def test_status_line_only_when_it_changes(self):
         nothing = json.dumps({"actions": []})

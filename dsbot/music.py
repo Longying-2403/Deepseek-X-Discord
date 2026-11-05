@@ -1,9 +1,9 @@
 """B站点歌：找歌、下载音频、每个服务器一个播放队列。
 
 - 找歌：话里有 B站视频链接（BV 号、av 号、b23.tv 短链接，带不带 https:// 都行）就直接用；给的是歌名就上网找：
-  有 TAVILY_API_KEY 时用 Tavily 只搜 bilibili.com（B站自己的搜索接口很容易被风控拦下来），找不到或者没有 Tavily
-  才用 B站的搜索。Tavily 找到的几个结果按标题排：歌名、歌手对得上的在前，翻唱、伴奏、教学、合集之类往后
-  （点歌时自己这么说的除外）；B站的搜索结果没有标题，照 B站的顺序。
+  先用 DeepSeek 的 Search 接口只搜 bilibili.com（B站自己的搜索接口很容易被风控拦下来），没找到再用 Tavily
+  （填了 TAVILY_API_KEY 的话），最后才用 B站的搜索。找到的几个结果按标题排：歌名、歌手对得上的在前，
+  翻唱、伴奏、教学、合集之类往后（点歌时自己这么说的除外）；B站的搜索结果没有标题，照 B站的顺序。
 - 下载：分两步。先向 B站要视频信息（标题、时长，顺便确认不是直播、能放），马上就能告诉点歌的人；
   音频（不用登录，最高 192 kbps）在后台下载，下好了才放，放完、切掉、停止都会删掉。每个服务器只先下载
   接下来的两首（一次下载一首），后面的轮到了再下载：队列再长、视频再长，硬盘上也只有几首。
@@ -70,6 +70,8 @@ _NOT_ORIGINAL = (
     "翻唱", "cover", "伴奏", "纯音乐", "钢琴", "吉他", "指弹", "尤克里里", "教学", "教程", "reaction", "鬼畜",
     "片段", "合集", "串烧", "循环", "一小时", "1小时", "十小时", "10小时", "抖音", "混剪", "改编", "remix", "dj",
     "试听", "铃声", "卡拉ok", "ktv", "翻弹", "翻跳", "舞蹈", "解说", "盘点", "手书",
+    # 讲这首歌的视频（DeepSeek 的搜索常常搜到）：标题里带着 MV、歌名，其实不是歌
+    "分析", "解析", "讲解", "赏析", "解读", "乐理", "评测", "测评", "演奏",
 )
 _LIVE_VERSION = ("live", "现场", "演唱会")  # 现场版：稍微往后排
 _ORIGINAL = ("官方", "official", "mv", "原唱", "完整版")  # 稍微往前排
@@ -519,7 +521,9 @@ def _track(info: Any, url: str) -> Track:
 
 
 class Source(Protocol):
-    async def search(self, query: str) -> list[str]: ...  # 按歌名找到的 B站视频（排好序）
+    # 按歌名找到的 B站视频（排好序）。paid：搜索按次算钱的话（DeepSeek 搜到了结果），每算一次叫一下；
+    # pay=False：今天的预算用完了，不用要花钱的搜索
+    async def search(self, query: str, *, paid: Callable[[], None] | None = None, pay: bool = True) -> list[str]: ...
 
     async def resolve(self, url: str) -> Track: ...  # 拿视频信息；放不了时抛 MusicError
 
@@ -533,8 +537,11 @@ class Redirects(Protocol):
 
 
 class BiliSource:
-    def __init__(self, cache_dir: str | Path, tavily: Any | None = None, http: Redirects | None = None):
+    def __init__(
+        self, cache_dir: str | Path, tavily: Any | None = None, http: Redirects | None = None, *, tools: Any | None = None
+    ):
         self.cache = Path(cache_dir)
+        self.tools = tools  # DeepSeek 的 Search 接口（dstools.DeepSeekTools）
         self.tavily = tavily
         self.http = http  # 展开 b23.tv 短链接用（net.HttpClient）
         self._downloads = asyncio.Semaphore(3)  # 所有服务器加起来同时最多下载三首（每个服务器一次一首）
@@ -559,7 +566,19 @@ class BiliSource:
             finally:
                 self._last_api = time.monotonic()
 
-    async def search(self, query: str) -> list[str]:
+    async def search(self, query: str, *, paid: Callable[[], None] | None = None, pay: bool = True) -> list[str]:
+        if self.tools is not None and pay:
+            try:
+                # Search 的 query 最多 128 个字：歌名留 100 个字，后面接上只搜 B站
+                hits, billed = await self.tools.search(f"{one_line(query, 100)} site:bilibili.com", count=10)
+            except Exception as exc:
+                log.warning("用 DeepSeek 找歌「%s」失败：%s", one_line(query, 40), exc)
+            else:
+                if billed and paid is not None:
+                    paid()
+                found = rank(query, [(hit.url, hit.title) for hit in hits])
+                if found:
+                    return found
         if self.tavily is not None:
             try:
                 found = rank(query, await self.tavily.links(query, domains=["bilibili.com"], max_results=10))
@@ -568,7 +587,7 @@ class BiliSource:
             else:
                 if found:
                     return found
-        return rank(query, await self._call(self._bilisearch, query))  # 没有 Tavily（或者没找到）：用 B站自己的搜索
+        return rank(query, await self._call(self._bilisearch, query))  # 前面都没找到：用 B站自己的搜索
 
     def _bilisearch(self, query: str) -> list[tuple[str, str]]:
         yt_dlp = load_ytdlp()
@@ -841,10 +860,13 @@ class MusicPlayer:
         query: str,
         *,
         can_search: Callable[[], str | None] | None = None,
+        paid: Callable[[], None] | None = None,
+        pay: bool = True,
         state: RoundState | None = None,
     ) -> str:
         """点一首歌：query 是歌名或者 B站链接。can_search：按歌名找之前问一下还能不能搜（能搜就顺便记一次，返回 None；
-        不能搜返回原因）。state：同一轮的记录（见 RoundState）。"""
+        不能搜返回原因）。paid：按歌名找歌按次算钱时叫一下（记账）；pay=False：超了预算，不用要花钱的搜索。
+        state：同一轮的记录（见 RoundState）。"""
         attempt = _Attempt(user_id)
         if state is not None:
             state.tried.append(attempt)
@@ -861,7 +883,9 @@ class MusicPlayer:
             return "没说要放什么"
         self._busy[guild_id] = self._busy.get(guild_id, 0) + 1
         try:
-            return await self._play(guild_id, text_channel_id, channel, user_id, user_name, query, can_search, state, attempt)
+            return await self._play(
+                guild_id, text_channel_id, channel, user_id, user_name, query, can_search, paid, pay, state, attempt
+            )
         finally:
             self._busy[guild_id] -= 1
             if not self._busy[guild_id]:
@@ -876,6 +900,8 @@ class MusicPlayer:
         user_name: str,
         query: str,
         can_search: Callable[[], str | None] | None,
+        paid: Callable[[], None] | None,
+        pay: bool,
         state: RoundState | None,
         attempt: _Attempt,
     ) -> str:
@@ -890,7 +916,7 @@ class MusicPlayer:
             if refused:
                 return refused
             try:
-                urls = await self.source.search(query)
+                urls = await self.source.search(query, paid=paid, pay=pay)
             except MusicError as exc:
                 return str(exc)
             except Exception as exc:

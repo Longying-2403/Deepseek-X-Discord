@@ -66,8 +66,8 @@ MEMORY_ACTIONS = [
     Choice(name="清空", value="clear"),
 ]
 LINK_MODES = {
-    "all": "读链接：开（推文走 FxTwitter，网页走 Tavily）",
-    "x": "读链接：只读推文（没填 TAVILY_API_KEY，别的网站只看 Discord 的预览）",
+    "all": "读链接：开（推文走 FxTwitter，网页由 DeepSeek 读，Tavily 备用）",
+    "x": "读链接：只读推文（别的网站只看 Discord 的预览）",
     "off": "读链接：关",
 }
 NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
