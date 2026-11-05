@@ -2,6 +2,91 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.6.0] - 2026-11-05
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **私信记忆**：私信里聊到的、你和它之间的事（最近在忙什么、约好的事、它答应你的事、私信里一起玩的剧情），会记进你自己的私信记忆。你的称呼、设定、喜好照旧记在人设卡里，服务器的事记在长期记忆里。
+  - 私信里叫它“记住……”当场记（加个 📝，回话里说记成了敏感还是不敏感）；私信安静下来以后它也会自己整理。
+  - **人设卡优先**：关于你自己、长期有效、又不敏感的（称呼、设定、喜好雷点、习惯、身份、爱好）先写进人设卡；写不进人设卡的（你们之间的事、近况、约定、敏感的事）才记进私信记忆。
+  - 每人一份，跟着人走、不分服务器，换了私信挂的服务器也还在；最多 150 条，每条 200 字，快满了它自己合并、删掉旧的。私信里只列最近改过的那些（最多约 6000 字），服务器里只带最近改过的 20 条不敏感的；整理记忆时全都看得到。
+  - **每条标着敏感不敏感**：健康、住址、学校单位、真实姓名、联系方式、钱、感情上的烦恼，还有说了要保密的，都算敏感，只在私信里用。不敏感的，你在私信挂着的那个服务器（以及开了“跨服务器”的服务器）里叫它时也会用上，可能在大家面前提起。
+  - 敏感不敏感是它自己判断的，可能判错：私信里直接跟它说（“第 3 条不算敏感”），或者用新命令 `/ds-dm 记忆` 查看（只有自己看得到）、设为敏感 / 不敏感（编号一栏输入几个字就能选）、删除某条、全部清空。清空之后，整理记忆时不会拿清空之前的聊天把它们重新记回来。
+  - **敏感的事守在私信里**：就算叫它记住，敏感的事也只记进私信记忆（标成敏感），不会写进人设卡和长期记忆；说到敏感的事的，整理记忆时也拦下来。敏感标记只有本人能往下调（私信里说的那一轮它还看了文件、链接、搜索结果的话不算，免得被骗），它整理记忆、改说法时只能往上调；先删后加、合并进来的也认得出是不是敏感的事。
+  - **撤回**：某条改成敏感、本人删掉或改掉某条、它把不敏感的并进了敏感的那条、清空、私信改挂到别的服务器，或者服务器关掉了私信记忆 / 跨服务器，服务器频道记录里附过的直接拿掉（和群友删消息一样）。
+  - 在频道里叫它时带上的私信近况，只带本人说的话（它在私信里的回话不带），说到敏感的事的那句也不带；私信里刚说了敏感的事，之前的私信近况都不带了。
+  - 管理员、bot 主人都看不到私信记忆，日志和 `/ds 状态` 里也不写它的想法；`/dsowner 删除人设卡` 删人时连私信记忆一起删。别人的人设卡原文不会被抄进私信记忆。
+  - 说了“保密”的那段：以前完全不记，现在可能记进私信记忆并标成敏感，仍然不会进人设卡和长期记忆。
+  - 新参数“私信记忆”（`dm_memory`，管理员，只看全服务器这一级，默认开）。
+- **跨服务器**：新参数“跨服务器”（`cross_server`，管理员，只看全服务器这一级，**默认关**）。开了的服务器之间，同一个人跟它聊过的会跟着他走：
+  - 他在 B 服务器叫它时，带上他最近 6 小时在 A 服务器跟它聊的两段（只有他自己的话和它的回复），写明是哪个服务器的哪个频道。两边都要开。
+  - 只带公开频道里的；私密频道、私密帖子、私信的原话、说了要保密的那段都不带。
+  - 私信记忆里不敏感的那些，在开了跨服务器的服务器里也会用上；私信挂着的那个服务器也开了的话，私信里也接得上他在别的服务器跟它聊的。
+- `/ds 状态` 多了“私信记忆”“跨服务器”两行；`/ds-dm 状态` 会说私信记忆有几条（几条敏感）。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.6.0 启动中`。
+- 数据库会自动多几张表（私信记忆存在 `data/memory.sqlite3`）。`config.toml` 里新加的参数不加也行，都有默认值。
+- ⚠️ **私信记忆默认是开的**：更新后，私信里聊的事会开始记进私信记忆，不敏感的会在服务器里被用上。以前就私信过它的人，下次私信时它会先说明一次。不想要的服务器用 `/ds 设置 参数:私信记忆 值:关`；也建议跟群友说一声 `/ds-dm 记忆` 怎么用。
+- 跨服务器默认关，要用的服务器都得开：`/ds 设置 参数:跨服务器 值:开`。开之前最好跟群友说一声。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `memory.py`：`dm_memories`、`dm_memory_seq`、`dm_memory_cleared` 三张表和 `MemoryStore.dm_*`；`MemoryOp.sensitive`；`parse_review` 多返回一组私信记忆的改动。
+- `[engine]` 新增 `dm_memory_max_entries`（150）、`dm_memory_entry_chars`（200）、`dm_memory_prompt_chars`（6000）、`dm_memory_attach_entries`（20）。
+- 新动作 `{"type": "dm_memory", "add" / "edit" / "delete", "sensitive": …}`（只在私信里生效）；`Action.sensitive`。
+- `engine.py`：`_dm_memory_context` / `_mark_dm_memory`（频道里附上不敏感的私信记忆，`ChannelState.dm_memory_shown` 记着附过哪份）、`_apply_dm_ops` / `_dm_one`（一批改动对照这一批开始前的敏感条目，先删后加也认得出）、整理记忆时的 `dm_ok`；`quiet_dm` / `_forget_dm_talk`（私信里刚记了敏感的事，私信近况不再带到频道里）；`_elsewhere` 拿别的服务器的近况；`_screen_texts` 拦住把别人的人设卡抄进私信记忆。
+- `own_text` / `review_text` 去掉频道里附上的私信记忆，压缩、整理频道时不会抄走。
+- 频道里附过的私信记忆记在 `dm_memory_attached` 表里，`Engine.withdraw_dm_memory` 按它把记录里的那一段拿掉；`memory.overlaps` / `reveals` 拦住说到敏感的事的人设卡、长期记忆。`dm_notices` 表记着谁看过私信记忆的说明（以前私信过的人说明一次）。
+- 测试共 911 个（新增 `test_dm_memory.py`）。
+
+### English
+
+**Added**
+
+- **DM memory**: things from your DMs that are between you and the bot (what you've been busy with, plans you made, things it promised you, a story you're playing together in DMs) are saved to your own DM memory. What to call you, your persona and likes stay on your profile card, and server matters stay in the server's long-term memory.
+  - Say "remember …" in DMs to save something right away (it adds 📝 and says whether it saved it as sensitive); it also reviews the DM on its own once things go quiet.
+  - **Profile card first**: things about you that last and aren't sensitive (what to call you, your persona, likes and pet peeves, habits, identity, hobbies) go on your profile card first; only what doesn't fit there (things between you two, recent news, plans, and sensitive things) goes to DM memory.
+  - One per person, it follows you across servers and survives switching the server your DMs use; up to 150 entries of 200 characters, and it merges or deletes old ones as it fills up. DMs list only the most recently changed entries (about 6,000 characters at most), and servers get at most the 20 most recently changed non-sensitive ones; its memory reviews see all of them.
+  - **Every entry is marked sensitive or not**: health, address, school or workplace, real name, contact details, money, relationship troubles, and anything you asked to keep secret are sensitive and only used in DMs. The rest is also used when you call it in the server your DMs use (and in servers with cross-server on), so it may come up in front of everyone.
+  - It decides what's sensitive itself and can get it wrong: tell it in DMs ("entry 3 isn't sensitive"), or use the new `/ds-dm 记忆` command to view it (only you can see it), mark an entry sensitive or not (type a few words in the number field to pick it), delete an entry, or clear everything. After clearing, its memory reviews won't re-add anything from chat before the clear.
+  - **Sensitive things stay in DMs**: even when you ask it to remember them, sensitive things only go to DM memory (marked sensitive), never to your profile card or the server's long-term memory, and its memory reviews block anything that mentions them. Only you can lower the sensitive mark (not in a DM round where it also read a file, link or search results, so text in those can't trick it); its reviews and rewordings can only raise it, and merges or delete-then-add batches still recognize sensitive things.
+  - **Withdrawal**: when an entry is marked sensitive, you delete or edit one, it merges a non-sensitive entry into a sensitive one, you clear it all, your DMs move to another server, or a server turns off DM memory or cross-server, copies already attached in server channels are removed from the chat record (the same way deleted messages are).
+  - The recent DM lines brought along when you call it in a channel only include your own words (not its replies in DMs), and lines that mention your sensitive things are left out; once you've just said something sensitive in DMs, no earlier DM lines are brought along.
+  - Admins and the bot owner can't see it, and its reasoning isn't written to logs or `/ds 状态`; `/dsowner 删除人设卡` also deletes the person's DM memory. Other people's profile cards are never copied into your DM memory word for word.
+  - Parts where you said to keep it secret: these used to be not saved at all; now they may be saved to DM memory, marked sensitive, and still never go to the profile card or long-term memory.
+  - New setting 私信记忆 (`dm_memory`, admins, whole-server level only, on by default).
+- **Cross-server**: new setting 跨服务器 (`cross_server`, admins, whole-server level only, **off by default**). Between servers that turned it on, what a person talked about with it follows them:
+  - When they call it in server B, it brings along their last two exchanges with it in server A from the past 6 hours (only their own messages and its replies), saying which server and channel they were in. Both servers have to turn it on.
+  - Only public channels count; private channels and threads, DM lines, and parts they asked to keep secret are never carried over.
+  - The non-sensitive part of their DM memory is used in servers with cross-server on too, and if the server their DMs use also has it on, DMs can pick up what they just talked about in other servers.
+- `/ds 状态` shows two new lines, 私信记忆 and 跨服务器; `/ds-dm 状态` shows how many DM memory entries you have (and how many are sensitive).
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.6.0 启动中`.
+- The database adds a few tables on its own (DM memory lives in `data/memory.sqlite3`). The new settings in `config.toml` are optional and have defaults.
+- ⚠️ **DM memory is on by default**: after updating, DM conversations start being saved to DM memory, and the non-sensitive parts get used in servers. People who already DM'd it get a one-time explanation on their next DM. Turn it off where you don't want it with `/ds 设置 参数:私信记忆 值:关`, and consider telling your members about `/ds-dm 记忆`.
+- Cross-server is off by default, and every server that wants it has to turn it on: `/ds 设置 参数:跨服务器 值:开`. Consider telling your members first.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `memory.py`: new tables `dm_memories`, `dm_memory_seq` and `dm_memory_cleared` with `MemoryStore.dm_*`; `MemoryOp.sensitive`; `parse_review` returns a third list with the DM memory changes.
+- New `[engine]` settings: `dm_memory_max_entries` (150), `dm_memory_entry_chars` (200), `dm_memory_prompt_chars` (6000), `dm_memory_attach_entries` (20).
+- New action `{"type": "dm_memory", "add" / "edit" / "delete", "sensitive": …}` (only applied in DMs); `Action.sensitive`.
+- `engine.py`: `_dm_memory_context` / `_mark_dm_memory` (attach the non-sensitive DM memory in channels; `ChannelState.dm_memory_shown` tracks what was attached), `_apply_dm_ops` / `_dm_one` (a batch is checked against the sensitive entries from before it started, so delete-then-add is still caught), `dm_ok` in memory reviews; `quiet_dm` / `_forget_dm_talk` (once something sensitive is saved in DMs, recent DM lines stop going to channels); `_elsewhere` for recent exchanges from other servers; `_screen_texts` keeps other people's cards out of DM memory.
+- `own_text` / `review_text` drop the attached DM memory, so channel summaries and reviews never copy it.
+- DM memory attached in channels is recorded in the `dm_memory_attached` table, and `Engine.withdraw_dm_memory` uses it to cut that block out of the record; `memory.overlaps` / `reveals` block card and long-term memory writes that mention sensitive things. The `dm_notices` table tracks who has seen the DM memory explanation (people who DM'd before get it once).
+- There are now 911 tests (new `test_dm_memory.py`).
+
 ## [2.5.0] - 2026-11-05
 
 > 英文版这次没有更新，还是 2.0.0。
