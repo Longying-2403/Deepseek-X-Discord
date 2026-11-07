@@ -2,6 +2,111 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.7.0] - 2026-11-08
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **服务器组**（Beta）：bot 主人用新命令 `/dsowner 服务器组`，把同一群人的几个服务器（比如主服加游戏服）连成一组，当成一个服务器来记：
+  - **共用一份人设卡和长期记忆**：在哪个服务器记下的，组里每个服务器都用得上；`/ds-rp`、`/ds 长期记忆` 看的、改的都是组里那份。
+  - **能互相翻记录**：开了记忆共享的频道，也能翻组里别的服务器里开了共享的频道（名单里写着是哪个服务器）；两边的频道都开了共享时，在 A 服务器跟它聊过的，到 B 服务器叫它时也接得上。私密频道的规矩不变。
+  - **私信也一样**：私信挂在组里哪个服务器上，组里的服务器都算“私信挂着的那个服务器”。
+  - **各管各的**：设置、预算、人设、表情包库、点歌、“跨服务器”还是每个服务器自己的。
+  - **连起来**（`操作:连起来`，服务器从列表里选）：加入的服务器的长期记忆并进组里，接在后面、重新编号（一样的不重复记）。同一个人两边都有卡的，用组里那张，加入方那张存成旧版本，本人用 `/ds-rp 操作:改回上一版` 能换过去、再换回来（换回来以后加入方那张就不留了）；组里删掉了的卡（删得比加入方那张新的），不会被加入方那张顶上。
+  - **退出**（`操作:退出`）：带走一份组里的长期记忆，和在这个服务器出现过的人的人设卡，之后各记各的；组里只剩一个服务器时组就散了。`操作:查看` 列出有哪些组。连起来、退出之前会先说清楚会怎样（并进几条记忆、几个人两边都有卡、编号会不会变），点确认才办。
+  - **谁记的谁整理**：每条长期记忆记着是哪个服务器记的。它自己整理记忆时只改、删这个服务器记的，组里别的服务器记的只给看（有人在聊天里明确叫它改的照常改）。连起来以后超过 50 条时，它不会为了腾地方删条目，要管理员删到 49 条以内才能再记新的。
+  - **名字**：按名字查卡时，同一个人在组里几个服务器的昵称都认得，先认在这里出现过的人；组里别的服务器同名的人，查到时会写明他还没在这个服务器出现过。@ 人只认在这个服务器出现过的人，按他在这里的昵称。写明了是哪个服务器的频道（“#大厅（「B」服务器）”）只在那个服务器里找，不会翻成、链接到这里同名的频道。
+  - **断电也能接着做完**：连组、退组时三个数据库文件每一步都等写进磁盘；做到一半断了，下次执行 `/dsowner 服务器组` 或者重启时接着做完。散掉的组还剩数据时（多半是只还原了其中一两个文件的备份），不删，在日志和 `操作:查看` 里提醒。
+  - `/ds 状态`、`/ds 长期记忆`、`/ds-dm 状态`、第一次私信的说明和 `/dsowner 总览` 都会写出和谁连成了一组。
+- **所有服务器共用一张人设卡**（默认关）：`config.toml` 的 `[bot]` 新增 `shared_cards`。改成 `true` 并重建容器后，每个人在所有服务器和私信里只有一张卡，跟着他走：在 A 服务器叫它“记住我是猫娘”，到 B 服务器它也知道。长期记忆不受影响。
+  - **打开时**自动把各服务器的卡并成每人一张：用最近改过的那张，别的存成旧版本（`/ds-rp 操作:改回上一版` 能换过去、再换回来；换回来以后，换过去的那张就不留了），旧版本一共留 5 个。在哪个服务器清空了卡，只是那边没有卡了，别的服务器里还有的照样并进来；所有服务器共用时清空的、bot 主人删掉的，哪里的都不会并回来。日志里写并了几个人的卡。
+  - **关掉时**把每个人的卡（连同旧版本）复制回他出现过的每个服务器（连成一组的放进组里），之后各改各的。
+  - **查不到不相干的服务器的人**：按名字查卡只查在这个服务器（连成一组时也包括组里的服务器）出现过的人；@ 人、提示词里“有卡的人”只认在这里出现过的人，用他在这里的昵称。
+  - 卡上可能有他在别的服务器、在私信里说的事，它会注意别把别处的私事拿出来说。第一次私信的说明、`/ds-dm 服务器`、`/ds-dm 状态`、`/ds-rp` 和 `/ds 状态` 都会说明卡是所有服务器共用的。
+  - 这个设置记在 `cards.sqlite3` 里，切换在一次事务里做完；出错就还按原来的方式用（日志里会写），下次重启再换。
+- **`CONTROL_GUILD_ID` 可以填几个服务器**：用逗号（中英文都行）、顿号、分号或空格隔开。每个里面都有 `/dsowner`，在哪个里面用都一样；某个服务器注册失败（比如 bot 不在里面）不影响别的。`0` 当没填，全角数字也认。
+
+**改进**
+
+- 私信里聊天时，不再把人设卡上的名字改成他在私信里的名字（Discord 的全局名字）。以前他私信一次，服务器里“有卡的人”就变成那个名字，按服务器里的昵称也查不到他的卡，要等他回服务器说话才改回来。
+- `/ds 长期记忆`：删除时「编号」一栏会列出每条的内容（输入几个字能筛选），删完回复里写出删的是哪一条；记满了会说要删几条；条目多到一次发不完时，每条截短、编号照样全部列出来。
+- 它话里写明是别的服务器的频道（比如“「A」服务器的 #大厅”），不再换成这个服务器同名频道的链接。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.7.0 启动中`。
+- 数据库会自动多几张表、几列。`config.toml` 里新加的 `shared_cards` 不加也行，默认 `false`（和以前一样，每个服务器一张卡）。
+- 服务器组只有 bot 主人能连，不连就和以前一样。连起来之前最好停止项目、备份 `data/`，也跟各个服务器的人说一声；用过服务器组以后，`data/` 里的三个数据库文件要一起备份、一起还原。
+- 打开 `shared_cards` 之前也最好停止项目、备份 `data/`，再跟大家说一声：卡上的事在所有服务器都会用上。改回 `false` 不会变回原来的样子：每个服务器拿到的都是共用的那张，原来各服务器的卡顶多还留在旧版本里（旧版本一共只留最近 5 个，共用期间卡多改几次就挤掉了，它整理记忆时改的也算）。
+- 要换回旧版本：打开过 `shared_cards` 的，先改回 `false` 重启一次，日志里有“人设卡：改回每个服务器一张”了再换；连过服务器组的，先让服务器一个个退出、直到组散掉（旧版本不认这两样，共用的卡、组里的人设卡和长期记忆它都看不到）；`.env` 的 `CONTROL_GUILD_ID` 填了几个的，改回只填一个（旧版本只认一个，填几个会起不来）。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新模块 `groups.py`：`plan_link` / `link`、`plan_unlink` / `unlink`、`finish_leaving` / `recover`（每一步都能重做，做到一半断了能接着做完）、`durable`（组操作期间三个库都 `synchronous=FULL`）、`leftovers`（散掉的组还剩的数据，只报不删）。
+- `store.py`：`server_groups`、`server_group_seq`、`server_group_leaving` 三张表，`Store.memory_scope` / `group_of` / `group_members` / `join_group` / `start_leaving` / `unmap` / `group_epoch` 等。组的 ID 是负数，组里共用的人设卡、长期记忆按它存在原来的 `cards.sqlite3`、`memory.sqlite3` 里。正常关闭时也关掉主库。
+- `memory.py`：新列 `memories.origin`（哪个服务器记的）、`card_versions.merged`（合并进来的版本：改回它时，现在这张存成旧版本，见 `CardStore.swaps_on_restore`）；新表 `card_seen`（卡在组里哪些服务器用过、他在那里叫什么）、`card_meta`（`shared`）；组操作用的 `merge_scope` / `copy_scope` / `drop_scope` / `merge_preview` 等。共用卡：`SHARED = 0`，`CardStore.set_shared`（`_share` / `_split`，返回 `ShareChange`）、`for_groups()`（共用时交给组操作的是 `SharedCardMarks`，只搬删卡的记号）、`find_here(near=…)`、`owners_near`。改成共用、改回每个服务器一张时（`_combine`），只有 0 下面的删卡记号（所有服务器都删了）挡得住一张卡；连组时（`merge_scope`），组里自己的删卡记号照样算。
+- `engine.py`：`_scope` / `_card_scope` / `_card_near`；`_memory_key`（记在哪，加上这个服务器连组、退组过几次：问模型期间变了，就不照着编号改，整理记忆马上重问）；`ChannelState.memory_shown`（没给它看过的编号不改）；`_foreign_memories`（组里别的服务器记的只给看）；`_source_name`（能翻记录的频道名单里，组里别的服务器的频道后面写上是哪个服务器）、`_find_source`（写明了服务器的频道只在那个服务器里找，服务器名用 `_guilds_named` 认）；`groups_changed`；`status()` 多了 `group`、`cards_shared`。
+- `commands.py`：`/dsowner 服务器组`（`group_command`；`ConfirmGroup` 确认时照当时的情况再算一次，对不上就不办）、`recover_groups`、`apply_card_mode`（启动时先 `recover_groups`，再按 `config.toml` 换卡的模式，都在注册命令之前）、`memory_number_choices`、`dm_group_note` / `dm_warning`。
+- `config.py`：`Secrets.control_guild_ids`（以前是 `control_guild_id`）、`parse_guild_ids`；`BotConfig.shared_cards`（认 true / false，也认“开”“关”、on / off、yes / no、1 / 0 这些写法；认不出的报错、不去猜，免得猜错了把卡并起来、分开）。
+- `mentions.link` 多了 `here`；`render.render_who` 能在名字后面带一句说明，`render_review_input` 标出组里别的服务器记的条目。
+- `prompts.py`：`GROUP_BLOCK`、`MEMORY_BLOCK_GROUP`、`MEMORY_OVER`、`CARDS_SHARED_BLOCK`、`REVIEW_GROUP` / `REVIEW_GROUP_SHARED` / `REVIEW_SHARED` / `REVIEW_MEMORY_FOREIGN`。“另外还有人有卡”只说有、不说几个：别处多一张卡，这里的提示词不变，缓存照样命中。没连组、没开 `shared_cards` 的服务器，提示词和 2.6.0 逐字一样（只是私信里聊天时不再改卡上的名字，见“改进”）。
+- 测试共 1014 个（新增 `test_server_groups.py`、`test_shared_cards.py`）。
+
+### English
+
+**Added**
+
+- **Server groups** (Beta): with the new `/dsowner 服务器组` command, the bot owner can link several servers used by the same people (say, a main server and a gaming server) into a group that's remembered as one server:
+  - **Shared profile cards and long-term memory**: whatever is saved in one server is available in every server of the group; `/ds-rp` and `/ds 长期记忆` show and edit the group's copy.
+  - **Shared history**: channels with memory sharing on can also look through the sharing channels in the group's other servers (the list says which server each one is in), and when both channels have sharing on, what someone talked about with it in server A carries over when they call it in server B. The rules for private channels don't change.
+  - **DMs too**: whichever server in the group someone's DMs use, every server in the group counts as the server their DMs use.
+  - **Still separate**: settings, budgets, persona, meme library, music and cross-server stay per server.
+  - **Linking** (`操作:连起来`, pick the servers from the list): the joining server's long-term memory is merged into the group's, appended and renumbered (identical entries aren't duplicated). When someone has a card on both sides, the group's card is kept and the joining server's becomes an old version they can switch to and back with `/ds-rp 操作:改回上一版` (once they switch back, the joining server's card is gone); a card deleted in the group isn't brought back by the joining server's copy, unless that copy was changed after the deletion.
+  - **Leaving** (`操作:退出`): the server takes a copy of the group's long-term memory and the cards of people who have appeared in it, and from then on keeps its own; a group with one server left dissolves. `操作:查看` lists the groups. Before linking or leaving, it explains what will happen (how many memory entries get merged, how many people have cards on both sides, whether numbers change) and only acts after you confirm.
+  - **Each server tidies its own**: every long-term memory entry records which server saved it. Its own memory reviews only edit or delete entries saved by this server; entries saved by the group's other servers are read-only to it (explicit requests in chat still work). If linking pushes the total over 50, it won't delete entries just to make room; an admin has to bring it down to 49 before new ones can be saved.
+  - **Names**: card lookups by name recognize a person's nicknames from every server in the group and prefer people who have appeared here; a same-named person from another server in the group is marked as not having appeared here yet. @mentions only match people who have appeared in this server, under their nickname here. A channel named together with its server ("#大厅（「B」服务器）") is only looked up in that server, never in or linked to a same-named channel here.
+  - **Survives power cuts**: while linking or leaving, every step waits until all three database files are on disk; an interrupted operation is finished the next time `/dsowner 服务器组` runs or the bot restarts. If a dissolved group still has data (usually from restoring only one or two of the files), it isn't deleted; the log and `操作:查看` point it out.
+  - `/ds 状态`, `/ds 长期记忆`, `/ds-dm 状态`, the first-DM notice and `/dsowner 总览` all say which servers are linked.
+- **One profile card across all servers** (off by default): new setting `shared_cards` under `[bot]` in `config.toml`. Set it to `true` and recreate the container, and each person has a single card for every server and DMs that follows them around: tell it "remember I'm a catgirl" in server A and it knows in server B too. Long-term memory isn't affected.
+  - **Turning it on** merges each person's cards into one: the most recently edited card wins, and the others become old versions (switch to one and back with `/ds-rp 操作:改回上一版`; once you switch back, the one you switched to is gone), keeping 5 old versions in all. Clearing a card in one server only removes that server's card; a card the person still has in another server is merged in as usual. Cards cleared while shared and cards the bot owner deleted aren't brought back from anywhere. The log says how many people's cards were merged.
+  - **Turning it off** copies each person's card (with its old versions) back to every server they've appeared in (into the group for linked servers); after that each copy is edited separately.
+  - **No lookups across unrelated servers**: name lookups only find people who have appeared in this server (or, for linked servers, in the group's servers); @mentions and the list of people with cards in the prompt only count people who have appeared here, under their nickname here.
+  - Cards may hold things people said in other servers or in DMs, and it's told not to bring up private things from elsewhere. The first-DM notice, `/ds-dm 服务器`, `/ds-dm 状态`, `/ds-rp` and `/ds 状态` all say the card is shared across servers.
+  - The setting is stored in `cards.sqlite3`, and switching happens in a single transaction; if it fails, the bot keeps the old mode (and says so in the log) and tries again on the next restart.
+- **`CONTROL_GUILD_ID` takes several servers**: separate them with commas (Chinese or English), 、, semicolons or spaces. Each one gets `/dsowner`, and it works the same in all of them; if registering in one fails (say the bot isn't in it), the others still work. `0` counts as not set, and full-width digits work.
+
+**Changed**
+
+- Chatting in DMs no longer renames a person's profile card to the name they use in DMs (their global Discord name). Before, after one DM, the server's list of people with cards showed that name and looking them up by their server nickname found nothing, until they talked in the server again.
+- `/ds 长期记忆`: when deleting, the 编号 field lists each entry's text (type a few words to filter), and the reply says which entry was deleted; when memory is full, it says how many entries to delete; when there are too many entries to fit, each one is shortened but every number is still listed.
+- A channel it names together with another server (say "「A」服务器的 #大厅") is no longer turned into a link to this server's channel of the same name.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.7.0 启动中`.
+- The databases add a few tables and columns on their own. The new `shared_cards` setting in `config.toml` is optional and defaults to `false` (one card per server, as before).
+- Only the bot owner can link servers, and nothing changes until you do. Before linking, stop the project and back up `data/`, and consider telling each server's members. Once you've used server groups, back up and restore the three database files in `data/` together.
+- Before turning on `shared_cards`, also stop the project and back up `data/`, and consider telling people: what's on a card gets used in every server. Setting it back to `false` doesn't restore how things were: every server gets the shared card, and each server's original card survives at most as an old version (only the last 5 old versions are kept, so a few edits while shared, including those from its memory reviews, push them out).
+- To go back to an older version: if you turned on `shared_cards`, set it back to `false`, restart once, and wait for “人设卡：改回每个服务器一张” in the log before switching; if you linked servers, have them leave one by one until the group dissolves (older versions know about neither, and can't see shared cards or a group's cards and long-term memory); if `CONTROL_GUILD_ID` in `.env` lists several servers, cut it back to one (older versions only accept one and won't start otherwise).
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New module `groups.py`: `plan_link` / `link`, `plan_unlink` / `unlink`, `finish_leaving` / `recover` (every step can be redone, so an interrupted operation gets finished), `durable` (all three databases use `synchronous=FULL` during group operations), `leftovers` (data left by dissolved groups is reported, never deleted).
+- `store.py`: tables `server_groups`, `server_group_seq` and `server_group_leaving`, with `Store.memory_scope` / `group_of` / `group_members` / `join_group` / `start_leaving` / `unmap` / `group_epoch` and more. Group IDs are negative, and a group's shared cards and long-term memory are stored under its ID in the existing `cards.sqlite3` and `memory.sqlite3`. The main database is now also closed on a clean shutdown.
+- `memory.py`: new columns `memories.origin` (which server saved it) and `card_versions.merged` (merged-in versions: restoring one saves the current card as an old version, see `CardStore.swaps_on_restore`); new tables `card_seen` (which servers in a group a card was used in, and the person's name there) and `card_meta` (`shared`); `merge_scope` / `copy_scope` / `drop_scope` / `merge_preview` and more for group operations. Shared cards: `SHARED = 0`, `CardStore.set_shared` (`_share` / `_split`, returns a `ShareChange`), `for_groups()` (while cards are shared, group operations get a `SharedCardMarks` that only moves deletion marks), `find_here(near=…)`, `owners_near`. When switching to or from shared cards (`_combine`), only deletion marks under 0 (deleted everywhere) block a card; when linking (`merge_scope`), the group's own deletion marks still count.
+- `engine.py`: `_scope` / `_card_scope` / `_card_near`; `_memory_key` (where the memory lives, plus how many times this server linked or left: if that changed while the model was thinking, numbered edits are skipped and memory reviews are asked again right away); `ChannelState.memory_shown` (numbers it wasn't shown aren't touched); `_foreign_memories` (entries saved by the group's other servers are read-only); `_source_name` (in the list of channels it can look through, channels from the group's other servers get their server's name after them), `_find_source` (a channel named together with its server is only looked up in that server; `_guilds_named` matches the server name); `groups_changed`; `status()` gains `group` and `cards_shared`.
+- `commands.py`: `/dsowner 服务器组` (`group_command`; `ConfirmGroup` checks again on confirm and does nothing if things changed), `recover_groups`, `apply_card_mode` (at startup, `recover_groups` runs first, then the card mode is switched to match `config.toml`, both before commands are registered), `memory_number_choices`, `dm_group_note` / `dm_warning`.
+- `config.py`: `Secrets.control_guild_ids` (was `control_guild_id`), `parse_guild_ids`; `BotConfig.shared_cards` (true / false, also spellings like 开 / 关, on / off, yes / no, 1 / 0; anything it doesn't recognize is an error rather than a guess, so a typo can't merge or split cards).
+- `mentions.link` gains `here`; `render.render_who` can add a note after a name, and `render_review_input` marks entries saved by the group's other servers.
+- `prompts.py`: `GROUP_BLOCK`, `MEMORY_BLOCK_GROUP`, `MEMORY_OVER`, `CARDS_SHARED_BLOCK`, `REVIEW_GROUP` / `REVIEW_GROUP_SHARED` / `REVIEW_SHARED` / `REVIEW_MEMORY_FOREIGN`. The note that others also have cards only says that some exist, not how many, so one more card elsewhere doesn't change this server's prompt or break its cache. Servers that aren't linked, with `shared_cards` off, get exactly the same prompts as in 2.6.0 (except that chatting in DMs no longer renames cards, see Changed).
+- There are now 1014 tests (new `test_server_groups.py` and `test_shared_cards.py`).
+
 ## [2.6.0] - 2026-11-05
 
 > 英文版这次没有更新，还是 2.0.0。
