@@ -72,10 +72,11 @@ def check(config_path: str) -> int:
         print(f"! {note}")
     try:
         secrets = load_secrets()
-        print(f"✓ .env 已填写（OWNER_ID={secrets.owner_id}，CONTROL_GUILD_ID={secrets.control_guild_id or '未设置'}）")
+        control = "、".join(str(g) for g in secrets.control_guild_ids) or "未设置"
+        print(f"✓ .env 已填写（OWNER_ID={secrets.owner_id}，CONTROL_GUILD_ID={control}）")
     except SystemExit as exc:
         print(f"✗ {exc}")
-        secrets = Secrets("x", "x", 0, control_guild_id=1)
+        secrets = Secrets("x", "x", 0, control_guild_ids=(1,))
     check_files()
     from .dstools import tools_base
 
@@ -118,6 +119,10 @@ def check(config_path: str) -> int:
     for label, path in (("聊天记录", cfg.bot.database), ("人设卡", cfg.bot.cards_database), ("长期记忆", cfg.bot.memory_database)):
         state = "已有" if os.path.exists(path) else "第一次启动时新建"
         print(f"· {label}存在 {path}（{state}）")
+    if cfg.bot.shared_cards:
+        print("· 人设卡：每个人在所有服务器共用一张（[bot] shared_cards = true；刚改的话，启动时会把各服务器的卡并成一张）")
+    else:
+        print("· 人设卡：每个服务器一张，连成服务器组的共用一张（[bot] shared_cards = false）")
     store = Store(":memory:")
     bot = DSBot(
         cfg,
@@ -130,16 +135,17 @@ def check(config_path: str) -> int:
         memory=MemoryStore(":memory:"),
     )
     groups = [(None, bot.tree.get_commands())]
-    if secrets.control_guild_id:
+    if secrets.control_guild_ids:  # 填了几个服务器都是同一份命令：查第一个就行
         import discord
 
-        groups.append((secrets.control_guild_id, bot.tree.get_commands(guild=discord.Object(id=secrets.control_guild_id))))
+        first = secrets.control_guild_ids[0]
+        groups.append((first, bot.tree.get_commands(guild=discord.Object(id=first))))
     for guild_id, commands in groups:
         for command in commands:
             payload = command.to_dict(bot.tree)
             json.dumps(payload, ensure_ascii=False)
             subs = [opt["name"] for opt in payload.get("options", [])]
-            where = "全局" if guild_id is None else "私人服务器"
+            where = "全局" if guild_id is None else f"CONTROL_GUILD_ID 里的 {len(secrets.control_guild_ids)} 个服务器"
             print(f"✓ /{payload['name']}（{where}）：{' '.join(subs)}")
     print("自检完成。")
     return 0

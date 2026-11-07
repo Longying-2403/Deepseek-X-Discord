@@ -19,6 +19,20 @@ _SKIP = re.compile(r"```[\s\S]*?```|`[^`\n]*`|https?://\S+|www\.\S+|(?:[A-Za-z0-
 _WORD = re.compile(r"[A-Za-z0-9_]")
 _NEVER = {"everyone", "here"}  # 就算有人叫这个名字也不换
 MAX_NAME = 100  # Discord 的名字、频道名最长 100 字
+# 写明了是哪个服务器的频道：“#大厅（「别的服」服务器）”“「别的服」服务器的 #大厅”，
+# 还有别的服务器的帖子写成的“帖子「攻略」（在 #大厅）（「别的服」服务器）”
+_SERVER_AFTER = re.compile(r"\s*(?:[）)]\s*)?[（(]「(?P<server>[^」\n]{1,100})」服务器[）)]")
+# （近况里别的服务器的帖子写成“「别的服」服务器的 帖子「攻略」（在 #大厅）”）
+_SERVER_BEFORE = re.compile(r"「(?P<server>[^」\n]{1,100})」服务器的\s*(?:帖子「[^」\n]*」\s*[（(]在\s*)?$")
+
+
+def _other_server(text: str, start: int, size: int, here: str | None) -> bool:
+    """text[start] 是 #，后面 size 个字是频道名：前后写着是别的服务器的，就不换成这里的频道链接（会指到这个服务器同名的频道）。
+    here：这个服务器的名字（写的就是这里的，照常换）。"""
+    found = _SERVER_AFTER.match(text, start + 1 + size) or _SERVER_BEFORE.search(text, 0, start)
+    if found is None:
+        return False
+    return here is None or "".join(found["server"].split()).casefold() != "".join(here.split()).casefold()
 
 
 def name_forms(name: str) -> set[str]:
@@ -60,19 +74,21 @@ def link(
     channels: Mapping[str, frozenset[int]],
     *,
     exclude: frozenset[int] = frozenset(),
+    here: str | None = None,
 ) -> tuple[str, list[int], list[str]]:
     """换掉 text 里的 @名字 和 #频道名。返回 (换好的文字, 按出现顺序 @ 到的人, 没对上的 @ 后面那一段字)。
 
-    exclude：不能 @ 的人（它自己）。没对上的那几段给按名字在服务器里找人用。"""
+    exclude：不能 @ 的人（它自己）。没对上的那几段给按名字在服务器里找人用。
+    here：这个服务器的名字（写明了是别的服务器的频道不换，写的是这里的照常换）。"""
     out: list[str] = []
     users: list[int] = []
     unknown: list[str] = []
     last = 0
     for code in _SKIP.finditer(text):
-        out.append(_link_plain(text[last : code.start()], people, channels, exclude, users, unknown))
+        out.append(_link_plain(text[last : code.start()], people, channels, exclude, users, unknown, here))
         out.append(code.group(0))
         last = code.end()
-    out.append(_link_plain(text[last:], people, channels, exclude, users, unknown))
+    out.append(_link_plain(text[last:], people, channels, exclude, users, unknown, here))
     return "".join(out), users, unknown
 
 
@@ -83,6 +99,7 @@ def _link_plain(
     exclude: frozenset[int],
     users: list[int],
     unknown: list[str],
+    here: str | None = None,
 ) -> str:
     out: list[str] = []
     i = 0
@@ -106,7 +123,7 @@ def _link_plain(
             else:
                 found = _longest(rest, channels)
                 # 纯数字的不换：#12 是它自己看的消息编号
-                if found is not None and len(found[1]) == 1 and not found[0].isdigit():
+                if found is not None and len(found[1]) == 1 and not found[0].isdigit() and not _other_server(text, i, len(found[0]), here):
                     out.append(f"<#{next(iter(found[1]))}>")
                     i += 1 + len(found[0])
                     continue

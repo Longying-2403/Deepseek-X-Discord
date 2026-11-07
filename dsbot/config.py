@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from .pricing import Pricing
 # ---------------------------------------------------------------------------
 # 可调参数的定义
 # level = "admin"：服务器管理员可以用 /ds 改（服务器默认或单个频道）
-# level = "owner"：只有你能改（config.toml 或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）
+# level = "owner"：只有你能改（config.toml 或 CONTROL_GUILD_ID 里那几个服务器的 /dsowner）
 # ---------------------------------------------------------------------------
 
 
@@ -47,7 +49,7 @@ _SPEC_LIST = [
     Spec("images", "发图", bool, "admin", "让它自己发表情包库里的图，或者上网找图（找到的图它会先看一遍再决定发不发）"),
     Spec("cards", "人设卡", bool, "admin", "记住群友自己说的称呼、设定、喜好，聊天时用上（群友用 /ds-rp 管自己的卡，管理员看不到）"),
     Spec("long_memory", "长期记忆", bool, "admin", "记住这个服务器的约定、大事、长期的梗和剧情（用 /ds 长期记忆 管理）"),
-    Spec("dm", "私信", bool, "admin", "让服务器成员私信它：私信里用这个服务器的人设、长期记忆和人设卡；私信里聊的可能记进来，也可能在他叫它的频道里被提起（只看全服务器这一级）"),
+    Spec("dm", "私信", bool, "admin", "让服务器成员私信它：私信里用这个服务器的人设、长期记忆和他的人设卡；私信里聊的可能记进来，也可能在他叫它的频道里被提起（只看全服务器这一级）"),
     Spec("dm_memory", "私信记忆", bool, "admin", "私信挂在这个服务器的人：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时，带上不敏感的那些（只看全服务器这一级）"),
     Spec("cross_server", "跨服务器", bool, "admin", "和别的也开了这项的服务器之间，同一个人跟它聊过的会跟着他走：他最近几小时在那边跟它的对话、私信记忆里不敏感的那些（只看全服务器这一级）"),
     # —— 主人 ——
@@ -194,6 +196,9 @@ class BotConfig:
     server_meme_dir: str = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的
     cards_database: str = "data/cards.sqlite3"  # 人设卡（和聊天记录分开存，方便备份、搬家）
     memory_database: str = "data/memory.sqlite3"  # 长期记忆
+    # true = 每个人在所有服务器（和私信里）共用一张人设卡；false = 每个服务器一张（连成服务器组的几个服务器共用一张）。
+    # 改了重启时自动把卡并成一张、或者分回各个服务器（memory.py 的 CardStore.set_shared）
+    shared_cards: bool = False
     music: bool = True  # 点歌（B站，/ds-music）：要 yt-dlp、ffmpeg 和语音库（Docker 镜像里都装好了）
     desktop_port: int = 8765  # 桌面小程序连过来的端口（还要在 .env 填 DESKTOP_TOKEN、docker-compose.yml 开这个端口；0 = 不开）
 
@@ -279,6 +284,18 @@ def _fill(cls: type, data: dict[str, Any], section: str, unknown: list[str]) -> 
     return cls(**kwargs)
 
 
+def _switch(section: str, key: str, value: Any) -> bool:
+    """开关类的配置项：true / false（也认 "开"、"关" 这些写法）。别的抛 ValueError。"""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(f"config.toml 里 [{section}] {key} 只能填 true 或 false（现在是 {value!r}）")
+
+
 def load_config(path: str | Path | None) -> AppConfig:
     data: dict[str, Any] = {}
     if path is not None and Path(path).exists():
@@ -291,6 +308,7 @@ def load_config(path: str | Path | None) -> AppConfig:
         cfg.deepseek = _fill(DeepSeekConfig, data["deepseek"], "deepseek", unknown)
     if "bot" in data:
         cfg.bot = _fill(BotConfig, data["bot"], "bot", unknown)
+        cfg.bot.shared_cards = _switch("bot", "shared_cards", cfg.bot.shared_cards)  # 填错了要报错：猜错了会把卡并起来、分开
     if "engine" in data:
         cfg.engine = _fill(EngineConfig, data["engine"], "engine", unknown)
     if "pricing" in data:
@@ -332,10 +350,19 @@ class Secrets:
     discord_token: str
     deepseek_api_key: str
     owner_id: int
-    control_guild_id: int | None = None
+    control_guild_ids: tuple[int, ...] = ()  # 放 /dsowner 的服务器（可以填几个，用逗号隔开；不填就没有 /dsowner）
     discord_proxy: str | None = None
     tavily_api_key: str | None = None  # 可选：上网找图靠它；DeepSeek 搜不到、打不开网页时也改用它
     desktop_token: str | None = None  # 可选：桌面小程序连过来时核对的密钥（不填就不开桌面操作）
+
+
+def parse_guild_ids(raw: str) -> tuple[int, ...]:
+    """CONTROL_GUILD_ID：一个或几个服务器 ID，用逗号（中英文都行）、顿号、分号或空格隔开。全角数字也认；
+    重复的只算一次；0 当没填（以前就是这样）。有不是纯数字的抛 ValueError。"""
+    parts = [p for p in re.split(r"[\s,，、;；]+", unicodedata.normalize("NFKC", raw).strip()) if p]
+    if any(not (p.isascii() and p.isdecimal()) for p in parts):
+        raise ValueError(raw)
+    return tuple(dict.fromkeys(n for n in (int(p) for p in parts) if n > 0))
 
 
 def load_secrets(env: dict[str, str] | None = None) -> Secrets:
@@ -345,15 +372,14 @@ def load_secrets(env: dict[str, str] | None = None) -> Secrets:
         raise SystemExit("缺少环境变量：" + "、".join(missing) + "（请按 .env.example 填好 .env）")
     try:
         owner_id = int(env["OWNER_ID"].strip())
-        control = env.get("CONTROL_GUILD_ID", "").strip()
-        control_id = int(control) if control else None
+        control_ids = parse_guild_ids(env.get("CONTROL_GUILD_ID", ""))
     except ValueError:
-        raise SystemExit("OWNER_ID / CONTROL_GUILD_ID 必须是纯数字 ID") from None
+        raise SystemExit("OWNER_ID / CONTROL_GUILD_ID 必须是纯数字 ID（CONTROL_GUILD_ID 可以填几个，用逗号隔开）") from None
     return Secrets(
         discord_token=env["DISCORD_TOKEN"].strip(),
         deepseek_api_key=env["DEEPSEEK_API_KEY"].strip(),
         owner_id=owner_id,
-        control_guild_id=control_id,
+        control_guild_ids=control_ids,
         discord_proxy=env.get("DISCORD_PROXY", "").strip() or None,
         tavily_api_key=env.get("TAVILY_API_KEY", "").strip() or None,
         desktop_token=env.get("DESKTOP_TOKEN", "").strip() or None,

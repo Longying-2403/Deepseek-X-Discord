@@ -19,6 +19,8 @@ meme_dir = "data/表情包"           # 通用表情包库：在 NAS 上自己�
 server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的（bot 自己管）
 cards_database = "data/cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
 memory_database = "data/memory.sqlite3"   # 长期记忆
+shared_cards = false              # 人设卡：false = 每个服务器一张（连成服务器组的共用一张）；true = 每个人在所有服务器（和私信里）共用一张
+                                  # 改了重启时自动把各服务器的卡并成一张（最近改过的那张当现在的卡，别的存成旧版本），或者分回他出现过的服务器
 music = true                      # 点歌：在语音频道里放 B站视频的声音（/ds-music，或者 @它“放首歌”）；false = 关掉
 desktop_port = 8765               # 桌面操作：电脑上的桌面小程序连这个端口（还要填 .env 的 DESKTOP_TOKEN、在 docker-compose.yml 开端口）；0 = 不开
 
@@ -53,7 +55,7 @@ dm = true                         # 私信：服务器成员可以私信它（�
 dm_memory = true                  # 私信记忆：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时带上不敏感的那些
 cross_server = false              # 跨服务器：和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的跟着他走
 
-# —— 只有你能改的（这里，或 CONTROL_GUILD_ID 那个服务器里的 /dsowner）——
+# —— 只有你能改的（这里，或 CONTROL_GUILD_ID 里那几个服务器的 /dsowner）——
 min_eval_interval = 60            # 两次主动判断至少隔 60 秒
 proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
 mention_thinking = "off"          # 被叫到时思考强度：off 最快

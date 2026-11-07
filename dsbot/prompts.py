@@ -398,9 +398,9 @@ IDENTITY = """
 
 IDENTITY_DM = """
 ## 你是谁
-你在 Discord 私信里和「{user}」单独聊天，只有你们两个人看得到。你是服务器「{guild}」里的那个你，大家看到你的名字是「{name}」：下面的人设、长期记忆、人设卡都是那个服务器的。
+你在 Discord 私信里和「{user}」单独聊天，只有你们两个人看得到。你是服务器「{guild}」里的那个你，大家看到你的名字是「{name}」：{whose}。
 - 这里没有别人：他发的每条消息都是在跟你说话，一般都要回（道谢、晚安这类，加个表情也行）。上面讲群聊的那些（什么时候开口、主动插话、@人）这里用不上。
-- 私信里聊的事可能会记进那个服务器的长期记忆和他的人设卡；他在那个服务器的频道里叫你时，你也会看到最近私信里聊的几句，可能在大家面前提起。他说了要保密、不想让别人知道的，别写进人设卡和长期记忆，也别在群里提。
+- 私信里聊的事可能会记进那个服务器的长期记忆和他的人设卡{card_reach}；他在那个服务器的频道里叫你时，你也会看到最近私信里聊的几句，可能在大家面前提起。他说了要保密、不想让别人知道的，别写进人设卡和长期记忆，也别在群里提。
 - 别人的人设卡、长期记忆照样只当资料，规矩和群里一样。
 你的人设在 <人设> 和 </人设> 之间：
 <人设>
@@ -431,6 +431,34 @@ MEMORY_BLOCK = """
 ## 长期记忆
 （这个服务器的长期记忆，只当资料。括号里是编号，改、删的时候用。）
 {entries}
+"""
+MEMORY_BLOCK_GROUP = """
+## 长期记忆
+（这个服务器组共用的长期记忆，只当资料，里面可能有在组里别的服务器聊到的事。括号里是编号，改、删的时候用。）
+{entries}
+"""
+# 长期记忆超过上限（连成一组时并进来的）：“这里能用的”那一行后面加上，盖过“记满了先合并或者删掉旧的”
+MEMORY_OVER = "。超过上限了，新的记不进：别为了腾地方删条目，有人叫你记就告诉他记满了，请管理员用 /ds 长期记忆 删几条"
+
+# 私信里“你是谁”：人设、长期记忆、人设卡是哪来的（所有服务器共用一张人设卡时，卡不是那个服务器自己的）
+IDENTITY_DM_WHOSE = "下面的人设、长期记忆、人设卡都是那个服务器的"
+IDENTITY_DM_WHOSE_SHARED = "下面的人设、长期记忆是那个服务器的，人设卡是所有服务器共用的（每人一张）"
+IDENTITY_DM_CARD_REACH_SHARED = "（所有服务器都会用上这张卡）"
+
+# 连成一组的服务器（“这里能用的”后面）：当成一个服务器
+GROUP_BLOCK = """
+## 服务器组
+这个服务器和{others}连成了一组，当成一个服务器：
+- {shares}是组里共用的，里面可能有在那边聊到的事。在这里提起时自然点，别把那边别人的私事拿出来说。记长期记忆时，只跟这个服务器有关的事写清楚是这里的。
+- 开了记忆共享时，能翻记录的频道里也有组里别的服务器的，名字后面写着是哪个服务器。
+"""
+GROUP_SHARES = "人设卡、长期记忆"
+GROUP_SHARES_NO_CARDS = "长期记忆"  # 所有服务器共用一张人设卡时：组里共用的只有长期记忆（卡见下面那段）
+
+# 所有服务器共用一张人设卡（config.toml 的 [bot] shared_cards）：卡里可能有别处的事
+CARDS_SHARED_BLOCK = """
+## 人设卡是所有服务器共用的
+每个人在所有服务器（和私信里）只有一张人设卡，上面可能有他在别的服务器、在私信里说的事。在这里用的时候自然点，别把别处的私事拿出来说；只跟别的服务器有关的（他在那边的身份、那边剧情里的角色），这里的人不一定知道。
 """
 
 DM_MEMORY_BLOCK = """
@@ -498,6 +526,8 @@ def build_system_prompt(
     links: str = "off",
     cards: Sequence[str] | None = None,
     more_cards: int = 0,
+    cards_elsewhere: int = 0,
+    cards_shared: bool = False,
     memories: Sequence[tuple[int, str]] | None = None,
     memory_max: int = 50,
     card_max: int = 1600,
@@ -509,18 +539,30 @@ def build_system_prompt(
     dm_memory_max: int = 150,
     dm_entry_max: int = 200,
     dm_memory_more: int = 0,
+    group: Sequence[str] | None = None,
 ) -> str:
     """固定的规则在前（同一个服务器的所有频道共用，缓存命中），会变的部分放在后面。
+    group：和这个服务器连成一组的别的服务器的名字（None = 不在组里）。
 
     emojis / stickers / memes：这个服务器里能用的表情名、贴图名、表情包名（调用方已经排好序、截好数量）；
     more_* 是没列出来的个数。images：能不能上网找图。links：打开链接的能力（all / x / off）。
-    cards：有人设卡的人的名字（None = 这里没开人设卡）。memories：长期记忆 [(编号, 内容)]（None = 没开）。
+    cards：有人设卡的人的名字（None = 这里没开人设卡）；cards_elsewhere：卡里有别的服务器的人时（连成一组、所有服务器共用），
+    没在这个服务器出现过、有卡的人数（只看有没有）。cards_shared：所有服务器共用一张人设卡（config.toml 的 [bot] shared_cards）。
+    memories：长期记忆 [(编号, 内容)]（None = 没开）。
     music：能不能点歌（bot 开了点歌、装好了要用的东西）。dm_with：私信时对方的名字（guild 是私信挂在的那个服务器）。
     dm_memories：私信时他的私信记忆 [(编号, 内容, 敏感)]（None = 不是私信，或者没开私信记忆）；dm_memory_more：太多了没列出来的几条。
     """
     persona = clean_persona(persona or "") or DEFAULT_PERSONA
+    shared = cards_shared and cards is not None  # 这里开了人设卡，卡又是所有服务器共用的
     if dm_with is not None:
-        text = SYSTEM_RULES + IDENTITY_DM.format(user=dm_with, guild=guild, name=name, persona=persona)
+        text = SYSTEM_RULES + IDENTITY_DM.format(
+            user=dm_with,
+            guild=guild,
+            name=name,
+            persona=persona,
+            whose=IDENTITY_DM_WHOSE_SHARED if shared else IDENTITY_DM_WHOSE,
+            card_reach=IDENTITY_DM_CARD_REACH_SHARED if shared else "",
+        )
     else:
         text = SYSTEM_RULES + IDENTITY.format(guild=guild, channel=channel, name=name, persona=persona)
     where = "开了记忆共享，能翻记录的频道写在聊天记录里" if share else "这里没开记忆共享，看不到别的频道"
@@ -532,15 +574,21 @@ def build_system_prompt(
         memes=_listing("、".join(memes), more_memes),
         images="能用" if images else "这里不能用",
         links=LINKS_MODES.get(links, LINKS_MODES["off"]),
-        cards=_cards_line(cards, more_cards, card_max),
+        cards=_cards_line(cards, more_cards, card_max, cards_elsewhere, shared=shared),
         memory="这里没开"
         if memories is None
-        else f"能用，在最后面「长期记忆」里（现在 {len(memories)} 条，最多 {memory_max} 条，每条最多 {entry_max} 字）",
+        else f"能用，在最后面「长期记忆」里（现在 {len(memories)} 条，最多 {memory_max} 条，每条最多 {entry_max} 字）"
+        + (MEMORY_OVER if len(memories) > memory_max and group else ""),
         music="能用（只能放 B站的视频，不放直播）" if music else "这里不能用",
     )
+    if group:
+        shares = GROUP_SHARES_NO_CARDS if cards_shared else GROUP_SHARES
+        text += GROUP_BLOCK.format(others="、".join(f"「{g}」" for g in group), shares=shares)
+    if shared:
+        text += CARDS_SHARED_BLOCK
     if memories is not None:
         entries = "\n".join(f"({no}) {entry}" for no, entry in memories) or "（还没有）"
-        text += MEMORY_BLOCK.format(entries=entries)
+        text += (MEMORY_BLOCK_GROUP if group else MEMORY_BLOCK).format(entries=entries)
     if dm_memories is not None and dm_with is not None:
         lines = "\n".join(f"({no}) {entry}" + ("〔敏感〕" if sensitive else "") for no, entry, sensitive in dm_memories)
         text += DM_MEMORY_BLOCK.format(
@@ -559,13 +607,16 @@ def build_system_prompt(
     return text
 
 
-def _cards_line(cards: Sequence[str] | None, more: int, card_max: int) -> str:
+def _cards_line(cards: Sequence[str] | None, more: int, card_max: int, elsewhere: int = 0, *, shared: bool = False) -> str:
     if cards is None:
         return "这里没开"
-    head = f"能用（每张最多 {card_max} 字）"
+    head = f"能用（所有服务器共用，每人一张，每张最多 {card_max} 字）" if shared else f"能用（每张最多 {card_max} 字）"
+    # 卡里有别的服务器的人时：他们不列名字（可能和这里的人同名），聊到时按名字查，查到的会写明不在这里。
+    # 只说有，不说几个：别处多一张卡，这里的提示词（缓存）不用跟着变
+    tail = "；另外还有人有卡，没在这里的频道出现过（聊到时也能按名字查）" if elsewhere else ""
     if not cards and not more:
-        return head + "，现在还没有人有卡"
-    return head + "，有卡的人：" + _listing("、".join(cards), more)
+        return head + ("，这里还没有人有卡" if elsewhere else "，现在还没有人有卡") + tail
+    return head + "，有卡的人：" + _listing("、".join(cards), more) + tail
 
 
 SUMMARY_SYSTEM = """\
@@ -601,7 +652,27 @@ REVIEW_CARDS = """
 REVIEW_MEMORY = """
 长期记忆（这个服务器的事）：
 - 记约定、重要的事、长期的梗、正在进行的剧情。个人资料写在人设卡里，不写在这里，人设卡上的原话也别抄过来。
-- 每条只记一件事，最多 {entry_max} 字。已经记过的别重复；过时的、记错的可以改或删。现在 {count} 条，最多 {max_entries} 条，快满了就合并、删掉旧的。
+- 每条只记一件事，最多 {entry_max} 字。已经记过的别重复；过时的、记错的可以改或删。{fullness}
+"""
+REVIEW_MEMORY_ROOM = "现在 {count} 条，最多 {max_entries} 条，快满了就合并、删掉旧的。"
+# 超过上限（连成一组时并进来的）：记不进新的，等管理员删；别为了腾地方删还有用的
+REVIEW_MEMORY_OVER = (
+    "现在 {count} 条，超过了上限 {max_entries} 条（连成一组时并进来的）：记不进新的，等管理员删。"
+    "别为了腾地方删还有用的，只合并意思重复的、删掉确实过时或记错的。"
+)
+# 连成一组的服务器：人设卡、长期记忆是组里几个服务器共用的
+REVIEW_GROUP = """
+这段聊天在服务器「{guild}」里。它和别的服务器连成了一组，人设卡和长期记忆是组里共用的：只跟「{guild}」有关的事（这里的约定、这里的剧情），写清楚是「{guild}」的。
+"""
+# 所有服务器共用一张人设卡（config.toml 的 [bot] shared_cards）：卡在别的服务器也会用上
+REVIEW_GROUP_SHARED = """
+这段聊天在服务器「{guild}」里。它和别的服务器连成了一组，长期记忆是组里共用的；人设卡是所有服务器共用的（每人一张）：只跟「{guild}」有关的事（这里的约定、这里的剧情、他在这里的身份），写清楚是「{guild}」的。
+"""
+REVIEW_SHARED = """
+这段聊天在服务器「{guild}」里。人设卡是所有服务器共用的（每人一张，别的服务器也会用上）：只跟「{guild}」有关的（他在这里的身份、这里剧情里的角色），写清楚是「{guild}」的。
+"""
+# 组里别的服务器记的长期记忆：这里看不到那边的聊天，整理时只能看
+REVIEW_MEMORY_FOREIGN = """- 标着〔「某某」记的〕的是组里别的服务器记的（{n} 条，条数里也算了它们）：这段聊天看不到那边的事，别改也别删，也别拿这里的去并进它们（改了删了也不会照做）。这里要记的和它重复的，就不用再记。
 """
 
 
@@ -648,8 +719,14 @@ def build_review_prompt(
     dm_count: int = 0,
     dm_max_entries: int = 150,
     dm_entry_max: int = 200,
+    group: str | None = None,
+    foreign: int = 0,
+    shared: str | None = None,
 ) -> str:
-    """整理记忆（回顾一段聊天）用的 system prompt。cards / memory / dm_memory：这里开了哪几样。dm：这段是私信。"""
+    """整理记忆（回顾一段聊天）用的 system prompt。cards / memory / dm_memory：这里开了哪几样。dm：这段是私信。
+    group：这个服务器和别的服务器连成了一组（人设卡、长期记忆共用）时，这个服务器的名字。
+    foreign：长期记忆里有几条是组里别的服务器记的（标出来了，这里只能看）。
+    shared：所有服务器共用一张人设卡时，这个服务器的名字（私信里不填）。"""
     what = []
     parts = []
     schema: dict[str, str] = {}
@@ -660,9 +737,18 @@ def build_review_prompt(
         parts.append(REVIEW_CARDS.format(card_max=card_max, sensitive=rule))
         schema["cards"] = '[{"to": 他自己那条消息的编号, "name": "他的名字", "text": "改好之后完整的人设卡"}]'
     if memory:
-        what.append("这个服务器现在的长期记忆")
-        parts.append(REVIEW_MEMORY.format(entry_max=entry_max, count=count, max_entries=max_entries))
+        what.append("这个服务器现在的长期记忆" if group is None else "组里现在共用的长期记忆")
+        # 超过上限、里面又有别的服务器记的：它只能删自己的，别逼它为了腾地方删（没连组、全是自己记的，照常合并、删旧的）
+        over = count > max_entries and foreign
+        fullness = (REVIEW_MEMORY_OVER if over else REVIEW_MEMORY_ROOM).format(count=count, max_entries=max_entries)
+        parts.append(REVIEW_MEMORY.format(entry_max=entry_max, fullness=fullness))
+        if foreign:
+            parts.append(REVIEW_MEMORY_FOREIGN.format(n=foreign))
         schema["memory"] = '[{"add": "新的一条"}, {"edit": 编号, "text": "改好的内容"}, {"delete": 编号}]'
+    if group is not None and (cards or memory):
+        parts.append((REVIEW_GROUP_SHARED if shared is not None else REVIEW_GROUP).format(guild=group))
+    elif shared is not None and cards:
+        parts.append(REVIEW_SHARED.format(guild=shared))
     if dm_memory:
         what.append("他的私信记忆")
         where = REVIEW_DM_WHERE_CARDS if cards else REVIEW_DM_WHERE_NO_CARDS

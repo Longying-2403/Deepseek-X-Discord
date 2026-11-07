@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -373,11 +374,11 @@ def render_cards(cards: list[tuple[str, str | None]]) -> list[str]:
     return lines
 
 
-def render_who(name: str, cards: list[tuple[str, str]]) -> str:
-    """who 查到的人设卡。"""
+def render_who(name: str, cards: Sequence[tuple[str, str] | tuple[str, str, str]]) -> str:
+    """who 查到的人设卡：[(名字, 卡), …]，连成一组时可以带一句说明 [(名字, 卡, 说明), …]（写在名字后面）。"""
     lines = [WHO_HEAD.format(name=_neutralize(one_line(name, 32))), "<<<"]
-    for card_name, text in cards:
-        lines.append(f"【{_neutralize(one_line(card_name, 32))}】")
+    for card_name, text, *note in cards:
+        lines.append(f"【{_neutralize(one_line(card_name, 32))}】" + "".join(note))
         lines.append(neutralize_record(text.strip()))
     lines.append(">>>")
     return "\n".join(lines)
@@ -915,9 +916,12 @@ def render_review_input(
     memories: list[tuple[int, str]] | None,
     lines: list[str],
     dm_memories: list[tuple[int, str, bool]] | None = None,
+    foreign: dict[int, str] | None = None,
 ) -> str:
     """整理记忆时给模型看的内容。people：[(名字, 他的消息编号, 现在的人设卡或 None)]（None = 这里不整理人设卡）；
-    memories：[(编号, 内容)]（None = 这里不整理长期记忆）；dm_memories：[(编号, 内容, 敏感)]（None = 不整理私信记忆）。"""
+    memories：[(编号, 内容)]（None = 这里不整理长期记忆）；dm_memories：[(编号, 内容, 敏感)]（None = 不整理私信记忆）；
+    foreign：组里别的服务器记的长期记忆 {编号: 那个服务器的名字}（标出来：这里只能看）。"""
+    foreign = foreign or {}
     out: list[str] = []
     if people is not None:
         out.append("【说过话的人】")
@@ -931,7 +935,10 @@ def render_review_input(
             out.append("（这段记录里没有能记人设卡的人）")
     if memories is not None:
         out.append("【长期记忆】")
-        out += [f"({no}) {neutralize_record(one_line(text, 300))}" for no, text in memories] or ["（还没有）"]
+        out += [
+            f"({no})" + (f"〔「{_neutralize(foreign[no])}」记的〕" if no in foreign else " ") + neutralize_record(one_line(text, 300))
+            for no, text in memories
+        ] or ["（还没有）"]
     if dm_memories is not None:
         out.append("【他的私信记忆】")
         out += [

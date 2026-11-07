@@ -125,6 +125,9 @@ class FakeTransport:
     def channel_names(self, guild_id):
         return {name: set(ids) for name, ids in self.channel_map.items()}
 
+    def guild_name(self, guild_id):
+        return self.guild_names.get(guild_id, "测试服")
+
     async def find_members(self, guild_id, starts):
         self.member_searches.append(list(starts))
         return {name: set(ids) for name, ids in self.members.items() if any(s.startswith(name[:2]) for s in starts)}

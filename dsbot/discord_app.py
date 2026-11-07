@@ -289,6 +289,10 @@ class DiscordTransport:
     def typing(self, channel_id: int) -> _SafeTyping:
         return _SafeTyping(self._cached(channel_id))
 
+    def guild_name(self, guild_id: int) -> str | None:
+        guild = self.client.get_guild(guild_id)
+        return guild.name if guild is not None else None
+
     def channel_names(self, guild_id: int) -> dict[str, set[int]]:
         """服务器里它看得到的频道和帖子：名字 -> 频道（它在话里写 #频道名 时换成真的频道链接）。"""
         guild = self.client.get_guild(guild_id)
@@ -536,8 +540,13 @@ class DSBot(discord.Client):
         self.music: MusicPlayer | None = None  # 点歌：登录时才启用（--check 不会去动下载目录）
         self.music_problem = "还没启动"  # 点歌用不了的原因
 
-        from .commands import register_commands
+        from .commands import apply_card_mode, recover_groups, register_commands
 
+        try:
+            recover_groups(self)  # 上次连组、退组做到一半就停了（断电、重启）：接着做完（按卡文件里记的共用不共用）
+        except Exception:
+            log.exception("服务器组：接着做完上次没做完的连组、退组时出错")
+        apply_card_mode(self)  # 再照 config.toml 换成所有服务器共用一张人设卡，或者改回每个服务器一张（注册命令之前：说明文字跟着变）
         register_commands(self)
 
     # ---------------------------------------------------------------- 生命周期
@@ -562,12 +571,12 @@ class DSBot(discord.Client):
                 log.info("已注册 %d 个全局斜杠命令：%s", len(synced), "、".join(f"/{c.name}" for c in synced))
             except discord.HTTPException as exc:
                 log.error("注册全局斜杠命令失败：%s", exc)
-            if self.secrets.control_guild_id:
+            for guild_id in self.secrets.control_guild_ids:  # 填了几个就在几个服务器里注册（一个不成不影响别的）
                 try:
-                    synced = await self.tree.sync(guild=discord.Object(id=self.secrets.control_guild_id))
-                    log.info("已在私人服务器注册 %d 个主人命令：%s", len(synced), "、".join(f"/{c.name}" for c in synced))
+                    synced = await self.tree.sync(guild=discord.Object(id=guild_id))
+                    log.info("已在服务器 %s 注册 %d 个主人命令：%s", guild_id, len(synced), "、".join(f"/{c.name}" for c in synced))
                 except discord.HTTPException as exc:
-                    log.error("在 CONTROL_GUILD_ID 注册主人命令失败（bot 在那个服务器里吗？）：%s", exc)
+                    log.error("在 CONTROL_GUILD_ID 里的服务器 %s 注册主人命令失败（bot 在那个服务器里吗？）：%s", guild_id, exc)
         self._ticker = asyncio.create_task(self._tick_loop())
 
     def _on_sigterm(self) -> None:
@@ -647,6 +656,10 @@ class DSBot(discord.Client):
                     db.close()
         finally:
             await super().close()  # 前面哪一步出错也要断开和 Discord 的连接，不然进程退不出去
+            try:
+                self.store.close()  # 聊天记录最后关（断开连接时可能还在写）：关的时候没写进主文件的部分（WAL）会写进去
+            except Exception as exc:
+                log.warning("关闭数据库出错：%r", exc)
 
     # ---------------------------------------------------------------- 私信
 
@@ -762,14 +775,27 @@ class DSBot(discord.Client):
         log.info("%s 的私信挂到服务器 %s（%d 个可选）", user.id, guild.id, len(candidates))
         return guild, note
 
-    @staticmethod
-    def _dm_first_note(guild: Any) -> str:
-        """第一次在私信里聊（或者换了服务器）时先说明一声：用的是哪个服务器，私信里聊的可能被提起。"""
+    def _dm_first_note(self, guild: Any) -> str:
+        """第一次在私信里聊（或者换了服务器）时先说明一声：用的是哪个服务器，私信里聊的可能被提起。
+        所有服务器共用一张人设卡时，说清楚卡在别的服务器也会用上。"""
         name = discord_safe(guild.name)
+        cards = getattr(self, "cards", None)
+        group = ""
+        if getattr(self, "store", None) is not None and self.store.group_of(guild.id) is not None:
+            from .commands import dm_group_note  # 连成了一组：组里的服务器都会用上、提起
+
+            note = dm_group_note(self, guild.id, me="我")
+            group = note + "\n" if note else ""  # 组里只剩它自己（连组、退组做到一半）：不多说
+        if cards is not None and getattr(cards, "shared", False):
+            return (
+                f"私信里我会用「{name}」这个服务器的人设、长期记忆，和你在所有服务器共用的那张人设卡来聊。\n"
+                f"⚠️ 这里聊的事可能会记进那边的长期记忆和你的人设卡（人设卡在所有服务器都会用上）；你在「{name}」的频道里叫我时，"
+                "我也可能提起刚在私信里聊的，频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。\n" + group + DM_MEMORY_NOTE
+            )
         return (
             f"私信里我会用「{name}」这个服务器的人设、长期记忆和你的人设卡来聊。\n"
             f"⚠️ 这里聊的事可能会记进那边的长期记忆和你的人设卡；你在「{name}」的频道里叫我时，我也可能提起刚在私信里聊的，"
-            "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。\n" + DM_MEMORY_NOTE
+            "频道里的人都看得到。不想让别人知道的，跟我说一声“保密”。\n" + group + DM_MEMORY_NOTE
         )
 
     def _memory_notice(self, user_id: int, guild: Any, note: str | None) -> str | None:

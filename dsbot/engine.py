@@ -27,7 +27,7 @@ from .images import MAX_RAW_BYTES, filename_for, to_data_uri, upload_ready
 from .ledger import Ledger
 from .links import site_name
 from .llm import LLMError
-from .memory import CardStore, MemoryStore, clean_card, clean_memory, parse_review, reveals
+from .memory import SHARED, CardStore, MemoryStore, clean_card, clean_memory, parse_review, reveals
 from .models import (
     Action,
     ChannelInfo,
@@ -224,6 +224,8 @@ class Transport(Protocol):
     def channel_names(self, guild_id: int) -> dict[str, set[int]]: ...  # 频道名 -> 频道（它看得到的）
 
     async def find_members(self, guild_id: int, starts: list[str]) -> dict[str, set[int]]: ...  # 按名字开头找人
+
+    def guild_name(self, guild_id: int) -> str | None: ...  # 服务器的名字（它不在那个服务器里了是 None）
 
 
 class Searcher(Protocol):
@@ -436,6 +438,12 @@ def _sticker_label(name: str) -> str:
     return neutralize(one_line(name, 30))
 
 
+# 近况里写的是“在「某某」服务器的 #大厅 跟你聊过”，能翻的频道名单里写的是“#大厅（「某某」服务器）”：照着前一种写的也认得
+_SERVER_PREFIX = re.compile(r"^在?「(?P<server>[^」]{1,100})」服务器的\s*(?P<name>.+)$")  # 服务器名最长 100 字
+_SERVER_SUFFIX = re.compile(r"^(?P<name>.+?)\s*[（(]「(?P<server>[^」]{1,100})」服务器[）)]$")
+SERVER_NAME_CHARS = 40  # 给模型看的别的服务器的名字最多几个字（近况、能翻的频道、组名单都按这个截：模型照哪种写都对得上）
+
+
 def _norm_channel(name: str) -> str:
     return "".join(name.lower().lstrip("#＃").split())
 
@@ -576,6 +584,9 @@ class ChannelState:
     # 人 -> (附上他私信记忆的那条记录, 附上的内容)：内容变了、或者那条记录被压缩掉了，再附一次
     dm_memory_shown: dict[int, tuple[int, str]] = field(default_factory=dict)  # 也记在库里（撤回时要找到那条记录）
     quiet_dm: bool = False  # 私信这一轮刚记了敏感的事：这一轮的对话不当近况带到频道里
+    # 这一轮给它看的长期记忆是哪一份（_memory_key：记在哪、服务器组变过几次）：中途连组、退组了就别照着编号改
+    memory_key: tuple[int, int] | None = None
+    memory_shown: frozenset[int] = frozenset()  # 这一轮给它看过的长期记忆编号（没看过的编号不照着改、删）
     unreviewed_rounds: int = 0  # 上次整理记忆之后又聊了几轮
     reviewing: bool = False
     last_review_at: float = 0.0
@@ -2322,6 +2333,67 @@ class Engine:
     def _memory_on(self, view: View) -> bool:
         return bool(view.long_memory) and self.memory is not None
 
+    def _scope(self, guild_id: int) -> int:
+        """这个服务器的长期记忆记在哪：连成一组的服务器共用组里那一份（组的 ID），不然就是自己。人设卡见 _card_scope。"""
+        return self.store.memory_scope(guild_id)
+
+    def _cards_shared(self) -> bool:
+        """所有服务器共用一张人设卡（config.toml 的 [bot] shared_cards，启动时换好了）。"""
+        return self.cards is not None and self.cards.shared
+
+    def _card_scope(self, guild_id: int) -> int:
+        """这个服务器的人设卡记在哪：所有服务器共用一张时都在 SHARED，不然和长期记忆一样（连成一组的记在组里）。
+        和这个服务器自己的 ID 不一样，就是别的服务器的人的卡也在里面：只列、只 @ 在这里出现过的人，按名字查时分档。"""
+        return SHARED if self._cards_shared() else self._scope(guild_id)
+
+    def _card_near(self, guild_id: int) -> set[int] | None:
+        """按名字查卡时，除了这个服务器还算哪些服务器的人：所有服务器共用一张卡时只算组里别的服务器（没连组就没有：
+        不相干的服务器的人在这里查不到）；不然是 None（组里那份本来就只有组里几个服务器的人）。"""
+        return set(self._group_guilds(guild_id)[1:]) if self._cards_shared() else None
+
+    def _memory_key(self, guild_id: int) -> tuple[int, int]:
+        """(记在哪, 这个服务器的组变过几次)：问模型前后对不上，就是中途连组、退组了（连了又退回来，记在哪一样，
+        编号却变了）。别的服务器连组、退组不算。"""
+        return self._scope(guild_id), self.store.group_epoch(guild_id)
+
+    def _names_here(self, st: ChannelState) -> bool:
+        """卡上记的名字跟着这里的昵称改吗：私信里不改（私信里是他的全局名字，和服务器里的昵称来回换，提示词就一直变）；
+        连成一组时只跟着组里第一个服务器的改；所有服务器共用一张卡时都不改（各服务器的昵称记在 card_seen 里）。"""
+        if st.private or self._cards_shared():
+            return False
+        group = self.store.group_of(st.guild_id)
+        return group is None or self.store.group_members(group)[:1] == [st.guild_id]
+
+    def _note_seen(self, st: ChannelState, user_id: int, name: str) -> None:
+        """卡里有别的服务器的人时（连成一组、所有服务器共用一张）：记下这个人的卡在这个服务器用过（退出组时只带走在那里
+        出现过的人的卡；@ 人、查卡时认他在这里的名字）。私信里只记“用过”，不记名字（私信里是他的全局名字，不是在服务器里的昵称）。"""
+        scope = self._card_scope(st.guild_id)
+        if scope != st.guild_id and self.cards is not None:
+            self.cards.note_seen(scope, user_id, st.guild_id, "" if st.private else name)
+
+    def _group_guilds(self, guild_id: int) -> list[int]:
+        """和这个服务器连成一组的服务器，自己排第一个、别的按加入的先后；不在组里就只有自己。"""
+        group = self.store.group_of(guild_id)
+        if group is None:
+            return [guild_id]
+        return [guild_id] + [g for g in self.store.group_members(group) if g != guild_id]
+
+    def _guild_name(self, guild_id: int) -> str:
+        name = getattr(self.transport, "guild_name", None)
+        return (name(guild_id) if name is not None else None) or str(guild_id)
+
+    def _server_label(self, guild_id: int) -> str:
+        """给模型看的别的服务器的名字（截短、中和过）。"""
+        return neutralize(one_line(self._guild_name(guild_id), SERVER_NAME_CHARS))
+
+    def _foreign_memories(self, scope: int, guild_id: int, entries: Sequence[Any] | None = None) -> dict[int, str]:
+        """连成一组时：组里现在别的服务器记的长期记忆 {编号: 那个服务器的名字}（这里整理时只能看）。没连成组是空的。"""
+        if scope == guild_id or self.memory is None:
+            return {}
+        others = set(self._group_guilds(guild_id)[1:])
+        entries = self.memory.entries(scope) if entries is None else entries
+        return {m.no: self._server_label(m.origin) for m in entries if m.origin is not None and m.origin in others}
+
     def implicit_ok(self, channel_id: int, key: str) -> bool:
         """整理记忆时能不能把这个频道的聊天记进人设卡（key = cards）/ 长期记忆（long_memory）。
 
@@ -2359,10 +2431,17 @@ class Engine:
                 people.setdefault(m.author_id, m.author_name)
         shown: list[tuple[str, str | None]] = []
         marks: list[tuple[int, float | None]] = []
+        scope = self._card_scope(st.guild_id)
+        grouped = scope != st.guild_id
         for uid, name in people.items():
-            if len(shown) >= max(0, self.ec.cards_per_round):
+            full = len(shown) >= max(0, self.ec.cards_per_round)
+            if full and not grouped:
                 break
-            card = self.cards.get(st.guild_id, uid)
+            card = self.cards.get(scope, uid)
+            if full:  # 附满了：卡里有别的服务器的人时，剩下的人也记下“在这里出现过”（退组时这个服务器带走他们的卡）
+                if card is not None:
+                    self._note_seen(st, uid, name)
+                continue
             if card is None:
                 seen = st.cards_shown.get(uid)
                 if seen is not None:
@@ -2370,8 +2449,9 @@ class Engine:
                         shown.append((name, None))  # 对话里还附着被删掉的那份：告诉它别再用
                     marks.append((uid, None))  # 这一轮写进记录之后就不用再说了
                 continue
-            if name and card.name != name:
-                self.cards.touch_name(st.guild_id, uid, name)  # 改了昵称：按新名字也能查到
+            if name and card.name != name and self._names_here(st):
+                self.cards.touch_name(scope, uid, name)  # 改了昵称：按新名字也能查到
+            self._note_seen(st, uid, name)  # 名字没变就不写库
             seen = st.cards_shown.get(uid)
             if seen is not None and seen[1] == card.updated_at and oldest is not None and seen[0] >= oldest:
                 continue
@@ -2397,13 +2477,19 @@ class Engine:
         if not self._cards_on(view):
             return WHO_OFF
         assert self.cards is not None
-        found = self.cards.find(st.guild_id, name)
-        if not found:
+        scope = self._card_scope(st.guild_id)
+        if scope != st.guild_id:  # 卡里有别的服务器的人：先找在这里出现过的人，别的服务器同名的人标出来（免得安到这里的人头上）
+            hits = self.cards.find_here(scope, name, st.guild_id, near=self._card_near(st.guild_id))
+        else:
+            hits = [(card, card.name, "", True) for card in self.cards.find(scope, name)]
+        if not hits:
             return WHO_NONE.format(name=neutralize(one_line(name, 32)))
-        for card in found:
-            marks.append((card.user_id, card.updated_at))
-        log.info("频道 %s：查了「%s」的人设卡（%d 张）", st.channel_id, one_line(name, 32), len(found))
-        return render_who(name, [(card.name, card.text) for card in found])
+        for card, _, _, local in hits:
+            if local:
+                # 还没在这里出现过的人不记成“卡已经在对话里了”：那份写着他不在这里，等他来这里说话时照常附上
+                marks.append((card.user_id, card.updated_at))
+        log.info("频道 %s：查了「%s」的人设卡（%d 张）", st.channel_id, one_line(name, 32), len(hits))
+        return render_who(name, [(shown, card.text, note) for card, shown, note, _ in hits])
 
     def _seen_cards(self, conv: Conversation, content: Any = None) -> list[str]:
         """这次请求里它看得到的人设卡原文：记录里附过的、who 查到的、它自己用 card 动作写过的（记录在数据库里，
@@ -2457,10 +2543,10 @@ class Engine:
         public = said if isinstance(said, Said) else Said(lambda lines=list(said): lines)
         return quotes_card(text, plain, said=public) or quotes_card(text, shared, said=public.plus(mine))
 
-    def _screen_memory(self, guild_id: int, items: list[Any], text_of: Callable[[Any], str | None], cards: list[str], said: Iterable[str]) -> list[Any]:
-        """要记进长期记忆的几条：和已经记着的连起来照抄了人设卡的不记（一张卡拆成几条分开记，拼起来还是原文）。
-        长期记忆每个频道的提示词里都有、管理员也看得到。text_of 返回 None 的不是要记的话，原样留着。"""
-        base = [m.text for m in self.memory.entries(guild_id)] if self.memory is not None else []
+    def _screen_memory(self, scope: int, items: list[Any], text_of: Callable[[Any], str | None], cards: list[str], said: Iterable[str]) -> list[Any]:
+        """要记进长期记忆（scope：记在哪，见 _scope）的几条：和已经记着的连起来照抄了人设卡的不记（一张卡拆成几条分开记，
+        拼起来还是原文）。长期记忆每个频道的提示词里都有、管理员也看得到。text_of 返回 None 的不是要记的话，原样留着。"""
+        base = [m.text for m in self.memory.entries(scope)] if self.memory is not None else []
         return self._screen_texts(base, items, text_of, cards, said)
 
     def _screen_texts(
@@ -2518,14 +2604,14 @@ class Engine:
         def recited(acts: list[Action]) -> bool:
             return copied("\n".join(t for a in acts if a.kind == "reply" for t in a.messages))
 
-        memo = self._screen_memory(st.guild_id, actions, lambda a: a.text if a.kind == "memory" else None, seen, heard)
+        memo = self._screen_memory(self._scope(st.guild_id), actions, lambda a: a.text if a.kind == "memory" else None, seen, heard)
         if len(memo) != len(actions):
             log.info("频道 %s：要记的长期记忆照抄了人设卡的原文，没记", st.channel_id)
             actions, stored = memo, dump_actions(memo)
         user = self.transport.channel_info(st.channel_id).dm_user if st.private else None
         if user is not None and self.memory is not None:
             # 私信记忆本人用 /ds-dm 记忆 看得到：别人的人设卡原文不能抄进来（自己的卡照抄没关系）
-            own = set(self.cards.own_texts(st.guild_id, user)) if self.cards is not None else set()
+            own = set(self.cards.own_texts(self._card_scope(st.guild_id), user)) if self.cards is not None else set()
             others = [card for card in seen if card not in own]
             base = [e.text for e in self.memory.dm_entries(user)]
             memo = self._screen_texts(base, actions, lambda a: a.text if a.kind == "dm_memory" else None, others, heard)
@@ -2597,6 +2683,8 @@ class Engine:
         secrets: list[str] = []
         if st.private:
             mine, secrets = self._dm_secrets(st, view, mine)
+        # 这一轮里有按编号改、删长期记忆的：组刚变过时整轮都不写（新记的那条可能是要替掉某一条的，只记它会留下重复的）
+        by_number = any(a.kind == "memory" and a.op in ("edit", "delete") for a in mine)
         for action in mine:
             if st.guild_id != guild:
                 # 加 📝 的时候私信换了服务器：剩下的不写（不能写进别的服务器）
@@ -2615,7 +2703,7 @@ class Engine:
             elif action.kind == "dm_memory":
                 continue  # 私信记忆下面一起改（一批里先删后加，也要认得出说的是敏感的事）
             else:
-                mid = self._apply_memory(st, view, action, targets, kind, now)
+                mid = self._apply_memory(st, view, action, targets, kind, now, by_number=by_number)
             if mid is not None and mid not in marked:
                 marked.add(mid)
                 await self._safe_react(st, mid, "📝")  # 让人一眼看到真的记下了
@@ -2634,7 +2722,7 @@ class Engine:
         m = by_sid.get(action.to) if action.to is not None else None
         if m is None or self.cards is None:
             return False
-        card = self.cards.get(st.guild_id, m.author_id)
+        card = self.cards.get(self._card_scope(st.guild_id), m.author_id)
         return (card.text if card is not None else "") == clean_card(action.text or "")
 
     def _drop_from_record(self, st: ChannelState, refused: list[Action]) -> None:
@@ -2683,34 +2771,47 @@ class Engine:
             return None
         # 抄进自己的卡，本人用 /ds-rp 就能看到别人的原文了：别人现在的卡，加上这次请求里它看得到的（删掉的、改之前的也算；
         # 它以前替他写成过的卡是他自己的，不算）。大家公开说过的、本来就在他自己卡上的不算
+        scope = self._card_scope(st.guild_id)
         drafts = self._drafts(st, history, m.author_id)
-        others = [*self.cards.others(st.guild_id, m.author_id), *(t for t in seen if t not in drafts)]
-        mine = self.cards.own_texts(st.guild_id, m.author_id)
+        others = [*self.cards.others(scope, m.author_id), *(t for t in seen if t not in drafts)]
+        mine = self.cards.own_texts(scope, m.author_id)
         if self._copies_card(text, others, mine, self._said(st.conversation, (x.text for x in by_sid.values()))):
             log.info("频道 %s：%s 的新人设卡照抄了别人的人设卡，没改", st.channel_id, m.author_name)
             return None
-        # 它是照着对话里附着的那份改的：那份在这期间被本人改了、删了（/ds-rp、bot 主人删卡），就不写
+        # 它是照着对话里附着的那份改的：那份在这期间被本人改了、删了（/ds-rp、bot 主人删卡、连进了服务器组），就不写
         seen = st.cards_shown.get(m.author_id)
         expect = seen[1] if seen is not None else None
-        current = self.cards.get(st.guild_id, m.author_id)
+        current = self.cards.get(scope, m.author_id)
         if (current.updated_at if current is not None else None) != expect:
             log.info("频道 %s：%s 的人设卡刚被改过或删过，这次没改", st.channel_id, m.author_name)
             return None
-        if not self.cards.put(st.guild_id, m.author_id, m.author_name, text, via="chat", now=now, expect=expect):
+        name = m.author_name if current is None or self._names_here(st) else current.name  # 卡上的名字别跟着别处的昵称变
+        if not self.cards.put(scope, m.author_id, name, text, via="chat", now=now, expect=expect):
             return None  # 没有变化
+        self._note_seen(st, m.author_id, m.author_name)
         # 只记谁的卡改了，不记内容：卡是本人的东西
         log.info("频道 %s：%s 的人设卡%s", st.channel_id, m.author_name, "已清空" if not text else f"已更新（{len(text)} 字）")
         return m.message_id
 
     def _apply_memory(
-        self, st: ChannelState, view: View, action: Action, targets: list[int], kind: str, now: float
+        self, st: ChannelState, view: View, action: Action, targets: list[int], kind: str, now: float, *, by_number: bool = True
     ) -> int | None:
-        """改长期记忆：只在被叫到的那一轮（有人要它记）。返回要加 📝 的消息。"""
+        """改长期记忆：只在被叫到的那一轮（有人要它记）。返回要加 📝 的消息。
+        by_number：这一轮里有没有按编号改、删的（组刚变过时，只有新记、没有改删的那一轮照样记）。"""
         live = [t for t in targets if st.msg_by_sid.get(t) not in st.deleted]  # 叫它的消息被删了：当成不要它记了
         if not self._memory_on(view) or kind != "mention" or not live:
             log.info("频道 %s：没人叫它要记，或者这里没开长期记忆，没改", st.channel_id)
             return None
-        if not self._memory_op(st.guild_id, action.op or "", action.index, action.text, via="chat", now=now):
+        scope = self._scope(st.guild_id)
+        if st.memory_key is not None and self._memory_key(st.guild_id) != st.memory_key and (action.op != "add" or by_number):
+            # 它看到的是连组（或退组）之前的那份：编号对不上，改错了就改到别的条目上了。新记一条不看编号，照样记进现在这份
+            log.info("频道 %s：服务器组刚变过，它看到的长期记忆已经不是现在这份，这次没改", st.channel_id)
+            return None
+        if action.op in ("edit", "delete") and action.index not in st.memory_shown:
+            # 没给它看过的编号（问的时候有服务器连进组、并进来的接在后面）：多半是编的，别改到那些条目上
+            log.info("频道 %s：长期记忆第 %s 条没给它看过，没改", st.channel_id, action.index)
+            return None
+        if not self._memory_op(scope, action.op or "", action.index, action.text, via="chat", now=now, origin=st.guild_id):
             log.info("频道 %s：长期记忆没改成（%s %s）", st.channel_id, action.op, action.index or "")
             return None
         log.info("频道 %s：长期记忆 %s %s", st.channel_id, action.op, one_line(action.text or str(action.index or ""), 80))
@@ -2742,7 +2843,7 @@ class Engine:
         already = ""
         if action.kind == "card" and self.cards is not None:
             m = by_sid.get(action.to) if action.to is not None else None
-            card = self.cards.get(st.guild_id, m.author_id) if m is not None else None
+            card = self.cards.get(self._card_scope(st.guild_id), m.author_id) if m is not None else None
             already = card.text if card is not None else ""
         return reveals(text, secrets, already)
 
@@ -2884,11 +2985,20 @@ class Engine:
             else:
                 del self.interactions[key]
 
-    def withdraw_dm_memory(self, user_id: int | None = None, *, guild_id: int | None = None) -> int:
+    def withdraw_dm_memory(
+        self,
+        user_id: int | None = None,
+        *,
+        guild_id: int | None = None,
+        keep: Callable[[int, int], bool] | None = None,
+    ) -> int:
         """把频道记录里附过的私信记忆拿掉（隐私优先，和群友删消息一样直接改记录）：某个人的（他删了、改了、标成敏感、
-        清空了），或者某个服务器的（关掉了私信记忆、跨服务器，私信改挂到别的服务器）。下次他叫它时，照当时能带的重新附。
+        清空了），或者某个服务器的（关掉了私信记忆、跨服务器，退出了服务器组，私信改挂到别的服务器）。
+        下次他叫它时，照当时能带的重新附。keep(频道, 人) 为真的那些照样留着（只撤回现在不能带的）。
         返回改了几条记录。"""
         rows = self.store.dm_memory_turns(user_id=user_id, guild_id=guild_id)
+        if keep is not None:
+            rows = [r for r in rows if not keep(r[1], r[2])]
         changed = 0
         for turn_id, channel_id, _, name in rows:
             content = self.store.turn_content(turn_id)
@@ -2910,24 +3020,29 @@ class Engine:
                     del st.dm_memory_shown[person]
         if rows:
             self.store.forget_dm_memory([(turn_id, uid) for turn_id, _, uid, _ in rows])
-        for st in self.states.values():
-            if guild_id is not None and st.guild_id != guild_id:
-                continue
-            if user_id is None:
-                st.dm_memory_shown.clear()
-            else:
-                st.dm_memory_shown.pop(user_id, None)
+        if keep is not None:
+            for _, channel_id, uid, _ in rows:
+                if (st := self.states.get(channel_id)) is not None:
+                    st.dm_memory_shown.pop(uid, None)
+        else:
+            for st in self.states.values():
+                if guild_id is not None and st.guild_id != guild_id:
+                    continue
+                if user_id is None:
+                    st.dm_memory_shown.clear()
+                else:
+                    st.dm_memory_shown.pop(user_id, None)
         if changed:
             log.info("撤回了 %d 条记录里附着的私信记忆", changed)
         return changed
 
     def _dm_memory_texts(self, st: ChannelState, view: View, user_id: int) -> list[str] | None:
         """频道里能附上的这个人的私信记忆：不敏感的、最近改过的几条。这里不能带（私信里、没开私信记忆、
-        不是他私信挂的服务器又没开跨服务器）是 None。"""
+        不是他私信挂的服务器（或者和它连成一组的服务器）又没开跨服务器）是 None。"""
         if st.private or not self._dm_memory_on(view):
             return None
         home = self.store.dm_home(user_id)
-        if not ((home is not None and home[0] == st.guild_id) or view.cross_server):
+        if not ((home is not None and home[0] in self._group_guilds(st.guild_id)) or view.cross_server):
             return None
         assert self.memory is not None
         public = [e for e in self.memory.dm_entries(user_id) if not e.sensitive]
@@ -2936,8 +3051,8 @@ class Engine:
     def _dm_memory_context(
         self, st: ChannelState, view: View, conv: Conversation, triggers: list[IncomingMessage]
     ) -> tuple[list[str], list[tuple[int, str | None, str]]]:
-        """服务器的频道里被叫到时，附上叫它的人私信记忆里不敏感的那些：私信挂在这个服务器的一定带，
-        别的服务器要开了“跨服务器”才带。已经附过、内容没变、那条记录也还在的，不再附。
+        """服务器的频道里被叫到时，附上叫它的人私信记忆里不敏感的那些：私信挂在这个服务器（或者和它连成一组的服务器）的
+        一定带，别的服务器要开了“跨服务器”才带。已经附过、内容没变、那条记录也还在的，不再附。
         返回 (要附的几行, [(人, 附的内容或 None, 写的名字)])。"""
         if st.private or not triggers or not self._dm_memory_on(view):
             return [], []
@@ -2991,24 +3106,27 @@ class Engine:
             st.dm_memory_shown[uid] = (turn.id, shown)
             self.store.note_dm_memory(turn.id, st.channel_id, uid, who)
 
-    def _memory_op(self, guild_id: int, op: str, no: int | None, text: str | None, *, via: str, now: float) -> bool:
-        """记一条 / 改一条 / 删一条长期记忆。超出条数、字数，或者编号不存在时不改，返回 False。"""
+    def _memory_op(
+        self, scope: int, op: str, no: int | None, text: str | None, *, via: str, now: float, origin: int | None = None
+    ) -> bool:
+        """记一条 / 改一条 / 删一条长期记忆（scope：记在哪，见 _scope；origin：哪个服务器记的）。
+        超出条数、字数，或者编号不存在时不改，返回 False。"""
         assert self.memory is not None
         if op in ("add", "edit"):
             text = clean_memory(text or "")
             if not text or len(text) > self.ec.memory_entry_chars:
                 return False
         if op == "add":
-            entries = self.memory.entries(guild_id)
+            entries = self.memory.entries(scope)
             if len(entries) >= self.ec.memory_max_entries or any(e.text == text for e in entries):
                 return False
-            self.memory.add(guild_id, text or "", via=via, now=now)
+            self.memory.add(scope, text or "", via=via, now=now, origin=origin)
             return True
         if op == "edit" and no is not None:
-            current = self.memory.get(guild_id, no)
-            return current is not None and current.text != text and self.memory.edit(guild_id, no, text or "", via=via, now=now)
+            current = self.memory.get(scope, no)
+            return current is not None and current.text != text and self.memory.edit(scope, no, text or "", via=via, now=now)
         if op == "delete" and no is not None:
-            return self.memory.delete(guild_id, no)
+            return self.memory.delete(scope, no)
         return False
 
     # ------------------------------------------------------------------ 整理记忆
@@ -3178,6 +3296,11 @@ class Engine:
                 st.review_held = max(st.review_held, chunk.last_turn)  # 这一段归这次整理：压缩时不再挑
             if chunk.sids:
                 result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation, plan.dm_ok)
+                if result == "regroup" and st.generation == generation and not self.closing:
+                    # 问的时候连组、退组了：照新的组马上再问一次（压缩前挑出来的这批没有下一次）
+                    result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation, plan.dm_ok)
+                if result == "regroup":
+                    result = "retry"  # 又变了：当成暂时的问题（平时的下次再整理；压缩前挑出来的那批只能跳过）
                 if st.generation != generation:
                     return  # 整理的时候这个频道的记忆被清空了
                 if result != "ok":
@@ -3214,9 +3337,13 @@ class Engine:
     ) -> str:
         """问模型这一段聊天里有什么值得长期记住的，照着改。
 
-        返回 "ok"；"retry"（连不上、限流、余额不足：之后再试）；"failed"（模型的输出不能用、等太久没写完）。"""
+        返回 "ok"；"retry"（连不上、限流、余额不足：之后再试）；"failed"（模型的输出不能用、等太久没写完）；
+        "regroup"（问的时候这个服务器连组、退组了，它看到的长期记忆不是现在这份：照新的再问）。"""
         authors = self.store.load_authors(st.channel_id, chunk.sids)  # 编号 -> (人, 名字)；bot 和旧记录没有
-        guild = st.guild_id
+        guild = st.guild_id  # 花费记在这个服务器
+        key = self._memory_key(guild)
+        scope = key[0]  # 长期记忆记在哪（连成一组的服务器共用组里那份）
+        card_scope = self._card_scope(guild)  # 人设卡记在哪（所有服务器共用一张时是 SHARED，不然同上）
         people: dict[int, tuple[str, list[int]]] = {}
         if cards_ok:
             assert self.cards is not None
@@ -3224,7 +3351,7 @@ class Engine:
                 who = authors.get(sid)
                 if who is None:
                     continue
-                deleted = self.cards.deleted_at(guild, who[0])
+                deleted = self.cards.forgotten_at(card_scope, who[0])
                 if deleted is not None and deleted >= chunk.start:
                     continue  # 这段聊天之后他的卡被删过：不拿这些旧话重新写他的卡
                 entry = people.setdefault(who[0], (who[1], []))
@@ -3247,7 +3374,7 @@ class Engine:
             names = [name for name, _ in people.values()]
             seen_names: dict[str, int] = {}
             for uid, (name, own) in people.items():
-                card = self.cards.get(guild, uid)
+                card = self.cards.get(card_scope, uid)
                 versions[uid] = card.updated_at if card is not None else None
                 shown = one_line(name or (card.name if card else ""), 32)
                 if names.count(name) > 1:  # 同名的两个人：靠消息编号分开（名字太长时先截短，免得把后缀截掉）
@@ -3255,9 +3382,12 @@ class Engine:
                     shown += f"（同名的第 {numbers[uid]} 位）"
                 listed.append((shown, own, card.text if card else None))
         memories = None
+        foreign: dict[int, str] = {}  # 组里别的服务器记的长期记忆：这段聊天看不到那边的事，只给看、不让改
         if memory_ok:
             assert self.memory is not None
-            memories = [(m.no, m.text) for m in self.memory.entries(guild)]
+            entries = self.memory.entries(scope)
+            memories = [(m.no, m.text) for m in entries]
+            foreign = self._foreign_memories(scope, guild, entries)
         dm_list = None
         if dm_user is not None:
             assert self.memory is not None
@@ -3275,10 +3405,14 @@ class Engine:
             dm_count=len(dm_list or []),
             dm_max_entries=self.ec.dm_memory_max_entries,
             dm_entry_max=self.ec.dm_memory_entry_chars,
+            # 私信里不说“这段在服务器里”（私信的规矩更严：敏感的、要保密的都不写进组里共用的记忆）
+            group=neutralize(one_line(info.guild_name, 40)) if scope != guild and not st.private else None,
+            foreign=len(foreign),
+            shared=neutralize(one_line(info.guild_name, 40)) if self._cards_shared() and not st.private else None,
         )
         prompt = [
             {"role": "system", "content": system},
-            {"role": "user", "content": render_review_input(listed, memories, chunk.lines, dm_list)},
+            {"role": "user", "content": render_review_input(listed, memories, chunk.lines, dm_list, foreign)},
         ]
         now = self.clock()
         try:
@@ -3316,6 +3450,10 @@ class Engine:
         )
         if st.generation != generation:
             return "retry"
+        if self._memory_key(st.guild_id) != key:
+            # 问模型的时候这个服务器连组、退组了：它看到的不是现在这份（长期记忆的编号对不上），照新的马上再问一次
+            log.info("频道 %s：整理记忆的时候服务器组变了，照现在的再整理一次", st.channel_id)
+            return "regroup"
         parsed = parse_review(completion.content)
         if parsed is None and completion.finish_reason == "length":
             log.warning("频道 %s：整理记忆的输出太长被截断了，这次没整理成", st.channel_id)
@@ -3347,26 +3485,28 @@ class Engine:
                 if not text or len(text) > self.ec.card_max_chars:
                     continue
                 # 别把别人的卡抄进这个人的卡（本人用 /ds-rp 就看得到）；本来就在他自己卡上的不算
-                if self._copies_card(text, self.cards.others(guild, who[0]), self.cards.own_texts(guild, who[0]), heard):
+                if self._copies_card(text, self.cards.others(card_scope, who[0]), self.cards.own_texts(card_scope, who[0]), heard):
                     log.info("频道 %s：整理记忆时 #%s 的新人设卡照抄了别人的卡，没改", st.channel_id, to)  # 不写内容
                     continue
-                deleted = self.cards.deleted_at(guild, who[0])
+                deleted = self.cards.forgotten_at(card_scope, who[0])
                 if deleted is not None and deleted >= chunk.start:
                     continue  # 问模型的时候被删掉了
-                current = self.cards.get(guild, who[0])
+                current = self.cards.get(card_scope, who[0])
                 if secrets and reveals(text, secrets, current.text if current is not None else ""):
                     log.info("频道 %s：整理私信时 #%s 的新人设卡说到了敏感的事，没改", st.channel_id, to)  # 不写内容
                     continue
                 done.add(who[0])
-                if self.cards.put(guild, who[0], who[1], text, via="review", now=now, expect=versions.get(who[0])):
+                name = who[1] if current is None or self._names_here(st) else current.name  # 卡上的名字别跟着别处的昵称变
+                if self.cards.put(card_scope, who[0], name, text, via="review", now=now, expect=versions.get(who[0])):
                     cards_changed += 1
+                    self._note_seen(st, who[0], who[1])
                 if len(done) >= MAX_REVIEW_CARDS:
                     break
         memory_changed = 0
         if memory_ok:
             listed_cards = [card for _, _, card in listed or [] if card]  # 给它看过的人设卡
             wanted = ops[:MAX_REVIEW_MEMORY_OPS]
-            kept = self._screen_memory(guild, wanted, lambda op: op.text, listed_cards, heard)
+            kept = self._screen_memory(scope, wanted, lambda op: op.text, listed_cards, heard)
             if len(kept) != len(wanted):
                 log.info("频道 %s：整理记忆时要记的照抄了人设卡的原文，没记", st.channel_id)  # 不写内容
             if secrets:
@@ -3374,8 +3514,17 @@ class Engine:
                 kept = [op for op in kept if not (op.text and reveals(op.text, secrets))]
                 if len(kept) != before:
                     log.info("频道 %s：整理私信时要记进长期记忆的说到了敏感的事，没记", st.channel_id)  # 不写内容
+            # 组里别的服务器记的：这里看不到那边的聊天，不知道还有没有用（要删让那边整理、或者管理员删）。
+            # 按问之前和现在的都算（问的时候可能有服务器连进来），没给它看过的编号也不动
+            shown = {no for no, _ in memories or []}
+            blocked = set(foreign) | set(self._foreign_memories(scope, guild))
+            # 想把这里的并进别的服务器那条（那条不让改）：这里要删的也先不删，免得内容哪儿都没了
+            merging = any(op.op == "edit" and op.no in blocked for op in kept)
             for op in kept:
-                if self._memory_op(guild, op.op, op.no, op.text, via="review", now=now):
+                if op.op in ("edit", "delete") and (op.no in blocked or op.no not in shown or (merging and op.op == "delete")):
+                    log.info("频道 %s：整理记忆时想%s第 %s 条（组里别的服务器记的，或者没给它看过），没照做", st.channel_id, "改" if op.op == "edit" else "删", op.no)
+                    continue
+                if self._memory_op(scope, op.op, op.no, op.text, via="review", now=now, origin=guild):
                     memory_changed += 1
         dm_changed = 0
         if dm_user is not None:
@@ -3413,15 +3562,18 @@ class Engine:
         return explicit is True
 
     def shared_sources(self, guild_id: int, channel_id: int) -> list[tuple[int, ChannelPlace]]:
-        """这个频道可以翻记录的别的频道：普通频道在前，帖子在后，各自按名字排。"""
+        """这个频道可以翻记录的别的频道（连成一组的话，也有组里别的服务器的）：这个服务器的在前，组里别的服务器按加入的
+        先后；同一个服务器里普通频道在前，帖子在后，各自按名字排。"""
         out = []
-        for cid in self.store.conversation_channels(guild_id):
-            if cid == channel_id:
-                continue
-            place = self.transport.locate(cid)
-            if place is not None and place.guild_id == guild_id and self.shares_out(cid, place):
-                out.append((cid, place))
-        out.sort(key=lambda item: (item[1].parent_id is not None, item[1].name, item[0]))
+        order = self._group_guilds(guild_id)
+        for g in order:
+            for cid in self.store.conversation_channels(g):
+                if cid == channel_id:
+                    continue
+                place = self.transport.locate(cid)
+                if place is not None and place.guild_id == g and self.shares_out(cid, place):
+                    out.append((cid, place))
+        out.sort(key=lambda item: (order.index(item[1].guild_id), item[1].parent_id is not None, item[1].name, item[0]))
         return out
 
     def _display(self, place: ChannelPlace) -> str:
@@ -3433,34 +3585,79 @@ class Engine:
         where = f"（在 #{neutralize(one_line(parent.name, 30))}）" if parent is not None else ""
         return f"帖子「{name}」{where}"
 
+    def _source_name(self, channel_id: int, place: ChannelPlace, guild_id: int) -> str:
+        """能翻记录的频道给模型看的名字：组里别的服务器的，后面写上是哪个服务器。"""
+        name = self._display(place)
+        if place.guild_id != guild_id:
+            server = neutralize(one_line(self.transport.channel_info(channel_id).guild_name, SERVER_NAME_CHARS))
+            name += f"（「{server}」服务器）"
+        return name
+
     def _find_source(
-        self, sources: list[tuple[int, ChannelPlace]], wanted: str
+        self, sources: list[tuple[int, ChannelPlace]], wanted: str, guild_id: int
     ) -> tuple[int, ChannelPlace] | list[tuple[int, ChannelPlace]] | None:
-        """按名字找要翻的频道。找到返回它；同名的帖子分不出是哪个时返回候选列表；找不到返回 None。"""
+        """按名字找要翻的频道（guild_id：现在在哪个服务器）。找到返回它；分不出是哪个（同名的帖子，组里几个服务器都有
+        这个名字的频道）时返回候选列表；找不到返回 None。
+        写明了是哪个服务器的（“#大厅（「某某」服务器）”“「某某」服务器的 #大厅”）：只在那个服务器的频道里找，
+        那边没有就是找不到（不会退回这个服务器同名的频道，免得把这里的聊天当成那边的）。"""
         raw = " ".join(wanted.split()).strip()
-        key = _norm_channel(wanted).rstrip("…")
-        if not key:
+        named = _SERVER_PREFIX.match(raw) or _SERVER_SUFFIX.match(raw)
+        if named:
+            servers = self._guilds_named(named["server"], {p.guild_id for _, p in sources} | {guild_id})
+            if not servers:
+                # 不是组里哪个服务器的名字：可能频道、帖子自己就叫这个（名字里正好带着“（「X」服务器）”），先认频道。
+                # 写的是组里的服务器时不走这里：免得群友起个“大厅（「别的服」服务器）”的帖子就冒充了那边的频道
+                bare = raw.lstrip("#＃")
+                literal = [s for s in sources if bare in (s[1].name, neutralize(s[1].name))]
+                literal = [s for s in literal if s[1].parent_id is None] or literal
+                return literal[0] if len(literal) == 1 else None
+            sources = [s for s in sources if s[1].guild_id in servers]
+            raw = named["name"].strip()
+        key = _norm_channel(raw).rstrip("…")
+        if not key or not sources:
             return None
 
-        def names(place: ChannelPlace) -> set[str]:
-            return {_norm_channel(place.name), _norm_channel(self._display(place)), _norm_channel(neutralize(place.name))}
+        def shown(cid: int, place: ChannelPlace) -> tuple[str, ...]:
+            return (place.name, self._display(place), self._source_name(cid, place, guild_id), neutralize(place.name))
+
+        def names(cid: int, place: ChannelPlace, labeled: bool = False) -> set[str]:
+            out = {_norm_channel(place.name), _norm_channel(self._display(place)), _norm_channel(neutralize(place.name))}
+            if labeled:  # 模糊比对时不带服务器名：免得写个服务器名就对上了那个服务器的随便哪个频道
+                out.add(_norm_channel(self._source_name(cid, place, guild_id)))
+            return out
 
         tests = (
-            lambda p: raw in (p.name, self._display(p), neutralize(p.name)) or raw.lstrip("#＃") == p.name,  # 原样一致
-            lambda p: key in names(p),
-            lambda p: any(n.startswith(key) for n in names(p)),  # 名单里的长名字被截断过（结尾是“…”）
-            lambda p: any(key in n or (len(n) >= 2 and n in key) for n in names(p)),  # “游戏频道”找“游戏”之类
+            lambda c, p: raw in shown(c, p) or raw.lstrip("#＃") == p.name,  # 原样一致
+            lambda c, p: key in names(c, p, labeled=True),
+            lambda c, p: any(n.startswith(key) for n in names(c, p)),  # 名单里的长名字被截断过（结尾是“…”）
+            lambda c, p: any(key in n or (len(n) >= 2 and n in key) for n in names(c, p)),  # “游戏频道”找“游戏”之类
         )
         for test in tests:
-            found = [s for s in sources if test(s[1])]
+            found = [s for s in sources if test(*s)]
             channels = [s for s in found if s[1].parent_id is None]
             if channels:
-                return channels[0]  # 频道是管理员建的，同名时优先频道
+                here = [s for s in channels if s[1].guild_id == guild_id]
+                if here or len({s[1].guild_id for s in channels}) == 1:
+                    return (here or channels)[0]  # 频道是管理员建的，同名时优先频道；先认这个服务器自己的
+                return channels  # 组里别的几个服务器都有这个名字的频道：不猜
             if len(found) == 1:
                 return found[0]
             if found:
                 return found  # 好几个帖子都对得上：不猜，免得被群友起的同名帖子冒充
         return None
+
+    def _guilds_named(self, server: str, guilds: Iterable[int]) -> set[int]:
+        """模型写的服务器名对得上哪几个服务器：全名，或者给它看的截短的名字（带不带结尾的“…”都认）。"""
+        want = _norm_channel(server)
+        cut = want.endswith("…")
+        want = want.rstrip("…")
+        out: set[int] = set()
+        for g in guilds:
+            full = self._guild_name(g)
+            forms = {_norm_channel(full), _norm_channel(neutralize(full)), _norm_channel(self._server_label(g)).rstrip("…")}
+            if want and (want in forms or (cut and any(f.startswith(want) for f in forms))):
+                out.add(g)
+        return out
 
     def _system_prompt(self, st: ChannelState, view: View, conv: Conversation, info: ChannelInfo) -> str:
         # 频道名单不放这里：它会变（新频道、帖子归档），放在 system prompt 里每变一次整段缓存都失效。
@@ -3469,20 +3666,49 @@ class Engine:
         stickers = [_sticker_label(n) for n in info.stickers[: max(0, self.ec.sticker_list_limit)]]
         meme_names = self.memes.names(st.guild_id) if self._memes_on(view) and self.memes is not None else []
         memes = [_sticker_label(n) for n in meme_names[: max(0, self.ec.meme_list_limit)]]
-        # 有人设卡的人、长期记忆：很少变，放这里（排好序、编号固定，不变就不影响缓存）
+        # 有人设卡的人、长期记忆：很少变，放这里（排好序、编号固定，不变就不影响缓存）。连成一组的服务器用组里共用的那份
+        st.memory_key = self._memory_key(st.guild_id)
+        scope = st.memory_key[0]
         card_names: list[str] | None = None
-        more_cards = 0
+        more_cards = elsewhere = 0
         if self._cards_on(view):
             assert self.cards is not None
-            all_names = self.cards.names(st.guild_id)
+            card_scope = self._card_scope(st.guild_id)
+            if card_scope != st.guild_id:
+                # 卡里有别的服务器的人（连成一组、所有服务器共用一张）：只列在这里出现过的人、用他在这里的名字
+                # （别的服务器同名的人不在这里）；别的服务器的只说还有
+                owners = self.cards.named_here(card_scope, st.guild_id)
+                names_here = {n for _, n in owners}
+                here = {uid for uid, _ in owners}
+                partner = info.dm_user if st.private else None
+                if partner is not None and partner not in here and info.dm_with and self.cards.get(card_scope, partner) is not None:
+                    # 私信里：对面这个人的卡就附在聊天记录里，列上他（他在这个服务器可能只在私信里出现过，没记名字）
+                    names_here.add(info.dm_with)
+                    here.add(partner)
+                all_names = sorted(names_here)
+                near = self._card_near(st.guild_id)
+                if near is None:
+                    elsewhere = max(0, self.cards.count(card_scope) - len(here))
+                else:
+                    # 所有服务器共用一张卡：只算在这里只在私信里出现过的、组里别的服务器的人（别处的人在这里查不到）
+                    elsewhere = len(self.cards.owners_near(card_scope, st.guild_id, near) - here)
+            else:
+                all_names = self.cards.names(card_scope)
+                if st.private and info.dm_user is not None and info.dm_with:
+                    mine = self.cards.get(card_scope, info.dm_user)
+                    if mine is not None and not mine.name:
+                        # 卡上没记名字（改回每个服务器一张时，他在这里只在私信里出现过）：私信里照样列上他（他的卡附着呢）
+                        all_names = sorted({*all_names, info.dm_with})
             card_names = [_sticker_label(n) for n in all_names[: max(0, self.ec.card_list_limit)]]
             more_cards = len(all_names) - len(card_names)
         memories: list[tuple[int, str]] | None = None
         if self._memory_on(view):
             assert self.memory is not None
             memories = [
-                (m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in self.memory.entries(st.guild_id)
+                (m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in self.memory.entries(scope)
             ]
+        st.memory_shown = frozenset(no for no, _ in memories or [])
+        group = [self._server_label(g) for g in self._group_guilds(st.guild_id)[1:]] or None
         dm_memories, dm_more = self._dm_memory_entries(st, view, info)
         return build_system_prompt(
             guild=neutralize(one_line(info.guild_name, 60)),
@@ -3502,6 +3728,8 @@ class Engine:
             links=self._links_mode(view),
             cards=card_names,
             more_cards=more_cards,
+            cards_elsewhere=elsewhere,
+            cards_shared=self._cards_shared(),
             memories=memories,
             memory_max=self.ec.memory_max_entries,
             card_max=self.ec.card_max_chars,
@@ -3513,6 +3741,7 @@ class Engine:
             dm_memory_max=self.ec.dm_memory_max_entries,
             dm_entry_max=self.ec.dm_memory_entry_chars,
             dm_memory_more=dm_more,
+            group=group,
         )
 
     def _dm_memory_entries(
@@ -3682,21 +3911,21 @@ class Engine:
         if not view.share_memory:
             return f"（想翻「{shown}」的记录，但这里没开记忆共享，看不了别的频道。）"
         sources = self.shared_sources(st.guild_id, st.channel_id)
-        match = self._find_source(sources, action.channel or "")
+        match = self._find_source(sources, action.channel or "", st.guild_id)
         if match is None:
-            names = "、".join(self._display(p) for _, p in sources[:10]) or "没有"
+            names = "、".join(self._source_name(c, p, st.guild_id) for c, p in sources[:10]) or "没有"
             return f"（找不到能翻记录的频道「{shown}」。能翻的：{names}）"
         if isinstance(match, list):
-            names = "、".join(self._display(p) for _, p in match[:10])
+            names = "、".join(self._source_name(c, p, st.guild_id) for c, p in match[:10])
             return f"（叫「{shown}」的有好几个：{names}。分不出是哪个，没翻。）"
         channel_id, place = match
         other = self.states.get(channel_id)
         conv = other.conversation if other is not None and other.conversation is not None else None
         if conv is None:
-            conv = self.store.load_conversation(channel_id, st.guild_id)
+            conv = self.store.load_conversation(channel_id, place.guild_id)
         lines = history_lines([(t.role, t.content) for t in conv.turns], info.bot_name)
         lines = _pick_lines(lines, action.query, self.ec.recall_max_chars)
-        return render_recall(self._display(place), conv.summary, lines, action.query)
+        return render_recall(self._source_name(channel_id, place, st.guild_id), conv.summary, lines, action.query)
 
     def _shared_context(
         self, st: ChannelState, view: View, triggers: list[IncomingMessage], now: float
@@ -3709,32 +3938,37 @@ class Engine:
         listed: tuple[str, ...] | None = None
         sources = self.shared_sources(st.guild_id, st.channel_id) if view.share_memory else []
         if view.share_memory:
-            names = tuple(self._display(p) for _, p in sources[: self.ec.share_list_limit])
+            names = tuple(self._source_name(c, p, st.guild_id) for c, p in sources[: self.ec.share_list_limit])
             if names != st.listed:
                 listed = names
                 lines += render_channel_list(list(names), len(sources) - len(names))
         ttl = self.ec.share_recent_hours * 3600
         marks: dict[int, int] = {}
         allowed = {cid: p for cid, p in sources}
+        # 连成一组的服务器当成一个服务器：组里几个服务器的都算“这里”的
+        here = self._group_guilds(st.guild_id)
         # 私信和服务器的频道之间，同一个人自己跟它的对话不管开没开记忆共享都带：
         # 在频道里叫它时带上他刚才的私信，私信里带上他刚才在公开频道里跟它聊的
-        for key in {(st.guild_id, m.author_id) for m in triggers if not m.is_bot}:
+        for key in {(g, m.author_id) for g in here for m in triggers if not m.is_bot}:
             for item in self.interactions.get(key, ()):
                 if item.channel_id not in allowed and item.channel_id != st.channel_id:
                     place = self.transport.locate(item.channel_id)
-                    if place is not None and place.guild_id == st.guild_id and (place.public if st.private else place.dm):
+                    if place is not None and place.guild_id in here and (place.public if st.private else place.dm):
                         allowed[item.channel_id] = place
         # 跨服务器：开了“跨服务器”的服务器之间，同一个人跟它的对话跟着他走（私信看它挂的那个服务器开没开：
         # 私信里聊的会记进那个服务器的人设卡、长期记忆，那边没开就不带）
         cross = bool(view.cross_server)
+        crossed: set[int] = set()  # 只是因为“跨服务器”才带得上的频道：说了要保密的那段不带（组里的服务器也一样）
         for m in triggers:
             if m.is_bot or m.author_id in marks:
                 continue
             since = st.digest_seen.get(m.author_id, 0)
-            pool = list(self.interactions.get((st.guild_id, m.author_id), ()))
+            pool = [item for g in here for item in self.interactions.get((g, m.author_id), ())]
             if cross:
-                pool += self._elsewhere(st.guild_id, m.author_id, allowed)
-                pool.sort(key=lambda item: item.seq)
+                before = set(allowed)
+                pool += self._elsewhere(here, m.author_id, allowed)
+                crossed |= set(allowed) - before
+            pool.sort(key=lambda item: item.seq)
             fresh = [
                 item
                 for item in pool
@@ -3742,6 +3976,7 @@ class Engine:
                 and item.seq > since
                 and now - item.at <= ttl
                 and not (allowed[item.channel_id].dm and (_secret(item.lines) or self._dm_sensitive(m.author_id, item.lines[:1])))
+                and not (item.channel_id in crossed and _secret(item.lines))
             ]
             if not fresh:
                 continue
@@ -3753,7 +3988,7 @@ class Engine:
                     where = "私信里"
                     said = item.lines[:1]  # 只带他自己的话：它在私信里的回话可能用到了私信记忆、别的服务器的事
                 elif place.guild_id != st.guild_id:
-                    server = neutralize(one_line(self.transport.channel_info(item.channel_id).guild_name, 40))
+                    server = neutralize(one_line(self.transport.channel_info(item.channel_id).guild_name, SERVER_NAME_CHARS))
                     where = f"「{server}」服务器的 {self._display(place)} "
                 else:
                     where = f" {self._display(place)} "
@@ -3770,19 +4005,21 @@ class Engine:
         secrets = [e.text for e in self.memory.dm_entries(user_id) if e.sensitive]
         return bool(secrets) and any(reveals(line, secrets) for line in lines)
 
-    def _elsewhere(self, guild_id: int, author_id: int, allowed: dict[int, ChannelPlace]) -> list[Interaction]:
-        """这个人最近在别的服务器跟它的对话：那个服务器开了“跨服务器”，而且是公开频道里的（私密频道、私信不带），
-        说了要保密的不带。带得上的频道顺便记进 allowed。"""
+    def _elsewhere(self, here: list[int], author_id: int, allowed: dict[int, ChannelPlace]) -> list[Interaction]:
+        """这个人最近在别的服务器跟它的对话（here：这里在最前面，后面是连成一组的服务器）：那个服务器开了“跨服务器”，
+        而且是公开频道里的（私密频道、私信不带），说了要保密的不带。带得上的频道顺便记进 allowed。
+        组里别的服务器的对话本来就在要带的里面（没开记忆共享的频道也照样跨服务器带），这里只记进 allowed、不再返回。"""
         out: list[Interaction] = []
         for (guild, person), log_ in self.interactions.items():
-            if person != author_id or guild == guild_id or not self.settings.view(guild).cross_server:
+            if person != author_id or guild == here[0] or not self.settings.view(guild).cross_server:
                 continue
             for item in log_:
                 place = self.transport.locate(item.channel_id)
                 if place is None or place.dm or not place.public or place.guild_id != guild or _secret(item.lines):
                     continue
                 allowed[item.channel_id] = place
-                out.append(item)
+                if guild not in here:
+                    out.append(item)
         return out
 
     def _remember_interactions(
@@ -4214,7 +4451,10 @@ class Engine:
                     recent.setdefault(form, set()).add(uid)
             cards: dict[str, set[int]] = {}
             if self.cards is not None:
-                for uid, name in self.cards.owners(st.guild_id):
+                scope = self._card_scope(st.guild_id)
+                # 卡里有别的服务器的人时只认在这个服务器出现过的人、按他在这里的名字（别的服务器的同名的人不在这里，@ 不到）
+                owners = self.cards.owners(scope) if scope == st.guild_id else self.cards.owners_seen(scope, st.guild_id)
+                for uid, name in owners:
                     for form in name_forms(name):
                         cards.setdefault(form, set()).add(uid)
             cache["tiers"] = [recent, cards]
@@ -4248,7 +4488,7 @@ class Engine:
         """把一段话里的 @名字、#频道名 换成真的。返回 (换好的话, 要提醒的人)。只有有人叫它的时候才提醒：
         这一轮最多 MAX_PINGS_PER_ROUND 个人，同一个人 PING_COOLDOWN 之内只提醒一次，每个服务器 10 分钟内最多
         GUILD_PINGS 次；其他的只显示成 @，不发通知。"""
-        linked, users, _ = link(chunk, people, channels)
+        linked, users, _ = link(chunk, people, channels, here=self._guild_name(st.guild_id))
         if len(linked) > DISCORD_LIMIT:
             return chunk, []  # 换完太长了：原样发
         if kind != "mention" or not users:
@@ -4445,6 +4685,22 @@ class Engine:
             else:
                 del self.interactions[key]
 
+    def groups_changed(self, guilds: Iterable[int], *, left: bool) -> None:
+        """服务器组变了（guilds：组里原来的、加进来的、退出的服务器）。人设卡、长期记忆、翻记录、近况每次都按现在的组算，
+        不用另外处理；退出了（组散了）的话，频道里附过的私信记忆里现在不能带的撤回：附的时候是按原来的组算的（私信挂在
+        组里别的服务器），现在不一定还能带。还能带的不动（免得整个组的频道记录都改一遍、缓存全失效）。"""
+        if not left:
+            return
+        for guild_id in dict.fromkeys(guilds):
+            view = self.settings.view(guild_id)
+            here = self._group_guilds(guild_id)
+
+            def keep(channel_id: int, user_id: int, view: View = view, here: list[int] = here) -> bool:
+                home = self.store.dm_home(user_id)
+                return self._dm_memory_on(view) and ((home is not None and home[0] in here) or bool(view.cross_server))
+
+            self.withdraw_dm_memory(guild_id=guild_id, keep=keep)
+
     def move_dm(self, channel_id: int, guild_id: int) -> None:
         """私信改挂到别的服务器：清掉私信的记录（里面是原来那个服务器的人设卡、记忆），之后用新服务器的。"""
         user = self.transport.channel_info(channel_id).dm_user
@@ -4492,8 +4748,10 @@ class Engine:
             "media_blocked_for": max(0.0, st.media_blocked_until - now) if st else 0.0,
             "cards_on": self._cards_on(view),
             "memory_on": self._memory_on(view),
-            "card_count": self.cards.count(guild_id) if self.cards is not None else 0,
-            "memory_count": self.memory.count(guild_id) if self.memory is not None else 0,
+            "card_count": self.cards.count(self._card_scope(guild_id)) if self.cards is not None else 0,
+            "cards_shared": self._cards_shared(),  # 所有服务器共用一张人设卡（上面是一共几张）
+            "memory_count": self.memory.count(self._scope(guild_id)) if self.memory is not None else 0,
+            "group": self._group_guilds(guild_id)[1:],  # 连成一组的别的服务器（不在组里是空的）
             "memory_max": self.ec.memory_max_entries,
             "review_here": self.implicit_ok(channel_id, "cards") or self.implicit_ok(channel_id, "long_memory"),
             "last_review_ago": (now - st.last_review_at) if st and st.last_review_at else None,

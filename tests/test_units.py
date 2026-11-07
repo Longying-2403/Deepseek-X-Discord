@@ -204,7 +204,18 @@ class ConfigAndSettings(unittest.TestCase):
         with self.assertRaises(SystemExit):
             load_secrets({"DISCORD_TOKEN": "x"})
         s = load_secrets({"DISCORD_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "OWNER_ID": " 42 ", "CONTROL_GUILD_ID": ""})
-        self.assertEqual((s.owner_id, s.control_guild_id), (42, None))
+        self.assertEqual((s.owner_id, s.control_guild_ids), (42, ()))
+        # CONTROL_GUILD_ID 可以填几个服务器：逗号（中英文）、顿号、分号、空格都能隔开，重复的只算一次
+        s = load_secrets({"DISCORD_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "OWNER_ID": "42", "CONTROL_GUILD_ID": " 111,222，333、 444;111 "})
+        self.assertEqual(s.control_guild_ids, (111, 222, 333, 444))
+        self.assertEqual(load_secrets({"DISCORD_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "OWNER_ID": "42", "CONTROL_GUILD_ID": "555"}).control_guild_ids, (555,))
+        # 全角数字也认；0 当没填（以前就是这样）
+        for raw, want in (("１２３，４５６", (123, 456)), ("0", ()), ("0, 111", (111,))):
+            s = load_secrets({"DISCORD_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "OWNER_ID": "42", "CONTROL_GUILD_ID": raw})
+            self.assertEqual(s.control_guild_ids, want)
+        for bad in ("111,abc", "-5", "111.5"):
+            with self.assertRaises(SystemExit):
+                load_secrets({"DISCORD_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "OWNER_ID": "42", "CONTROL_GUILD_ID": bad})
 
 
 class StoreTest(unittest.TestCase):

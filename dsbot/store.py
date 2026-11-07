@@ -94,6 +94,20 @@ CREATE TABLE IF NOT EXISTS dm_homes (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dm_homes_channel ON dm_homes (channel_id);
+CREATE TABLE IF NOT EXISTS server_groups (
+    guild_id INTEGER PRIMARY KEY,  -- 连成一组的服务器（bot 主人用 /dsowner 服务器组 连的）
+    group_id INTEGER NOT NULL,     -- 哪个组：负数，组里共用的人设卡、长期记忆按它存（和服务器 ID 撞不上）
+    joined_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS server_group_seq (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    next_no INTEGER NOT NULL       -- 下一个新组的编号（组的 ID 是它的负数；散掉的组的编号不再用）
+);
+CREATE TABLE IF NOT EXISTS server_group_leaving (
+    guild_id INTEGER PRIMARY KEY,  -- 正在退出组的服务器：已经不算组里的了，还没拿到组里那份的副本（中途断了，下次接着做完）
+    group_id INTEGER NOT NULL,
+    at REAL NOT NULL
+);
 """
 
 MSGMAP_KEEP = 3000  # 每个频道保留最近多少个消息编号的映射
@@ -162,6 +176,12 @@ class Store:
         # 上次运行到一半就停了（断电、强制关闭）的调用：不会再有结果了
         self.db.execute("UPDATE usage SET outcome = 'error' WHERE outcome = 'pending'")
         self.db.commit()
+        # 服务器 -> 组（每一轮都要查好几次：放在内存里，按加入的先后排）
+        self._groups: dict[int, int] = {
+            r["guild_id"]: r["group_id"]
+            for r in self.db.execute("SELECT guild_id, group_id FROM server_groups ORDER BY joined_at, guild_id")
+        }
+        self._epochs: dict[int, int] = {}  # 服务器 -> 它的服务器组变过几次（问模型期间变过没有：连了又退回来，归属一样、编号却变了）
 
     def _migrate(self) -> None:
         """旧版本建的表少几列：补上（新建的表直接按 SCHEMA 建，已经有这些列）。"""
@@ -530,6 +550,98 @@ class Store:
                 "channel_id = COALESCE(excluded.channel_id, dm_homes.channel_id), updated_at = excluded.updated_at",
                 (user_id, guild_id, channel_id, time.time()),
             )
+
+    # ---------------------------------------------------------------- 服务器组
+
+    def memory_scope(self, guild_id: int) -> int:
+        """人设卡、长期记忆按哪个 ID 存：连成一组的服务器用组的 ID（负数，组里共用一份），不然就是服务器自己。"""
+        return self._groups.get(guild_id, guild_id)
+
+    def group_of(self, guild_id: int) -> int | None:
+        return self._groups.get(guild_id)
+
+    def group_members(self, group_id: int) -> list[int]:
+        """组里的服务器，按加入的先后。"""
+        return [g for g, grp in self._groups.items() if grp == group_id]
+
+    def groups(self) -> dict[int, list[int]]:
+        """组 -> 组里的服务器（按加入的先后）；组按建的先后（编号从 1 往上）。"""
+        out: dict[int, list[int]] = {}
+        for guild_id, group_id in self._groups.items():
+            out.setdefault(group_id, []).append(guild_id)
+        return dict(sorted(out.items(), key=lambda item: -item[0]))
+
+    def new_group_id(self, lowest: int = 0) -> int:
+        """新组的 ID（-1、-2……用过的不再用：中途断掉留下的数据不会被新组认走）。
+        lowest：卡、记忆文件里用过的最小的组 ID。这个文件被单独还原、删掉以后编号会从头算，要比它小才不会撞上旧组的数据。"""
+        with self.db:
+            row = self.db.execute("SELECT next_no FROM server_group_seq WHERE id = 1").fetchone()
+            no = max(row["next_no"] if row is not None else 1, 1 - min(0, lowest))
+            self.db.execute(
+                "INSERT INTO server_group_seq (id, next_no) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET next_no = excluded.next_no",
+                (no + 1,),
+            )
+        return -no
+
+    def join_group(self, guild_id: int, group_id: int, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        with self.db:
+            # 加入的先后要分得出来（同一次连起来的两个服务器时间一样）：重启以后顺序不变
+            last = self.db.execute("SELECT MAX(joined_at) AS t FROM server_groups WHERE guild_id != ?", (guild_id,)).fetchone()["t"]
+            at = max(now, last + 0.001) if last is not None else now
+            self.db.execute(
+                "INSERT INTO server_groups (guild_id, group_id, joined_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (guild_id) DO UPDATE SET group_id = excluded.group_id, joined_at = excluded.joined_at",
+                (guild_id, group_id, at),
+            )
+            self.db.execute("DELETE FROM server_group_leaving WHERE guild_id = ?", (guild_id,))
+        self._groups.pop(guild_id, None)
+        self._groups[guild_id] = group_id  # 排在最后（加入的先后）
+        self._bump([guild_id])  # 只有它的记在哪、编号变了：组里原来的服务器编号不变（并进来的接在后面）
+
+    def start_leaving(self, guild_id: int, now: float | None = None) -> None:
+        """退出组的第一步：记下“正在退出”。复制完之前还算组里的（照常用组里那份；期间记下的也会复制过去），
+        复制完了才换成自己那份（unmap）。"""
+        group = self._groups.get(guild_id)
+        if group is None:
+            return
+        with self.db:
+            last = self.db.execute("SELECT MAX(at) AS t FROM server_group_leaving").fetchone()["t"]
+            now = time.time() if now is None else now
+            at = max(now, last + 0.001) if last is not None else now
+            self.db.execute(
+                "INSERT INTO server_group_leaving (guild_id, group_id, at) VALUES (?, ?, ?) "
+                "ON CONFLICT (guild_id) DO UPDATE SET group_id = excluded.group_id, at = excluded.at",
+                (guild_id, group, at),
+            )
+
+    def unmap(self, guild_id: int) -> None:
+        """退出的服务器拿到了副本：从这一刻起不算组里的了（人设卡、长期记忆按自己的存）。“正在退出”的记录留着，收完尾才删。"""
+        group = self._groups.get(guild_id)
+        if group is None:
+            return
+        with self.db:
+            self.db.execute("DELETE FROM server_groups WHERE guild_id = ?", (guild_id,))
+        self._groups.pop(guild_id, None)
+        self._bump([guild_id])  # 只有它换成了自己那份：组里剩下的照常用组里那份（退出的拿的是副本，组里的不动）
+
+    def _bump(self, guilds: list[int]) -> None:
+        for guild_id in dict.fromkeys(guilds):
+            self._epochs[guild_id] = self._epochs.get(guild_id, 0) + 1
+
+    def group_epoch(self, guild_id: int) -> int:
+        """这个服务器自己连组、退组过几次（问模型前后对不上：它看到的长期记忆不是现在这份，编号可能对不上）。
+        别的服务器连进、退出它的组不算：组里那份的编号不变（并进来的接在后面，退出的拿走的是副本）。"""
+        return self._epochs.get(guild_id, 0)
+
+    def leaving(self) -> list[tuple[int, int]]:
+        """还没做完的退出 [(服务器, 组)]，按开始的先后。"""
+        rows = self.db.execute("SELECT guild_id, group_id FROM server_group_leaving ORDER BY at, guild_id")
+        return [(r["guild_id"], r["group_id"]) for r in rows]
+
+    def done_leaving(self, guild_id: int) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM server_group_leaving WHERE guild_id = ?", (guild_id,))
 
     def spend_by_guild(self, day: str) -> dict[int, float]:
         rows = self.db.execute("SELECT guild_id, SUM(cost) AS c FROM usage WHERE day = ? GROUP BY guild_id", (day,))
