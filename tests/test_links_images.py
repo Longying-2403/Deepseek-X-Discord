@@ -1358,6 +1358,7 @@ class EngineImages(unittest.IsolatedAsyncioTestCase):
         pictures = FakePictures()
         engine, llm, transport, clock = make_engine(lambda call: ACTIONS(IMAGE()), pictures=pictures, defaults={"proactive": True})
         engine.states.clear()
+        engine.convs.clear()  # 记录的状态也在内存里（连通的频道共用一份），一起清掉
         st = engine.state(CHANNEL, GUILD)
         st.last_image_at = clock() - 60  # 一分钟前刚找过
         await engine.handle_message(msg(501, "哈哈哈"))

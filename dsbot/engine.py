@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
 import json
 import logging
 import random
@@ -20,7 +22,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncContextManager, Awaitable, Callable, Iterable, Protocol, Sequence
 
-from .actions import dump_actions, parse_actions
+from .actions import dump_actions, mentions_kinds, parse_actions
 from .config import AppConfig
 from .files import classify, max_bytes_for, read_file
 from .images import MAX_RAW_BYTES, filename_for, to_data_uri, upload_ready
@@ -54,6 +56,8 @@ from .prompts import (
     DESKTOP_URL_NOT_HIS,
     DM_LIMIT_TEXT,
     EDIT_NOTE,
+    EDIT_NOTE_LOST,
+    PASSIVE_REJECTED,
     EDITED_MARK,
     IMAGE_BLOCKED,
     IMAGE_BUDGET,
@@ -63,7 +67,9 @@ from .prompts import (
     IMAGE_NONE,
     IMAGE_OFF,
     MUSIC_IDLE,
+    MUSIC_IDLE_AT,
     MUSIC_NOW,
+    MUSIC_NOW_AT,
     MUSIC_OFF,
     MUSIC_RESULT,
     MUSIC_UNANSWERED,
@@ -79,10 +85,17 @@ from .prompts import (
     PERSONA_TOO_LONG,
     PERSONA_UNCHANGED,
     PERSONA_UNDONE,
+    RECALL_AMBIGUOUS,
+    RECALL_MISS,
+    RECALL_NO_SHARE,
+    RECALL_SYNC_OFF,
+    SUMMARY_SYNC_NOTE,
     SUMMARY_SYSTEM,
+    SYNC_BOT_NAME,
     TOOL_FAILED,
     WHO_NONE,
     WHO_OFF,
+    WHO_SYNC_OFF,
     build_review_prompt,
     build_system_prompt,
     clean_persona,
@@ -104,6 +117,9 @@ from .render import (
     neutralize,
     neutralize_record,
     own_text,
+    drop_local,
+    drop_recents,
+    label_music,
     public_lines,
     drop_dm_memory,
     has_dm_memory,
@@ -165,6 +181,7 @@ MAX_REVIEW_CARDS = 3  # 一次整理最多改几张人设卡（每张都要整�
 MAX_REVIEW_MEMORY_OPS = 10
 MAX_REVIEW_FAILURES = 3  # 同一批聊天连着整理失败几次就放弃
 DELETED_KEEP = 1000  # 每个频道记住最近多少条被删掉的消息
+SYNC_GUARD_TRIES = 5  # 连通、断开、清空等锁的时候频道又连通、断开了（用的记录变了）：最多照现在的重新等几次
 PEOPLE_KEEP = 300  # 每个频道记住最近多少个说过话、被 @ 过的人（它 @ 人时按名字找）
 MAX_PINGS_PER_ROUND = 3  # 它一次回话（一轮，可能分几条发）最多真的提醒几个人
 PING_COOLDOWN = 300.0  # 同一个人这么久之内最多被它提醒一次（之后的 @ 只显示，不发通知）
@@ -360,6 +377,19 @@ class _ReviewChunk:
     sids: list[int]  # 这一段里群友消息的编号（只从群友的消息里取）
     last_turn: int  # 这一段最后一条记录的 id（整理完就记到这里）
     start: float  # 这一段最早一条记录的时间（判断人设卡是不是在那之后被删过）
+    # 连通的几个频道共用的记录：这一段是哪个频道的，照那个频道的设置整理、记进那个服务器（或组）的那份。
+    # 没连通的记录不填（照整批的 _ReviewPlan）
+    origin: int | None = None
+    cards_ok: bool | None = None
+    memory_ok: bool | None = None
+    dm_ok: bool | None = None
+    info: ChannelInfo | None = None
+    turn_ids: list[int] = field(default_factory=list)  # 这一段的记录（连通组的记录：整理完记进 review_done）
+    # 连通组的记录压缩前挑出来的那批：编号是谁说的先记下（排着队的时候组散了，库里的编号映射就跟着删掉了）
+    authors: dict[int, tuple[int, str]] | None = None
+    reviewed: bool = False  # 这一段整理完了（或者放弃了）：断开、清空、散组时不再交给别的那份
+    part_of: _ReviewChunk | None = None  # 压缩前挑出来的：它是安静时整理正在问的那一段里要压掉的那几条（那一段问完了就不用再整理）
+    dropped: bool = False  # 排着队的时候这一段的频道清空了记忆：不整理（正在问的这一段问完也不照着改）
 
 
 @dataclass
@@ -369,6 +399,7 @@ class _ReviewPlan:
     memory_ok: bool
     last_id: int
     dm_ok: bool = False  # 私信：顺便整理他的私信记忆
+    partial: bool = False  # 连通组的记录：有的服务器今天的预算用完了，它那部分这次没整理（整理完别把进度记到最后）
 
 
 @dataclass
@@ -379,6 +410,7 @@ class _ReviewJob:
     info: ChannelInfo
     plan: _ReviewPlan
     generation: int
+    frozen: bool = False  # 连通的频道连通时挑出来的它自己原来那份（不会压掉）：没整理成的不记成整理过，以后再整理
 
 
 _SAME_NAME_SUFFIX = re.compile(r"\s*[（(]\s*同名的第\s*(\d+)\s*位\s*[)）]\s*$")
@@ -536,6 +568,78 @@ def _newest(entries: Sequence[Any], max_chars: int, max_count: int) -> list[Any]
     return sorted(picked, key=lambda e: e.no)
 
 
+PASSIVE_REPLY = dump_actions([])  # 连通的频道：别的频道补进记录的那几条后面，记成它没说话（没问模型）
+# 补进来的“（#12 阿明 改了这条消息，现在是：……）”：编号和名字（那一段被拒了换掉时，只留一句“改过”）
+_EDIT_NOTE_HEAD = re.compile(
+    "^" + re.escape(EDIT_NOTE.split("{text}")[0]).replace(re.escape("{sid}"), r"(\d+)").replace(re.escape("{name}"), "(.+?)")
+)
+SYNC_PAST_CHARS = 3000  # 连通的频道：连通之前自己的记录，给它看最近多少字（只给这个频道看）
+MAX_SYNC_REVIEW_CHUNKS = 8  # 连通组的记录：安静时一次最多整理几段（几个频道分开整理，段数多一些）
+PAUSED_WARN_EVERY = 3600.0  # 连通的频道变成私密的了：多久提醒一次（日志）
+
+
+class _Shared:
+    """ChannelState 上的这几样其实存在它的 ConvState 里：连通的几个频道共用一份（没连通的频道一个频道一份，和以前一样）。"""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
+        return self if obj is None else getattr(obj.conv, self.name)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        setattr(obj.conv, self.name, value)
+
+
+@dataclass
+class ConvState:
+    """一份聊天记录，和跟着它走的状态：消息编号、读过的文件、删掉改过的消息、附过的人设卡、整理记忆的进度……
+    没连通的频道一个频道一份（key 就是频道）；连通的几个频道共用一份（key 是连通组的 ID，负数）。
+    连通的频道自己原来那份（连通之前的记录）也有一份：连通期间不往里写，只同步删除、编辑，给它自己的频道看个大概。"""
+
+    key: int
+    guild_id: int  # 新建记录时记在哪个服务器下（连通组是 0）
+    generation: int  # 每次清空、换了记录都换一个新的（全局不重复），跑到一半的轮次据此放弃写入
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # 改这份记录（跑一轮、同步删改、挑要整理的）要拿着
+    conversation: Conversation | None = None
+    sid_by_msg: dict[int, int] = field(default_factory=dict)
+    msg_by_sid: dict[int, int] = field(default_factory=dict)
+    sid_origin: dict[int, int] = field(default_factory=dict)  # 连通组：编号 -> 那条消息在哪个频道（只能回、只能加表情给这里的）
+    recent_files: dict[int, FileEntry] = field(default_factory=dict)  # message_id -> 带文件的消息
+    recent_links: dict[int, LinkEntry] = field(default_factory=dict)  # message_id -> 带链接的消息
+    digest_seen: dict[int, int] = field(default_factory=dict)  # 人 -> 已经带进这份记录的、他在别处最近一次对话的序号
+    cards_shown: dict[int, tuple[Any, ...]] = field(default_factory=dict)  # 人 -> (附上他的卡的那条记录, 卡的版本[, 卡记在哪])
+    # 人 -> (附上他私信记忆的那条记录, 附上的内容)：内容变了、或者那条记录被压缩掉了，再附一次
+    dm_memory_shown: dict[int, tuple[int, str]] = field(default_factory=dict)  # 也记在库里（撤回时要找到那条记录）
+    unreviewed_rounds: int = 0  # 上次整理记忆之后又聊了几轮
+    reviewing: bool = False
+    last_review_at: float = 0.0
+    review_failures: int = 0  # 连着整理失败了几次（越失败等得越久）
+    review_bad: int = 0  # 其中模型输出不能用的次数（连着几次就放弃这批聊天）
+    review_jobs: list[_ReviewJob] = field(default_factory=list)  # 整理的时候又压缩了：压掉的原话排在这里，按先后接着整理
+    review_held: int = 0  # 安静时整理的那批正在问的那一段到哪条记录（压缩时只挑这之后的；压缩挑走了后面的，它问完这段就停）
+    deleted: dict[int, None] = field(default_factory=dict)  # 最近被删掉的消息（有序：太多了从最早的忘）
+    fixes: dict[int, IncomingMessage | None] = field(default_factory=dict)  # 要改写进记录的：消息 -> 改过的样子（None = 删了）
+    fixing: bool = False
+    edit_notes: dict[int, tuple[int, IncomingMessage]] = field(default_factory=dict)  # 很早的消息被编辑：消息 -> (编号, 改过的样子)
+    review_done: set[int] = field(default_factory=set)  # 连通组：这批里已经整理过的记录（几个频道分开整理，有的先整理完了）
+    review_asking: _ReviewChunk | None = None  # 安静时整理正在问的那一段（压缩时：连通组连同它一起挑出来；频道自己那份见 _park_asking）
+    review_parked: list[_ReviewJob] = field(default_factory=list)  # 频道自己那份：正在问的那一段里压掉了的那几条（只在断开时交给新的那份）
+    review_cut: bool = False  # 连通组安静时整理的时候压缩了（压掉的挑出来排着队了）：问完手上这一段就停
+    review_current: _ReviewJob | None = None  # 正在整理的那批压缩前挑出来的（清空、散组时没整理完的交给新的那份接着整理）
+    scrub_due: bool = False  # 正在跑的那一轮跑着的时候组变成跨服务器了：这一轮写完、放开锁之前再查一遍（scrub_cross）
+    scrub_lookups: bool = False  # 那时查出了只该原来那边看的：这一轮按原来的组要翻记录、查人设卡的动作，写完再查时也拿掉
+    scrub_whole: bool = False  # 那时是组里原来有的服务器退出了服务器组（组里的频道还在一个组里）：写完再整份查一遍
+    review_bad_by: dict[int | None, int] = field(default_factory=dict)  # 连通组：每个频道那部分模型输出连着不能用的次数
+    # 连通的频道自己那份：暂停（变成私密的、被关掉了）时改过的、只在组里那份的消息（组里当成删了）。断开拿回来以后照这个改
+    hidden_edits: dict[int, IncomingMessage] = field(default_factory=dict)
+    hides: set[int] = field(default_factory=set)  # 排着的删除里，是“当成删了”的那几条（之后公开时又改了的照改，不是真删）
+    # 没问模型就记进来的那几轮（别的连通频道补进来的、连通时记进它自己那份的）：带着它们的请求过了才算数，被拒了换成一句
+    unvetted: list[int] = field(default_factory=list)
+    # 连通组的记录里直接改成了新内容（没问过模型）的那几条消息：带着它们的请求过了才算数，被拒了就当成删了
+    unvetted_edits: set[int] = field(default_factory=set)
+
+
 @dataclass
 class Interaction:
     """某个人在某个频道跟它的一次对话（几行纯文本）。"""
@@ -556,6 +660,10 @@ class ChannelState:
     category_id: int | None = None
     pending: list[IncomingMessage] = field(default_factory=list)
     inflight: list[IncomingMessage] = field(default_factory=list)  # 正在处理的这一批
+    # 连通的频道：这一批里在它暂停（变成私密的、被关掉了）时被改了的（还没编号的就不写进记录，见 _hide_unprocessed）
+    withdrawn: set[int] = field(default_factory=set)
+    # 连通的频道：这一轮的“连通之前的概要”带全了它自己那份里连通时记进去、还没问过模型的那几轮（请求过了它们才算数）
+    past_vetted: bool = False
     omitted: int = 0
     first_human_at: float | None = None  # 缓冲区里第一条真人消息到达的时间
     last_activity_at: float = 0.0  # 最近一次有人说话或打字
@@ -565,45 +673,48 @@ class ChannelState:
     scheduled: bool = False
     error_until: float = 0.0
     send_failures: int = 0
-    generation: int = 0  # 每次“清空记忆”加一，跑到一半的轮次据此放弃写入
     turns: TurnTracker = field(default_factory=TurnTracker)
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    conversation: Conversation | None = None
-    sid_by_msg: dict[int, int] = field(default_factory=dict)
-    msg_by_sid: dict[int, int] = field(default_factory=dict)
-    recent_files: dict[int, FileEntry] = field(default_factory=dict)  # message_id -> 带文件的消息
-    recent_links: dict[int, LinkEntry] = field(default_factory=dict)  # message_id -> 带链接的消息
     last_image_at: float = 0.0  # 上次上网找图的时间（同一个频道隔一会儿才能再找）
     media_failures: int = 0  # 连着几次图发不出去（多半是缺“附加文件”权限）
     media_blocked_until: float = 0.0  # 发图连着失败：这之前先不发图（文字照常）
     gallery: list[Picture] = field(default_factory=list)  # 这一轮找到的候选图（pick 从这里挑）
-    digest_seen: dict[int, int] = field(default_factory=dict)  # 人 -> 已经带进这个频道的、他在别处最近一次对话的序号
-    listed: tuple[str, ...] | None = None  # 已经写进这个频道记录里的“能翻记录的频道”名单
+    listed: tuple[str, ...] | None = None  # 已经写进这个频道记录里的“能翻记录的频道”名单（连通组的记录里只认它自己写的）
     last_decision: str = ""
-    cards_shown: dict[int, tuple[int, float]] = field(default_factory=dict)  # 人 -> (附上他的卡的那条记录, 卡的版本)
-    # 人 -> (附上他私信记忆的那条记录, 附上的内容)：内容变了、或者那条记录被压缩掉了，再附一次
-    dm_memory_shown: dict[int, tuple[int, str]] = field(default_factory=dict)  # 也记在库里（撤回时要找到那条记录）
     quiet_dm: bool = False  # 私信这一轮刚记了敏感的事：这一轮的对话不当近况带到频道里
     # 这一轮给它看的长期记忆是哪一份（_memory_key：记在哪、服务器组变过几次）：中途连组、退组了就别照着编号改
     memory_key: tuple[int, int] | None = None
     memory_shown: frozenset[int] = frozenset()  # 这一轮给它看过的长期记忆编号（没看过的编号不照着改、删）
-    unreviewed_rounds: int = 0  # 上次整理记忆之后又聊了几轮
-    reviewing: bool = False
-    last_review_at: float = 0.0
-    review_failures: int = 0  # 连着整理失败了几次（越失败等得越久）
-    review_bad: int = 0  # 其中模型输出不能用的次数（连着几次就放弃这批聊天）
-    review_jobs: list[_ReviewJob] = field(default_factory=list)  # 整理的时候又压缩了：压掉的原话排在这里，按先后接着整理
-    review_held: int = 0  # 安静时整理的那批正在问的那一段到哪条记录（压缩时只挑这之后的；压缩挑走了后面的，它问完这段就停）
-    deleted: dict[int, None] = field(default_factory=dict)  # 最近被删掉的消息（有序：太多了从最早的忘）
-    fixes: dict[int, IncomingMessage | None] = field(default_factory=dict)  # 要改写进记录的：消息 -> 改过的样子（None = 删了）
-    fixing: bool = False
     people: dict[int, str] = field(default_factory=dict)  # 最近说过话、被 @ 过的人 -> 名字（有序：最近的在后）
-    edit_notes: dict[int, tuple[int, IncomingMessage]] = field(default_factory=dict)  # 很早的消息被编辑：消息 -> (编号, 改过的样子)
     music_seen: str | None = None  # 上次告诉它“语音频道里正在放什么”的那一行（变了才再写；没在放是 None）
     private: bool = False  # 私信（guild_id 是它挂在的那个服务器）
     last_typing_at: float = 0.0  # 最近一次有人在打字
     dm_waiting: bool = False  # 私信：正在等对方说完
     dm_notice_day: str = ""  # 私信：哪天已经说过“今天聊太多了”
+    conv: ConvState = None  # type: ignore[assignment]  # 它现在用的那份记录（Engine.state 建的时候填上）
+    conv_seen: Conversation | None = None  # 照哪次载入的记录算过上面这几样（名单、最近说话的人、正在放什么）
+
+    # 下面这些存在 conv 里（连通的几个频道共用）：写法照旧是 st.xxx
+    lock = _Shared()
+    conversation = _Shared()
+    generation = _Shared()
+    sid_by_msg = _Shared()
+    msg_by_sid = _Shared()
+    recent_files = _Shared()
+    recent_links = _Shared()
+    digest_seen = _Shared()
+    cards_shown = _Shared()
+    dm_memory_shown = _Shared()
+    unreviewed_rounds = _Shared()
+    reviewing = _Shared()
+    last_review_at = _Shared()
+    review_failures = _Shared()
+    review_bad = _Shared()
+    review_jobs = _Shared()
+    review_held = _Shared()
+    deleted = _Shared()
+    fixes = _Shared()
+    fixing = _Shared()
+    edit_notes = _Shared()
 
 
 class Engine:
@@ -656,6 +767,11 @@ class Engine:
         self.tz = cfg.bot.timezone
         self.pricing = cfg.pricing
         self.states: dict[int, ChannelState] = {}
+        self.convs: dict[int, ConvState] = {}  # 记录 -> 它的状态（没连通的频道按频道，连通组按组的 ID）
+        # 散掉的连通组留下的、还有压缩前挑出来的那几批在整理的状态（不在 convs 里）：清空记忆时也要找得到
+        self._orphans: list[ConvState] = []
+        self._generations = itertools.count(1)  # ConvState.generation 从这里取：换了记录也不会和旧的那份撞上
+        self._paused_warned: dict[int, float] = {}  # 连通的频道变成私密的了：上次提醒的时间
         self.limiter = SlidingWindow()
         self.paused_until = 0.0  # 余额不足 / key 错误时全局暂停
         self._last_housekeep = 0.0
@@ -684,6 +800,8 @@ class Engine:
             view = self.settings.view(guild_id, channel_id, parent_id, category_id)
             st = ChannelState(channel_id, guild_id, parent_id, QuotaBucket(view.quota_capacity), category_id)
             st.private = private
+            key = self.store.conversation_key(channel_id)
+            st.conv = self._conv_state(key, guild_id if key == channel_id else 0)
             self.states[channel_id] = st
             return st
         st.private = st.private or private
@@ -707,10 +825,29 @@ class Engine:
         )
 
     def _allowed(self, msg: IncomingMessage) -> bool:
-        """这条消息它看不看：频道看“允许回应”；私信看它挂的那个服务器开没开私信。"""
+        """这条消息它看不看：频道看“允许回应”；私信看它挂的那个服务器开没开私信。连通的频道变成私密的了也不看
+        （连通暂停：这里的话会进几个服务器共用的记录）。"""
         if msg.private:
             return bool(self.settings.get("dm", guild_id=msg.guild_id))
-        return self.enabled(msg.guild_id, msg.channel_id, msg.parent_id, msg.category_id)
+        if not self.enabled(msg.guild_id, msg.channel_id, msg.parent_id, msg.category_id):
+            return False
+        if self.store.sync_of(msg.channel_id) is not None:
+            if not self._sync_public(msg.channel_id):
+                self._note_paused(msg.channel_id)
+                return False
+            self._paused_warned.pop(msg.channel_id, None)  # 又公开了：以后再变成私密的，再提醒
+        return True
+
+    def _sync_public(self, channel_id: int) -> bool:
+        """连通的频道现在还是公开的文字频道（变成私密的、成人内容频道，或者找不到了：连通暂停）。"""
+        place = self.transport.locate(channel_id)
+        return place is not None and place.public and not place.dm and place.parent_id is None
+
+    def _note_paused(self, channel_id: int) -> None:
+        now = self.clock()
+        if now - self._paused_warned.get(channel_id, float("-inf")) >= PAUSED_WARN_EVERY:
+            self._paused_warned[channel_id] = now
+            log.warning("连通：频道 %s 现在不是公开频道了，连通暂停（它不看这里的消息）：bot 主人断开连通，或者改回公开", channel_id)
 
     @staticmethod
     def _live(st: ChannelState, view: View) -> bool:
@@ -842,6 +979,27 @@ class Engine:
         elif m.links:
             st.recent_links[m.message_id] = LinkEntry(m)
 
+    @staticmethod
+    def _refresh_held(cs: ConvState, m: IncomingMessage) -> None:
+        """消息改了：这份记录带着的它的文件、链接换成新的样子（附件、链接都删掉了的就拿掉；没带着的不另外加）。"""
+        fentry = cs.recent_files.get(m.message_id)
+        if fentry is not None:
+            if m.files:
+                fentry.message = m
+            else:
+                del cs.recent_files[m.message_id]
+        lentry = cs.recent_links.get(m.message_id)
+        if lentry is not None:
+            if m.links:
+                lentry.message = m
+            else:
+                del cs.recent_links[m.message_id]
+
+    def _other_convs(self, st: ChannelState, message_ids: Iterable[int]) -> list[ConvState]:
+        """有这几条消息的别的记录（已经在内存里的）：连通的频道断开以后组里那份、连通之前它自己那份。没连通过就是空的。"""
+        keys = sorted(self.store.message_keys(message_ids))
+        return [cs for key in keys if key != st.conv.key and (cs := self.convs.get(key)) is not None]
+
     def handle_edit(self, updated: IncomingMessage, *, edited: bool) -> None:
         """消息有更新。edited：是本人改了内容（不只是 Discord 补上了链接预览）。
 
@@ -853,7 +1011,22 @@ class Engine:
         if updated.is_bot:
             # 别的 bot 常常一直在改自己的消息（播放进度、投票、倒计时……）：还没处理的照样更新，记录不跟着改，
             # 不然每改一次后面的缓存就全失效
+            if (
+                st is not None
+                and self._synced(st)
+                and self.find_message(updated.channel_id, updated.message_id) is not None
+                and self._edit_hidden(st, updated)
+            ):
+                return  # 连通的频道暂停着（变成私密的、被关掉了）：改过的样子它不看，缓冲区里的照旧是改之前的
             self.refresh_message(updated)
+            return
+        if (
+            st is not None
+            and self._synced(st)
+            and self.find_message(updated.channel_id, updated.message_id) is not None
+            and self._edit_hidden(st, updated)
+        ):
+            self._hide_unprocessed(st, updated, edited=edited)
             return
         if self.refresh_message(updated):
             if edited and st is not None and any(m.message_id == updated.message_id for m in st.inflight):
@@ -864,12 +1037,45 @@ class Engine:
         st = self._state_with_history(updated.guild_id, updated.channel_id, [updated.message_id])
         if st is None:
             return
-        fentry = st.recent_files.get(updated.message_id)
-        lentry = st.recent_links.get(updated.message_id)
-        if fentry is not None or lentry is not None:
+        mid = updated.message_id
+        hidden = self._edit_hidden(st, updated)
+        if hidden and st.conv.key < 0:
+            # 连通的频道变成私密的、被关掉了：改过的这条（连同带着的文件、链接）不带进共用的记录，当成删了
+            st.recent_files.pop(mid, None)
+            st.recent_links.pop(mid, None)
+            st.edit_notes.pop(mid, None)
+        elif st.recent_files.get(mid) is not None or st.recent_links.get(mid) is not None:
             self._refresh_entries(st, updated)
+        for cs in self._other_convs(st, [mid]):
+            if hidden and cs.key < 0:
+                cs.recent_files.pop(mid, None)  # 连通组的记录（断开以后还留着它说过的话的也算）：一样当成删了
+                cs.recent_links.pop(mid, None)
+                cs.edit_notes.pop(mid, None)
+            else:
+                self._refresh_held(cs, updated)  # 别的记录里带着的文件、链接也换成新的样子
         self._edit_interactions(st.guild_id, updated)
-        self._queue_fix(st, updated.message_id, updated)
+        self._queue_fix(st, mid, updated)
+
+    def _hide_unprocessed(self, st: ChannelState, updated: IncomingMessage, *, edited: bool) -> None:
+        """连通的频道变成私密的、被关掉了，还没处理完的一条又有了更新：改过的样子它不看（几个服务器共用的记录里不带）。
+        本人改过的：还在缓冲区里的拿掉（当成删了）；正在处理的那一批照旧写进记录（模型看到的是改之前的），写完以后组里那份
+        当成删了。它带着的文件、链接在共用的那份里也拿掉。只是 Discord 补上了预览的，什么都不改。"""
+        if not edited:
+            return
+        mid = updated.message_id
+        st.recent_files.pop(mid, None)
+        st.recent_links.pop(mid, None)
+        st.edit_notes.pop(mid, None)
+        if any(m.message_id == mid for m in st.inflight):
+            # 正在处理的那一批：写进记录以后组里那份当成删了（它自己那份断开拿回来时照改过的写）；还没编号的（等预览的时候）
+            # 这一轮就不写进去。缓冲区里也拿掉：这一轮没跑成，也不会留着以后再看、被别的频道补进记录
+            self._queue_fix(st, mid, updated)
+            st.withdrawn.add(mid)
+        kept = [m for m in st.pending if m.message_id != mid]
+        if len(kept) != len(st.pending):
+            st.pending = kept
+            st.first_human_at = next((m.received_at for m in st.pending if not m.is_bot), None)
+            st.mention_due = st.mention_due and any(m.trigger for m in st.pending)
 
     def handle_delete(self, guild_id: int, channel_id: int, message_ids: Iterable[int]) -> None:
         """消息被删了（包括管理员一次删很多条）：缓冲区里的拿掉；正在处理的，结果回来后不回复它；
@@ -877,6 +1083,13 @@ class Engine:
         ids = set(message_ids)
         if not ids:
             return
+        for orphan in self._orphans:
+            # 散掉的组留下的、还在整理的那几批：散掉以后才删的也要认得出（不拿删掉的消息写人设卡；清空时接手的那份用的是同一个）。
+            # 只记那份记录里有的消息：别处一次删很多条，会把它记着的挤掉
+            for mid in ids & set(orphan.msg_by_sid.values()):
+                orphan.deleted[mid] = None
+            while len(orphan.deleted) > DELETED_KEEP:
+                del orphan.deleted[next(iter(orphan.deleted))]
         st = self._state_with_history(guild_id, channel_id, ids)
         if st is None:
             return
@@ -893,6 +1106,15 @@ class Engine:
             st.recent_files.pop(mid, None)
             st.recent_links.pop(mid, None)
             st.edit_notes.pop(mid, None)
+        for cs in self._other_convs(st, ids):
+            # 这几条也在别的记录里（断开以后组里那份、连通之前它自己那份）：那边带着的文件、链接也打不开了
+            for mid in ids:
+                cs.recent_files.pop(mid, None)
+                cs.recent_links.pop(mid, None)
+                cs.edit_notes.pop(mid, None)
+                cs.deleted[mid] = None
+            while len(cs.deleted) > DELETED_KEEP:
+                del cs.deleted[next(iter(cs.deleted))]
         self._forget_interactions(st.guild_id, ids)
         for mid in ids:
             self._queue_fix(st, mid, None)
@@ -902,7 +1124,8 @@ class Engine:
         st = self.states.get(channel_id)
         if st is not None:
             return st
-        if not self.store.message_rows(channel_id, message_ids):
+        # 连通的频道：连通之后的在共用的记录里，连通之前的在它自己原来那份里；断开以后，连通期间的两份都有
+        if not self.store.message_keys(message_ids):
             return None
         place = self.transport.locate(channel_id)
         return self.state(
@@ -914,49 +1137,97 @@ class Engine:
         )
 
     def _queue_fix(self, st: ChannelState, message_id: int, updated: IncomingMessage | None) -> None:
-        if st.fixes.get(message_id, 0) is None and updated is not None:
+        """删除、编辑要改进记录：这个频道现在用的那份，加上有这条消息的每一份（连通的频道连通之前的在它自己原来那份里；
+        断开以后，连通期间说的还留在那个组的记录里，那边也要跟着改）。"""
+        held = self.store.message_keys([message_id])
+        keys = {st.conv.key} | held
+        if st.conv.key != st.channel_id and not st.private:
+            keys.add(st.channel_id)  # 正在处理的这一批：还没记进去，写进记录后再改
+        # 连通组的记录：这个频道现在它不看了（变成私密的、被关掉了），改的新内容不写进去，那一行当成删了（它自己那份照常改）
+        hidden = updated is not None and any(key < 0 for key in keys) and self._edit_hidden(st, updated)
+        if st.conv.key < 0:
+            own = self.convs.get(st.channel_id)
+            if updated is not None and hidden and st.channel_id not in held:
+                # 连通期间说的（只在组里那份）：断开拿回来以后，它自己那份照改过的写（只有它自己看）
+                own = own or self._conv_state(st.channel_id, st.guild_id)
+                own.hidden_edits[message_id] = updated
+            elif own is not None:
+                own.hidden_edits.pop(message_id, None)  # 后来删了、公开的时候又改了：照那一次
+        for key in sorted(keys):
+            cs = self.convs.get(key) or self._conv_state(key, st.guild_id if key > 0 else 0)
+            self._queue_fix_on(cs, message_id, None if hidden and key < 0 else updated, hide=hidden and key < 0)
+
+    def _edit_hidden(self, st: ChannelState, m: IncomingMessage) -> bool:
+        """这条消息改过的新内容不能写进连通组的记录（几个频道、几个服务器共用）：那个频道现在它不看了——变成私密的（连通暂停）、
+        被关掉了；以前连通过、组里还留着它说过的话的频道也一样。不在连通组的记录里的（没连通过的频道都是这样）不算。"""
+        if st.conv.key > 0 and all(key > 0 for key in self.store.message_keys([m.message_id])):
+            return False
+        return not (self.enabled(m.guild_id, m.channel_id, m.parent_id, m.category_id) and self._sync_public(m.channel_id))
+
+    def _queue_fix_on(self, cs: ConvState, message_id: int, updated: IncomingMessage | None, *, hide: bool = False) -> None:
+        """hide：这是“当成删了”（连通的频道暂停时改的，见 _edit_hidden），不是真删：之后公开时又改了，照改过的写。"""
+        if cs.fixes.get(message_id, 0) is None and updated is not None and message_id not in cs.hides:
             return  # 已经删了：之后的编辑不算
-        st.fixes[message_id] = updated
-        if st.fixing:
+        if hide:
+            cs.hides.add(message_id)
+        else:
+            cs.hides.discard(message_id)
+        cs.fixes[message_id] = updated
+        if cs.fixing:
             return
-        st.fixing = True
-        task = asyncio.get_running_loop().create_task(self._fix_task(st))
+        cs.fixing = True
+        task = asyncio.get_running_loop().create_task(self._fix_task(cs))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _fix_task(self, st: ChannelState) -> None:
-        """把删除、编辑改写进记录。要等这个频道正在跑的那一轮写完记录（拿到锁）再改。"""
+    async def _fix_task(self, cs: ConvState) -> None:
+        """把删除、编辑改写进记录。要等用这份记录的频道正在跑的那一轮写完记录（拿到锁）再改。"""
         try:
-            while st.fixes:
-                async with st.lock:
-                    self._flush_fixes(st, self._conversation(st))
+            while cs.fixes:
+                async with cs.lock:
+                    if self.convs.get(cs.key) is not cs:
+                        cs.fixes.clear()  # 等锁的时候这份记录换成了新的：要改的已经交给新的那份（或者那份记录已经没了）
+                        break
+                    owner = self.states.get(cs.key)
+                    conv = self._conversation(owner) if owner is not None and owner.conv is cs else self._load(cs)
+                    self._flush_fixes(cs, conv)
         finally:
-            st.fixing = False
-        if st.mention_due and st.pending:
-            self._wake(st)  # 改记录的时候有人叫它：轮到它了
+            cs.fixing = False
+        for st in self._members(cs):
+            if st.mention_due and st.pending:
+                self._wake(st)  # 改记录的时候有人叫它：轮到它了
 
-    def _flush_fixes(self, st: ChannelState, conv: Conversation) -> None:
-        """把还没改写进记录的删除、编辑先改掉（调用方拿着锁）。开始新的一轮、压缩、整理记忆之前都先做一次，
-        免得模型、摘要、整理记忆看到刚删掉的内容。"""
-        if not st.fixes:
+    def _flush_fixes(self, owner: Any, conv: Conversation) -> None:
+        """把还没改写进记录的删除、编辑先改掉（调用方拿着锁；owner 是频道的状态或者那份记录）。开始新的一轮、压缩、
+        整理记忆之前都先做一次，免得模型、摘要、整理记忆看到刚删掉的内容。"""
+        cs = self._cs(owner)
+        if not cs.fixes:
             return
-        fixes, st.fixes = st.fixes, {}
+        fixes, cs.fixes = cs.fixes, {}
+        cs.hides.difference_update(fixes)
         try:
-            self._apply_fixes(st, conv, fixes)
+            self._apply_fixes(cs, conv, fixes)
         except Exception:
-            log.exception("频道 %s：同步删除、编辑出错", st.channel_id)
+            log.exception("频道 %s：同步删除、编辑出错", cs.key)
 
-    def _apply_fixes(self, st: ChannelState, conv: Conversation, fixes: dict[int, IncomingMessage | None]) -> None:
-        rows = self.store.message_rows(st.channel_id, fixes.keys())
+    def _apply_fixes(self, cs: ConvState, conv: Conversation, fixes: dict[int, IncomingMessage | None]) -> None:
+        rows = self.store.message_rows(cs.key, fixes.keys())
         changed: dict[int, Turn] = {}
-        recent_from = len(conv.turns) - RECENT_EDIT_TURNS
+        unvetted = False
+        # 连通的频道自己原来那份：连通期间不往后写，前缀缓存不用顾，改了就直接改（不留到下一轮附一句）
+        recent_from = 0 if self._frozen(cs) else len(conv.turns) - RECENT_EDIT_TURNS
+        gone: set[int] = set()  # 连通组的记录里已经断开的频道的消息：那边不会再有一轮附上“改成了什么”，也直接改
+        if cs.key < 0:
+            members = set(self.store.sync_members(cs.key))
+            found = [sid for hits in rows.values() for sid, _ in hits]
+            gone = {sid for sid, origin in self.store.msg_origins(cs.key, found).items() if origin not in members}
         for mid, updated in fixes.items():
             for sid, name in rows.get(mid, []):
                 if updated is None:
                     lines: list[str] | None = None
                     drop_images = drop_docs = True
                 else:
-                    block = render_line(updated, sid, st.sid_by_msg, self.ec.max_chars_per_message).split("\n")
+                    block = render_line(updated, sid, cs.sid_by_msg, self.ec.max_chars_per_message).split("\n")
                     where = next(
                         ((i, old) for i, t in enumerate(conv.turns) if t.role == "user" and (old := message_block(t.content, sid)) is not None),
                         None,
@@ -965,10 +1236,18 @@ class Engine:
                         continue  # 已经压进摘要了
                     index, old = where
                     if old[:-1] + [old[-1].removesuffix(EDITED_MARK)] == block:
+                        if cs.key < 0 or index >= recent_from:
+                            # 改回了记录里的样子，还没附上的“改成了什么”作废：连通组的记录里（别让别的服务器知道她收回的话），
+                            # 还有那一行是最近的时候（断开时跟着频道回来的那句、清空记忆删掉了后面的：只有连通才会这样）。
+                            # 频道自己那份里很早的一行照 2.7.1
+                            cs.edit_notes.pop(mid, None)
                         continue  # 内容其实没变（比如只是补上了预览）
-                    if index < recent_from:
-                        st.edit_notes[mid] = (sid, updated)  # 很早的消息：下一轮附一句改成了什么，旧记录不动
+                    if index < recent_from and sid not in gone:
+                        cs.edit_notes[mid] = (sid, updated)  # 很早的消息：下一轮附一句改成了什么，旧记录不动
                         continue
+                    # 这一行直接改成了最新的样子：还没附上的“改成了什么”作废（以前很早的时候记下的——那一行后来成了最近的：断开时
+                    # 跟着频道回到它自己那份、清空记忆删掉了后面的——不然照旧的说，被拒了改好也没用，再连通时又改回旧的）
+                    cs.edit_notes.pop(mid, None)
                     lines = block[:-1] + [block[-1] + EDITED_MARK]
                     drop_images = not updated.images  # 图都删掉了：给它看过的图也拿掉（删了一部分的分不出是哪张，留着）
                     drop_docs = not updated.files and not updated.links
@@ -985,13 +1264,18 @@ class Engine:
                     if did:
                         turn.content = content
                         changed[turn.id] = turn
+                        if updated is not None and cs.key < 0:
+                            cs.unvetted_edits.add(mid)  # 连通组的记录：改成的内容还没问过模型
+                            unvetted = True
+        if unvetted:
+            self._keep_unvetted(cs)  # 先记下再改进去：停在中间的话，宁可被拒时多当成删了一条
         for turn in changed.values():
             self.store.update_turn(turn.id, turn.content)
         if changed:
             deleted = sum(1 for u in fixes.values() if u is None)
             log.info(
                 "频道 %s：同步了 %d 条删除、%d 条编辑，改写了 %d 条记录",
-                st.channel_id,
+                cs.key,
                 deleted,
                 len(fixes) - deleted,
                 len(changed),
@@ -1028,12 +1312,20 @@ class Engine:
             st.first_human_at = next((m.received_at for m in st.pending if not m.is_bot), None)
         for mid in [mid for mid, e in st.recent_files.items() if e.message.received_at < cutoff]:
             del st.recent_files[mid]
-        while len(st.recent_files) > RECENT_FILES_KEEP:
-            del st.recent_files[next(iter(st.recent_files))]
+        self._cap_entries(st, st.recent_files, RECENT_FILES_KEEP)
         for mid in [mid for mid, e in st.recent_links.items() if e.message.received_at < cutoff]:
             del st.recent_links[mid]
-        while len(st.recent_links) > RECENT_LINKS_KEEP:
-            del st.recent_links[next(iter(st.recent_links))]
+        self._cap_entries(st, st.recent_links, RECENT_LINKS_KEEP)
+
+    def _cap_entries(self, st: ChannelState, entries: dict[int, Any], keep: int) -> None:
+        """带文件（链接）的消息只留最近 keep 条。连通组共用的那份里每个频道各留各的：别的频道刷屏挤不掉这个频道刚发的。"""
+        if not self._synced(st):
+            while len(entries) > keep:
+                del entries[next(iter(entries))]
+            return
+        mine = [mid for mid, entry in entries.items() if entry.message.channel_id == st.channel_id]
+        for mid in mine[: max(0, len(mine) - keep)]:
+            del entries[mid]
 
     # ------------------------------------------------------------------ 调度
 
@@ -1080,10 +1372,15 @@ class Engine:
             # 这个人在别处已经没有可带的对话了，记录“带到哪了”也没用了；以后新的对话序号更大，照样会带
             for person in [p for p in st.digest_seen if p not in talked]:
                 del st.digest_seen[person]
-        for st in self.states.values():
-            idle = now - max(st.last_activity_at, st.last_eval_at)
-            if st.conversation is not None and not st.lock.locked() and not st.scheduled and idle > IDLE_EVICT:
-                st.conversation = None
+        for cs in self.convs.values():
+            members = self._members(cs)
+            if cs.conversation is None or cs.lock.locked() or any(m.scheduled for m in members):
+                continue
+            if members:
+                if min(now - max(m.last_activity_at, m.last_eval_at) for m in members) > IDLE_EVICT:
+                    cs.conversation = None
+            elif not cs.fixing and not cs.reviewing:
+                cs.conversation = None  # 没人用的（连通的频道自己原来那份）：放掉，要用时再读
 
     def _kick(self, st: ChannelState) -> None:
         if self.closing:
@@ -1188,61 +1485,290 @@ class Engine:
         return quiet or waited
 
     async def _run(self, st: ChannelState) -> None:
-        async with st.lock:
-            st.scheduled = False
-            st.mention_due = False
-            self._prune(st, self.clock())
-            if not self._live(st, self.view(st)):
-                st.pending.clear()  # 刚被管理员关掉的区域：攒着的消息也不处理了
-                st.first_human_at = None
-            if st.pending and (any(m.trigger for m in st.pending) or self._proactive_ready(st, self.clock())):
-                batch = list(st.pending)
-                st.inflight = batch
-                try:
-                    await self._round(st, batch)
-                except Exception:
-                    log.exception("频道 %s 处理一轮时出错", st.channel_id)
-                    # 不能让同一批消息每次 tick 都再花一次钱：先冷却，点名也不再自动重试
-                    now = self.clock()
-                    st.last_eval_at = now
-                    st.error_until = now + ERROR_BACKOFF
-                    for m in batch:
-                        m.trigger = False
-                finally:
-                    st.inflight = []
-                    st.gallery = []  # 找到的候选图只在这一轮里能挑
+        while True:
+            cs = st.conv
+            async with cs.lock:
+                if st.conv is not cs:
+                    continue  # 等锁的时候这个频道换了记录（连通、断开、清空）：去拿现在那份的锁
+                st.scheduled = False
+                st.mention_due = False
+                self._prune(st, self.clock())
+                if not self._live(st, self.view(st)) or (self._synced(st) and not self._sync_public(st.channel_id)):
+                    st.pending.clear()  # 刚被管理员关掉的区域（或者连通的频道变成私密的了）：攒着的消息也不处理了
+                    st.first_human_at = None
+                if st.pending and (any(m.trigger for m in st.pending) or self._proactive_ready(st, self.clock())):
+                    batch = list(st.pending)
+                    st.inflight = batch
+                    try:
+                        await self._round(st, batch)
+                    except Exception:
+                        log.exception("频道 %s 处理一轮时出错", st.channel_id)
+                        # 不能让同一批消息每次 tick 都再花一次钱：先冷却，点名也不再自动重试
+                        now = self.clock()
+                        st.last_eval_at = now
+                        st.error_until = now + ERROR_BACKOFF
+                        for m in batch:
+                            m.trigger = False
+                    finally:
+                        st.inflight = []
+                        st.withdrawn.clear()
+                        st.gallery = []  # 找到的候选图只在这一轮里能挑
+                        if cs.scrub_due:
+                            self._scrub_now(cs)
+            break
         if st.mention_due and st.pending:
             self._wake(st)
+        if self._synced(st):
+            for other in self._members(st.conv):
+                if other is not st and other.mention_due and other.pending:
+                    self._wake(other)  # 这一轮跑的时候连通的别的频道有人叫它：轮到那边了（等的是同一把锁）
 
     # ------------------------------------------------------------------ 一轮
 
     def _conversation(self, st: ChannelState) -> Conversation:
-        if st.conversation is None:
-            st.conversation = self.store.load_conversation(st.channel_id, st.guild_id)
-            st.listed = last_listed(st.conversation.turns)
-            for sid, mid in self.store.load_msgmap(st.channel_id).items():
-                st.msg_by_sid.setdefault(sid, mid)
-                st.sid_by_msg.setdefault(mid, sid)
-            older = [(uid, name) for uid, name in reversed(self.store.recent_authors(st.channel_id, PEOPLE_KEEP)) if uid not in st.people]
+        conv = self._load(st.conv)
+        if st.conv_seen is not conv:
+            st.conv_seen = conv
+            mine = self._mine(st, conv.turns)
+            st.listed = last_listed(mine)
+            origin = st.channel_id if self._synced(st) else None
+            older = [
+                (uid, name)
+                for uid, name in reversed(self.store.recent_authors(st.conv.key, PEOPLE_KEEP, origin))
+                if uid not in st.people
+            ]
             st.people = {**dict(older), **st.people}  # 记录里的在前，刚收到的（更新的名字）在后
             # 记录里最后写的“正在放什么”（重启之后已经不在放了：下次被叫到时要告诉它）
-            st.music_seen = last_music_line(st.conversation.turns)
-        return st.conversation
+            st.music_seen = last_music_line(mine)
+        return conv
+
+    # ------------------------------------------------------------------ 记录（连通的频道共用一份）
+
+    def _conv_state(self, key: int, guild_id: int = 0) -> ConvState:
+        cs = self.convs.get(key)
+        if cs is None:
+            cs = ConvState(key, guild_id, next(self._generations))
+            # 没问过模型就记进去的那几条（重启以前记下的）：照样等带着它们的请求过了才算数，被拒了照样换掉
+            cs.unvetted, cs.unvetted_edits = self.store.load_unvetted(key)
+            self.convs[key] = cs
+        return cs
+
+    def _load(self, cs: ConvState) -> Conversation:
+        """这份记录（没载入过、或者闲久了放掉了的，从数据库读）。"""
+        if cs.conversation is None:
+            cs.conversation = self.store.load_conversation(cs.key, cs.guild_id)
+            for sid, mid in self.store.load_msgmap(cs.key).items():
+                cs.msg_by_sid.setdefault(sid, mid)
+                cs.sid_by_msg.setdefault(mid, sid)
+            if cs.key < 0:
+                for sid, origin in self.store.load_msg_origins(cs.key).items():
+                    cs.sid_origin.setdefault(sid, origin)
+            if cs.key < 0 or cs.conversation.sparse:
+                # 连通组的记录几个频道分开整理；断开时拿回来的有的在组里整理过：已经整理过的那几条（重启以后也不再整理）
+                cs.review_done |= self.store.reviewed_turns(cs.key, cs.conversation.reviewed_upto)
+        return cs.conversation
+
+    @staticmethod
+    def _cs(owner: Any) -> ConvState:
+        """频道的状态 → 它现在用的那份记录；本来就是 ConvState 的原样返回。"""
+        return owner.conv if isinstance(owner, ChannelState) else owner
+
+    @staticmethod
+    def _synced(st: ChannelState) -> bool:
+        """这个频道现在用的是连通组共用的记录。"""
+        return st.conv.key < 0
+
+    def _origin(self, st: ChannelState) -> int | None:
+        """这一轮写进记录时记成哪个频道的：连通组的记录记上频道，没连通的不记（和以前一样）。"""
+        return st.channel_id if self._synced(st) else None
+
+    def _here(self, st: ChannelState, sid: int) -> bool:
+        """#sid 是不是这个频道里的消息（连通组的记录里有别的频道的：那些不能挂成回复、不能加表情）。"""
+        return not self._synced(st) or st.conv.sid_origin.get(sid, st.channel_id) == st.channel_id
+
+    def _mine(self, st: ChannelState, turns: Sequence[Turn]) -> list[Turn]:
+        """记录里和这个频道在同一个服务器的频道写的那几条（用来认最后写的“语音频道在放什么”、能翻的频道名单：这两样是按服务器的，
+        连通组里同一个服务器的几个频道看到的是同一个，谁写的最新那句都算；断开了的频道写的也算）。没连通就是全部。"""
+        if not self._synced(st):
+            return list(turns)
+        origins = {t.origin for t in turns if t.origin is not None}
+        here = {o for o in origins if o == st.channel_id or st.guild_id in self._place_former(o)}
+        return [t for t in turns if t.origin in here]
+
+    def _members(self, cs: ConvState) -> list[ChannelState]:
+        """现在用着这份记录的频道（连通组可能有好几个；连通的频道自己原来那份没人用）。"""
+        if cs.key >= 0:
+            st = self.states.get(cs.key)
+            return [st] if st is not None and st.conv is cs else []
+        return [st for st in self.states.values() if st.conv is cs]
+
+    def _channel_state(self, channel_id: int) -> ChannelState | None:
+        """这个频道的状态；还没有的照它现在在哪建一个（找不到这个频道了是 None）。"""
+        st = self.states.get(channel_id)
+        if st is not None:
+            return st
+        place = self.transport.locate(channel_id)
+        if place is None:
+            return None
+        return self.state(channel_id, place.guild_id, place.parent_id, place.category_id, place.dm)
+
+    def _frozen(self, cs: ConvState) -> bool:
+        """连通的频道自己原来那份记录（连通期间不往里写，只同步删改）。"""
+        return cs.key > 0 and self.store.sync_of(cs.key) is not None
 
     def _number(self, st: ChannelState, conv: Conversation, shown: list[IncomingMessage]) -> list[tuple[int, IncomingMessage]]:
         numbered = []
+        synced = self._synced(st)
         for m in shown:
             sid = conv.next_short_id
             conv.next_short_id += 1
             st.sid_by_msg[m.message_id] = sid
             st.msg_by_sid[sid] = m.message_id
+            if synced:
+                st.conv.sid_origin[sid] = st.channel_id
             numbered.append((sid, m))
         if len(st.msg_by_sid) > SID_MAP_LIMIT:
             for sid in sorted(st.msg_by_sid)[: len(st.msg_by_sid) - SID_MAP_LIMIT + 500]:
                 mid = st.msg_by_sid.pop(sid)
+                st.conv.sid_origin.pop(sid, None)
                 if st.sid_by_msg.get(mid) == sid:
                     del st.sid_by_msg[mid]
         return numbered
+
+    def _absorb_others(self, st: ChannelState, conv: Conversation, now: float) -> None:
+        """连通的频道被叫到时（调用方拿着这份记录的锁）：别的连通频道里还没进记录的消息（那边叫它的那条之前的）先补进
+        共用的记录，这一轮就看得到那边刚才在聊什么。不问模型、不花钱，也不在那边回话；那边叫它的消息留给那边自己的一轮。"""
+        for cid in self.store.sync_members(st.conv.key):
+            other = self.states.get(cid)
+            if other is None or other is st or other.conv is not st.conv:
+                continue
+            # 那个频道里很早的消息被改了、还没附上的那几句：它自己那一轮附（记成它的），那边一直没有自己的一轮的话就跟着补进来
+            notes = {mid: v for mid, v in st.edit_notes.items() if v[1].channel_id == cid}
+            if not other.pending and not notes:
+                continue
+            self._prune(other, now)
+            if not self._live(other, self.view(other)) or not self._sync_public(cid):
+                continue
+            cut = next((i for i, m in enumerate(other.pending) if m.trigger), len(other.pending))
+            head = other.pending[:cut]
+            if not head and not notes:
+                continue
+            take = [m for m in head if m.message_id not in st.deleted]
+            if take or notes:
+                shown = take[-max(1, self.ec.max_batch_messages) :]
+                numbered = self._number(other, conv, shown) if shown else []
+                content = render_round(
+                    numbered,
+                    sid_by_msg=st.sid_by_msg,
+                    kind="passive",
+                    targets=[],
+                    now=now,
+                    tz=self.tz,
+                    omitted=other.omitted + len(take) - len(shown) if head else 0,
+                    max_chars=self.ec.max_chars_per_message,
+                    context=[
+                        EDIT_NOTE.format(sid=sid, name=neutralize(one_line(m.author_name or "某人")), text=neutralize(one_line(m.text, 300)))
+                        for sid, m in notes.values()
+                    ],
+                    where=self._sync_label(cid),
+                )
+                assigned = [(sid, m.message_id, None if m.is_bot else m.author_id, m.author_name) for sid, m in numbered]
+                self.store.append_round(conv, content, PASSIVE_REPLY, assigned, now=now, origin=cid)
+                st.conv.unvetted.append(conv.turns[-2].id)  # 没问过模型：这一轮的请求过了才算数
+                self._keep_unvetted(st.conv)
+                for mid in notes:
+                    if st.edit_notes.get(mid) is notes[mid]:
+                        del st.edit_notes[mid]  # 已经附上了
+                st.unreviewed_rounds += 1
+                log.info("频道 %s：先把连通的频道 %s 刚才的 %d 条消息补进了记录", st.channel_id, cid, len(shown))
+            if head:
+                self._take_pending(other, head)  # 那边的冷却、发不出消息的暂停照旧（不算那边跑了一轮）
+
+    @staticmethod
+    def _take_pending(st: ChannelState, head: list[IncomingMessage]) -> None:
+        """从缓冲区拿走这几条（已经记进记录了）。和 _consume 不同：不算这个频道跑了一轮，冷却、暂停都不动。"""
+        gone = {id(m) for m in head}
+        st.pending = [m for m in st.pending if id(m) not in gone]
+        st.omitted = 0
+        st.first_human_at = next((m.received_at for m in st.pending if not m.is_bot), None)
+
+    def _sync_label(self, channel_id: int) -> str:
+        """连通的频道给模型看的名字：「服务器」#频道（频道找不到了、变成私密的了，用连的时候记下的名字：私密频道现在叫什么，
+        别的频道的人不该知道）。"""
+        place = self.transport.locate(channel_id)
+        saved = self.store.sync_place(channel_id)
+        if place is not None and not place.dm and (saved is None or self._sync_public(channel_id)):
+            # 和能翻的频道名单一样写成“#大厅（「某某」服务器）”：模型照着写，发出去时认得出是别的服务器的（不链到这里同名的频道）
+            return f"{self._display(place)}（「{self._server_label(place.guild_id)}」服务器）"
+        if saved is None:
+            return f"#{channel_id}"
+        return f"#{neutralize(one_line(saved[1], 40))}（「{self._server_label(saved[0])}」服务器）"
+
+    def _sync_foreign(self, st: ChannelState) -> bool:
+        """这个频道和别的服务器（连成一组的不算）的频道连通了：几个服务器共用的记录里，不能放只有这里能看的东西（别的频道的
+        近况、翻到的记录、私信里聊的、这里的人设卡……）。"""
+        if not self._synced(st):
+            return False
+        return self.sync_foreign_at(st.channel_id, st.guild_id)
+
+    def sync_foreign_at(self, channel_id: int, guild_id: int) -> bool:
+        """这个频道（在 guild_id 这个服务器）和别的服务器（连成一组的不算）的频道连通了；没连通是 False。"""
+        return bool(self._sync_guilds(channel_id) - set(self._group_guilds(guild_id)))
+
+    def _sync_guilds(self, channel_id: int) -> set[int]:
+        """和这个频道连通的几个频道在哪些服务器（自己的也在里面；没连通是空的）。"""
+        sync = self.store.sync_of(channel_id)
+        if sync is None:
+            return set()
+        return self._guilds_of(self.store.sync_members(sync))
+
+    def _guilds_of(self, channels: Iterable[int]) -> set[int]:
+        """这几个频道在哪些服务器（找不到了的用连的时候记下的）。"""
+        out: set[int] = set()
+        for cid in channels:
+            place = self.transport.locate(cid)
+            saved = self.store.sync_place(cid) if place is None else None
+            if place is not None:
+                out.add(place.guild_id)
+            elif saved is not None:
+                out.add(saved[0])
+        return out
+
+    def channels_cross(self, channels: Iterable[int]) -> bool:
+        """这几个频道不全在同一个服务器（连成一组的几个服务器算一个）。"""
+        guilds = self._guilds_of(channels)
+        return len(guilds) > 1 and bool(guilds - set(self._group_guilds(min(guilds))))
+
+    def brings_cross_off(self, before: Iterable[int], joined: Iterable[int]) -> bool:
+        """连进来的这几个频道带来了组里原来没有、又没开“跨服务器”的服务器（那边平时看不到服务器组外的近况）。"""
+        new = self._guilds_of(joined) - self._guilds_of(before)
+        return any(not self.settings.view(g).cross_server for g in new)
+
+    def _past_digest(self, st: ChannelState, bot_name: str) -> str | None:
+        """连通的频道连通之前自己的记录（只给它自己的频道看）：更早的摘要，加上最近几行（不带编号：那是原来那份的编号）。"""
+        own = self._conv_state(st.channel_id, st.guild_id)
+        conv = self._load(own)
+        lines = history_lines([(t.role, t.content) for t in conv.turns], bot_name)
+        recent: list[str] = []
+        size = 0
+        for line in reversed(lines):
+            if size + len(line) + 1 > SYNC_PAST_CHARS:
+                break
+            recent.append(line)
+            size += len(line) + 1
+        recent.reverse()
+        st.past_vetted = False
+        if own.unvetted:
+            # 连通时记进去、还没问过模型的那几轮在最后（连通期间它自己那份不往后写）：全在这份概要里，这一轮的请求过了才算数
+            first = min(own.unvetted)
+            tail = history_lines([(t.role, t.content) for t in conv.turns if t.id >= first], bot_name)
+            st.past_vetted = sum(len(line) + 1 for line in tail) <= SYNC_PAST_CHARS
+        parts = []
+        if conv.summary:
+            parts.append("更早的摘要：" + conv.summary.strip())
+        if recent:
+            parts.append("最后聊的：\n" + "\n".join(recent))
+        return "\n".join(parts) or None
 
     def _select(self, batch: list[IncomingMessage]) -> list[IncomingMessage]:
         """最近的 N 条，再加上更早但在叫它的消息（点名不能因为后面消息太多被挤掉）。"""
@@ -1281,10 +1807,12 @@ class Engine:
 
         conv = self._conversation(st)
         self._flush_fixes(st, conv)
-        if any(m.message_id in st.deleted for m in batch):
-            # 准备这一轮的时候（比如等链接预览）被删掉的：不给模型看，也不写进记录
-            batch = [m for m in batch if m.message_id not in st.deleted]
-            triggers = [m for m in triggers if m.message_id not in st.deleted]
+        if kind == "mention" and self._synced(st):
+            self._absorb_others(st, conv, now)  # 连通的别的频道刚才在聊的，先补进记录
+        if any(m.message_id in st.deleted or m.message_id in st.withdrawn for m in batch):
+            # 准备这一轮的时候（比如等链接预览）被删掉的（连通的频道暂停时被改了的也算）：不给模型看，也不写进记录
+            batch = [m for m in batch if m.message_id not in st.deleted and m.message_id not in st.withdrawn]
+            triggers = [m for m in triggers if m.message_id not in st.deleted and m.message_id not in st.withdrawn]
             if not batch or (kind == "mention" and not triggers):
                 return  # 叫它的消息都删了：这一轮不跑，剩下的消息留着以后看
         shown = self._select(batch)
@@ -1308,7 +1836,8 @@ class Engine:
         info = self.transport.channel_info(st.channel_id)
         system = self._system_prompt(st, view, conv, info)
         context, digest_marks, listed = self._shared_context(st, view, triggers, now) if kind == "mention" else ([], {}, None)
-        noted = dict(st.edit_notes)
+        # 连通组的记录：只附这个频道里的消息被改成了什么（别的频道的留给那边，免得记成这个频道的）
+        noted = {mid: v for mid, v in st.edit_notes.items() if not self._synced(st) or v[1].channel_id == st.channel_id}
         context = [
             EDIT_NOTE.format(sid=sid, name=neutralize(one_line(m.author_name or "某人")), text=neutralize(one_line(m.text, 300)))
             for sid, m in noted.values()
@@ -1316,12 +1845,21 @@ class Engine:
         playing = st.music_seen  # 写进记录的那一行（没在放是 None）
         if kind == "mention":
             status = self.music.status(st.guild_id) if self.music is not None and not st.private else None
-            playing = MUSIC_NOW.format(text=neutralize(one_line(status, 300))) if status is not None else None
+            if self._synced(st) and len(self._sync_guilds(st.channel_id)) > 1:
+                # 几个服务器共用的记录（连成一组的服务器也是各放各的）：写明是哪个服务器的语音频道（别的服务器的频道看到了
+                # 也不会当成自己那边的）
+                server = self._server_label(st.guild_id)
+                playing = MUSIC_NOW_AT.format(server=server, text=neutralize(one_line(status, 300))) if status is not None else None
+                idle = MUSIC_IDLE_AT.format(server=server)
+            else:
+                playing = MUSIC_NOW.format(text=neutralize(one_line(status, 300))) if status is not None else None
+                idle = MUSIC_IDLE
             if playing != st.music_seen:  # 换了歌、停了：告诉它一声（只写在这一轮里，system prompt 不变）
-                context.append(playing or MUSIC_IDLE)
+                context.append(playing or idle)
         card_lines, card_marks = self._card_context(st, view, conv, numbered, triggers)
         dm_lines, dm_marks = self._dm_memory_context(st, view, conv, triggers) if kind == "mention" else ([], [])
         context = context + dm_lines
+        where = self._sync_label(st.channel_id) if self._synced(st) else None  # 连通组的记录：每段写明是哪个频道的
 
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
             content = render_round(
@@ -1337,6 +1875,7 @@ class Engine:
                 max_chars=self.ec.max_chars_per_message,
                 context=context,
                 cards=card_lines,
+                where=where,
             )
             return content, self._messages(system, conv, content)
 
@@ -1352,8 +1891,11 @@ class Engine:
         except LLMError as exc:
             if exc.status in BAD_REQUEST:
                 st.digest_seen.update(digest_marks)  # 这批内容被拒了：带过来的那几句也别再带，免得一直被拒
+                if not self._too_big(exc):
+                    self._withdraw_unvetted(st)  # 没问过模型就记进记录的那几条也换掉，免得以后每一轮都被拒
             await self._on_error(st, kind, exc, now, batch, targets, conv, info)
             return
+        self._vetted(st)
 
         # 主动聊天时也能上网找图（发图是群友的日常）；其他要查资料的动作只在被叫到时用。
         # 主动聊天时找不了（冷却中、次数用完）就当它没说要找图，不为它多问一次模型
@@ -1385,7 +1927,8 @@ class Engine:
         # 先把这一轮写进历史（只追加），再消费缓冲区。消息编号连同发消息的人一起记下（整理记忆时要知道是谁说的）
         assigned = [(sid, m.message_id, None if m.is_bot else m.author_id, m.author_name) for sid, m in numbered]
         before = len(conv.turns)  # 这一轮之前的记录（核对写卡时：它这一轮自己写的不算“以前替他写过的”）
-        self.store.append_round(conv, user_content, stored, assigned, now=now)
+        stored = self._clean_reply(st, stored)
+        self.store.append_round(conv, user_content, stored, assigned, now=now, origin=self._origin(st))
         self._consume(st, batch, now)
         self._mark_read(conv, planned)
         self._mark_links(conv, opened)
@@ -1399,6 +1942,13 @@ class Engine:
         st.digest_seen.update(digest_marks)
         if listed is not None:
             st.listed = listed
+        if self._synced(st):
+            for other in self._members(st.conv):
+                if other is not st and other.guild_id == st.guild_id:
+                    # 同一个服务器的别的连通频道：在放什么、能翻的频道名单是同一个，它们下次照这一句比（见 _mine）
+                    other.music_seen = playing
+                    if listed is not None:
+                        other.listed = listed
 
         tools = [a for a in actions if a.kind in TOOL_KINDS]
         if tools:
@@ -1697,7 +2247,14 @@ class Engine:
                 lines = [TOOL_FAILED] if any(a.kind != "music" for a in tools) else []
                 if played:
                     lines += [MUSIC_UNANSWERED, *played]
-                self.store.append_round(conv, "\n".join(lines) or TOOL_FAILED, dump_actions([]), [], now=now)
+                self.store.append_round(
+                    conv, "\n".join(lines) or TOOL_FAILED, dump_actions([]), [], now=now, origin=self._origin(st)
+                )
+                if played and conv.channel_id < 0:
+                    # 连通组的记录：点歌的结果（歌名）没问过模型（这一步没问成、被拒了都一样，被拒的话可能就是它）：带着它的请求
+                    # 过了才算数，被拒了就换掉
+                    st.conv.unvetted.append(conv.turns[-2].id)
+                    self._keep_unvetted(st.conv)
             return None
         extra = ("persona",) if allow_persona else ()
         seen = self._seen_cards(conv, content)  # 记录里已经有第一步那一轮；who 查到的卡在 content 里
@@ -1721,7 +2278,8 @@ class Engine:
         if st.generation != generation:
             self.store.set_outcome(row, "discarded")
             return None
-        self.store.append_round(conv, content, stored, [], now=now)
+        stored = self._clean_reply(st, stored)
+        self.store.append_round(conv, content, stored, [], now=now, origin=self._origin(st))
         self._mark_read(conv, [(item, result) for _, _, item, result in results])
         self._mark_links(conv, opened)
         self._mark_cards(st, conv, who_marks)
@@ -2055,6 +2613,9 @@ class Engine:
             for entry in reversed(list(st.recent_links.values())):
                 m = entry.message
                 if m.author_id == t.author_id and 0 <= t.received_at - m.received_at <= AUTO_READ_WINDOW:
+                    if st.conv.key < 0 and m.message_id not in shown_ids and st.conv.key not in self.store.message_keys([m.message_id]):
+                        # 连通组的记录：不在这一批里、也没记进这份记录的（连通之前的闲聊、暂停着的频道里的、上一轮没跑成的）不读进来
+                        continue
                     candidates.append(entry)
             for entry in candidates:
                 if entry is None or not entry.unread():
@@ -2443,7 +3004,7 @@ class Engine:
                     self._note_seen(st, uid, name)
                 continue
             if card is None:
-                seen = st.cards_shown.get(uid)
+                seen = self._shown_card(st, uid, scope)
                 if seen is not None:
                     if oldest is not None and seen[0] >= oldest:
                         shown.append((name, None))  # 对话里还附着被删掉的那份：告诉它别再用
@@ -2452,12 +3013,21 @@ class Engine:
             if name and card.name != name and self._names_here(st):
                 self.cards.touch_name(scope, uid, name)  # 改了昵称：按新名字也能查到
             self._note_seen(st, uid, name)  # 名字没变就不写库
-            seen = st.cards_shown.get(uid)
+            seen = self._shown_card(st, uid, scope)
             if seen is not None and seen[1] == card.updated_at and oldest is not None and seen[0] >= oldest:
                 continue
             shown.append((name or card.name, card.text))
             marks.append((uid, card.updated_at))
+        if self._sync_foreign(st) and not self._cards_shared():
+            return [], []  # 和别的服务器的频道连通了、卡又是各服务器自己的：附进共用的记录那边就看到了
         return render_cards(shown), marks
+
+    @staticmethod
+    def _shown_card(st: ChannelState, uid: int, scope: int) -> tuple[Any, ...] | None:
+        """记录里附过的这个人的卡（附的是这里这份才算：连通组的记录里，别的服务器附的是那边的卡，不能当成这里的卡附过、删了）。"""
+        seen = st.cards_shown.get(uid)
+        # 没连通的记录照旧：只有这里会附，连组、退组以后附过的那份照样算（和 2.7 一样）
+        return seen if seen is None or len(seen) < 3 or st.conv.key >= 0 or seen[2] == scope else None
 
     def _mark_cards(self, st: ChannelState, conv: Conversation, marks: list[tuple[int, float | None]]) -> None:
         """附上过的人设卡记成“已经在对话里了”（记下是哪条记录；压缩记忆删掉那条、或者卡改了，再附一次）。
@@ -2465,17 +3035,20 @@ class Engine:
         if not marks or not conv.turns:
             return
         turn_id = conv.turns[-2].id if len(conv.turns) >= 2 else conv.turns[-1].id
+        scope = self._card_scope(st.guild_id)
         for uid, version in marks:
             if version is None:
                 st.cards_shown.pop(uid, None)
             else:
-                st.cards_shown[uid] = (turn_id, version)
+                st.cards_shown[uid] = (turn_id, version, scope)  # 卡记在哪：连通组的记录里也有别的服务器附的那张
 
     def _who_section(self, st: ChannelState, view: View, action: Action, marks: list[tuple[int, float]]) -> str:
         """who：按名字查人设卡（聊到不在场的人时）。"""
         name = action.name or ""
         if not self._cards_on(view):
             return WHO_OFF
+        if self._sync_foreign(st):
+            return WHO_SYNC_OFF  # 查到的卡会进几个服务器共用的记录
         assert self.cards is not None
         scope = self._card_scope(st.guild_id)
         if scope != st.guild_id:  # 卡里有别的服务器的人：先找在这里出现过的人，别的服务器同名的人标出来（免得安到这里的人头上）
@@ -2531,7 +3104,7 @@ class Engine:
                     writes += [(a.to, a.text) for a in parse_actions(raw)[0] if a.kind == "card" and a.text and a.to is not None]
         if not writes:
             return set()
-        authors = self.store.load_authors(st.channel_id, [to for to, _ in writes if 0 < to < 2**31])
+        authors = self.store.load_authors(st.conv.key, [to for to, _ in writes if 0 < to < 2**31])
         return {text for to, text in writes if authors.get(to, (None, ""))[0] == author_id}
 
     @staticmethod
@@ -2685,6 +3258,8 @@ class Engine:
             mine, secrets = self._dm_secrets(st, view, mine)
         # 这一轮里有按编号改、删长期记忆的：组刚变过时整轮都不写（新记的那条可能是要替掉某一条的，只记它会留下重复的）
         by_number = any(a.kind == "memory" and a.op in ("edit", "delete") for a in mine)
+        # 和别的服务器的频道连通了、人设卡又是各服务器分开的：写卡的动作一个都不留在记录里（写进去的是整张卡，那边看得到）
+        hidden_cards = self._sync_foreign(st) and not self._cards_shared()
         for action in mine:
             if st.guild_id != guild:
                 # 加 📝 的时候私信换了服务器：剩下的不写（不能写进别的服务器）
@@ -2698,7 +3273,7 @@ class Engine:
                 continue
             if action.kind == "card":
                 mid = self._apply_card(st, view, action, by_sid, now, seen, history)
-                if mid is None and not self._card_is(st, action, by_sid):
+                if mid is None and (hidden_cards or not self._card_is(st, action, by_sid)):
                     refused.append(action)
             elif action.kind == "dm_memory":
                 continue  # 私信记忆下面一起改（一批里先删后加，也要认得出说的是敏感的事）
@@ -2724,6 +3299,15 @@ class Engine:
             return False
         card = self.cards.get(self._card_scope(st.guild_id), m.author_id)
         return (card.text if card is not None else "") == clean_card(action.text or "")
+
+    def _clean_reply(self, st: ChannelState, stored: str) -> str:
+        """和别的服务器的频道连通了：记下的回话里不留改长期记忆的动作（里面写着这个服务器那一条的原文，长期记忆是各服务器自己的），
+        人设卡又是各服务器分开的话，写卡的动作也不留（解析不出来的也算：里面写着整张卡，那边看得到；跨服务器以后的检查也就不会
+        再改这条记录）。别的时候原样。"""
+        if not self._sync_foreign(st):
+            return stored
+        kinds = {"memory"} | (set() if self._cards_shared() else {"card"})
+        return self._without_actions(stored, kinds) or stored
 
     def _drop_from_record(self, st: ChannelState, refused: list[Action]) -> None:
         """没写成的 card 动作从这一轮记下的输出里拿掉：记录里留着的都是真的写成了的（以后核对写卡时，记录里替某人写过的卡
@@ -2757,6 +3341,10 @@ class Engine:
         if not self._cards_on(view):
             log.info("频道 %s：这里没开人设卡，没改", st.channel_id)
             return None
+        if self._sync_foreign(st) and not self._cards_shared():
+            # 和别的服务器的频道连通了、卡又是各服务器自己的：他现在的卡这里不附（附进共用的记录那边就看到了），不照着改
+            log.info("频道 %s：和别的服务器的频道连通了（人设卡各服务器分开），这里不改人设卡", st.channel_id)
+            return None
         assert self.cards is not None
         m = by_sid.get(action.to) if action.to is not None else None
         if m is None or m.is_bot or not m.addressed:
@@ -2779,7 +3367,7 @@ class Engine:
             log.info("频道 %s：%s 的新人设卡照抄了别人的人设卡，没改", st.channel_id, m.author_name)
             return None
         # 它是照着对话里附着的那份改的：那份在这期间被本人改了、删了（/ds-rp、bot 主人删卡、连进了服务器组），就不写
-        seen = st.cards_shown.get(m.author_id)
+        seen = self._shown_card(st, m.author_id, scope)  # 附的是这里这份才算（连通组的记录里可能是别的服务器附的那张）
         expect = seen[1] if seen is not None else None
         current = self.cards.get(scope, m.author_id)
         if (current.updated_at if current is not None else None) != expect:
@@ -3009,21 +3597,20 @@ class Engine:
                 continue
             self.store.update_turn(turn_id, new)
             changed += 1
-            st = self.states.get(channel_id)
-            if st is not None:
-                if st.conversation is not None:
-                    for turn in st.conversation.turns:
+            for cs in self._channel_convs(channel_id):
+                if cs.conversation is not None:
+                    for turn in cs.conversation.turns:
                         if turn.id == turn_id:
                             turn.content = new
                 # 同名的人附在这条记录里的那段也一起拿掉了：都记成没附过，下次叫它时重新附
-                for person in [p for p, (t, _) in st.dm_memory_shown.items() if t == turn_id]:
-                    del st.dm_memory_shown[person]
+                for person in [p for p, (t, _) in cs.dm_memory_shown.items() if t == turn_id]:
+                    del cs.dm_memory_shown[person]
         if rows:
             self.store.forget_dm_memory([(turn_id, uid) for turn_id, _, uid, _ in rows])
         if keep is not None:
             for _, channel_id, uid, _ in rows:
-                if (st := self.states.get(channel_id)) is not None:
-                    st.dm_memory_shown.pop(uid, None)
+                for cs in self._channel_convs(channel_id):
+                    cs.dm_memory_shown.pop(uid, None)
         else:
             for st in self.states.values():
                 if guild_id is not None and st.guild_id != guild_id:
@@ -3035,6 +3622,11 @@ class Engine:
         if changed:
             log.info("撤回了 %d 条记录里附着的私信记忆", changed)
         return changed
+
+    def _channel_convs(self, channel_id: int) -> list[ConvState]:
+        """这个频道的记录（已经在内存里的）：它自己那份，连通了的话还有共用的那份。"""
+        keys = dict.fromkeys([channel_id, self.store.conversation_key(channel_id)])
+        return [cs for key in keys if (cs := self.convs.get(key)) is not None]
 
     def _dm_memory_texts(self, st: ChannelState, view: View, user_id: int) -> list[str] | None:
         """频道里能附上的这个人的私信记忆：不敏感的、最近改过的几条。这里不能带（私信里、没开私信记忆、
@@ -3054,8 +3646,8 @@ class Engine:
         """服务器的频道里被叫到时，附上叫它的人私信记忆里不敏感的那些：私信挂在这个服务器（或者和它连成一组的服务器）的
         一定带，别的服务器要开了“跨服务器”才带。已经附过、内容没变、那条记录也还在的，不再附。
         返回 (要附的几行, [(人, 附的内容或 None, 写的名字)])。"""
-        if st.private or not triggers or not self._dm_memory_on(view):
-            return [], []
+        if st.private or not triggers or not self._dm_memory_on(view) or self._synced(st):
+            return [], []  # 连通的频道：私信记忆不带进几个服务器共用的记录
         oldest = conv.turns[0].id if conv.turns else None
         lines: list[str] = []
         marks: list[tuple[int, str | None, str]] = []
@@ -3132,110 +3724,211 @@ class Engine:
     # ------------------------------------------------------------------ 整理记忆
 
     def _review_due(self, st: ChannelState, now: float) -> bool:
-        """频道安静了一阵、又攒了几轮新聊天：该整理记忆了。连着失败时等得越来越久。"""
+        """频道安静了一阵、又攒了几轮新聊天：该整理记忆了。连着失败时等得越来越久。
+        连通的几个频道共用一份记录：几个频道都安静了才整理。"""
         if self.cards is None and self.memory is None:
             return False
+        members = self._members(st.conv) or [st]
         # 缓冲区里可能一直有没叫它的消息（没开主动发言的频道）：那些等真的聊到它再说，不影响整理已经聊过的
-        if st.reviewing or st.scheduled or st.lock.locked():
+        if st.reviewing or any(m.scheduled for m in members) or st.lock.locked():
             return False
         if st.unreviewed_rounds < max(1, self.ec.review_min_rounds) or now < self.paused_until:
             return False  # 没攒够；或者 DeepSeek 暂停中（余额不足、key 不对）
         wait = self.ec.review_idle_seconds * (2 ** min(st.review_failures, 5))
         if now - st.last_review_at < wait:
             return False  # 上次刚整理过（或者刚失败过）
-        return now - max(st.last_activity_at, st.last_eval_at) >= self.ec.review_idle_seconds
+        return now - max(max(m.last_activity_at, m.last_eval_at) for m in members) >= self.ec.review_idle_seconds
 
-    def _kick_review(self, st: ChannelState) -> None:
+    def _kick_review(self, owner: Any) -> None:
         if self.closing:
             return
-        st.reviewing = True
-        task = asyncio.get_running_loop().create_task(self._review_task(st))
+        cs = self._cs(owner)
+        cs.reviewing = True
+        task = asyncio.get_running_loop().create_task(self._review_task(cs))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _review_task(self, st: ChannelState) -> None:
-        """安静时整理记忆。只在挑要整理的聊天时占着这个频道；问模型的时候不占，有人叫它照样马上回。
+    async def _review_task(self, cs: ConvState) -> None:
+        """安静时整理记忆。只在挑要整理的聊天时占着这份记录；问模型的时候不占，有人叫它照样马上回。
         整理的时候又压缩了旧记录：压掉的那部分排着队，整理完这批接着整理。"""
         try:
             try:
-                async with st.lock:
-                    conv = self._conversation(st)
-                    self._flush_fixes(st, conv)
-                    info = self.transport.channel_info(st.channel_id)
-                    generation = st.generation
-                    plan = self._review_plan(st, conv, info)
+                async with cs.lock:
+                    if self.convs.get(cs.key) is not cs:
+                        return  # 等锁的时候这份记录换成了新的（清空、断开、散组）：新的那份另外整理
+                    owner = self.states.get(cs.key)
+                    conv = self._conversation(owner) if owner is not None and owner.conv is cs else self._load(cs)
+                    self._flush_fixes(cs, conv)
+                    generation = cs.generation
+                    info = self._review_info(cs)
+                    cs.review_cut = False  # 之前压缩时挑走的已经不在记录里了：这批照现在的记录挑
+                    plan = self._review_plan(cs, conv, info)
                 if plan is not None:
-                    await self._run_review(st, conv, info, plan, generation, before_compact=False)
+                    await self._run_review(cs, conv, info, plan, generation, before_compact=False)
             except Exception:
-                log.exception("频道 %s：整理记忆出错", st.channel_id)
-            st.review_held = 0  # 这批完了：没整理成、还在记录里的，压缩时再挑出来
-            await self._review_queued(st)
+                log.exception("频道 %s：整理记忆出错", cs.key)
+            cs.review_held = 0  # 这批完了：没整理成、还在记录里的，压缩时再挑出来
+            cs.review_asking = None
+            cs.review_parked.clear()  # 问的那一段问完了（没问成的话，压掉的那几条跟没连通过时一样不再整理）
+            cs.review_cut = False
+            await self._review_queued(cs)
+            if cs.key < 0 and not self.closing:
+                for cid in self.store.sync_members(cs.key):
+                    self._review_frozen(cid)  # 连的时候没整理成的（暂时出错、预算用完了）：组里整理的时候再试
         finally:
-            self._review_done(st)
+            self._review_done(cs)
 
-    async def _compact_review(self, st: ChannelState) -> None:
+    async def _compact_review(self, owner: Any) -> None:
         """压缩旧记录之前挑出来的那部分聊天：在后台整理（整理的时候又压缩了，压掉的也接着整理）。"""
+        cs = self._cs(owner)
         try:
-            await self._review_queued(st)
+            await self._review_queued(cs)
         finally:
-            self._review_done(st)
+            self._review_done(cs)
 
-    async def _review_queued(self, st: ChannelState) -> None:
+    async def _review_queued(self, owner: Any) -> None:
         """按先后整理排着队的几批（压缩前挑出来的原话）。"""
-        while st.review_jobs and not self.closing:
-            job = st.review_jobs.pop(0)
-            if job.generation != st.generation:
+        cs = self._cs(owner)
+        while cs.review_jobs and not self.closing:
+            job = cs.review_jobs.pop(0)
+            if job.generation != cs.generation:
                 continue  # 排队的时候清空过记忆
+            cs.review_current = job
             try:
-                await self._run_review(st, job.conv, job.info, job.plan, job.generation, before_compact=True)
+                await self._run_review(cs, job.conv, job.info, job.plan, job.generation, before_compact=True, frozen=job.frozen)
             except Exception:
-                log.exception("频道 %s：压缩前整理记忆出错", st.channel_id)
+                log.exception("频道 %s：压缩前整理记忆出错", cs.key)
+            finally:
+                cs.review_current = None
 
-    @staticmethod
-    def _review_done(st: ChannelState) -> None:
+    def _review_done(self, owner: Any) -> None:
         # 和上面最后一次检查队列之间不能有 await：不然这中间压缩时排进来的那批没人整理
-        st.reviewing = False
-        st.review_held = 0
-        st.review_jobs.clear()  # 被取消（关机）时剩下的就不整理了
+        cs = self._cs(owner)
+        cs.reviewing = False
+        cs.review_held = 0
+        cs.review_asking = None
+        cs.review_parked.clear()
+        cs.review_cut = False
+        cs.review_current = None
+        cs.review_jobs.clear()  # 被取消（关机）时剩下的就不整理了
+        if any(o is cs for o in self._orphans):
+            self._orphans = [o for o in self._orphans if o is not cs]  # 散掉的组留下的那几批整理完了
 
-    def _set_reviewed(self, st: ChannelState, conv: Conversation, turn_id: int) -> None:
+    def _set_reviewed(self, owner: Any, conv: Conversation, turn_id: int) -> None:
+        cs = self._cs(owner)
+        if conv.channel_id < 0 and not self.store.sync_members(conv.channel_id):
+            return  # 连通组散了（共用的记录删掉了）：散之前排着队的那批照样整理完，进度不用记
         self.store.set_reviewed(conv, turn_id)
-        if st.conversation is not None and st.conversation is not conv:
-            st.conversation.reviewed_upto = max(st.conversation.reviewed_upto, turn_id)  # 中途重新载入过
+        if cs.review_done:
+            cs.review_done = {t for t in cs.review_done if t > turn_id}
+        if cs.conversation is not None and cs.conversation is not conv:
+            cs.conversation.reviewed_upto = max(cs.conversation.reviewed_upto, turn_id)  # 中途重新载入过
+
+    def _review_info(self, cs: ConvState) -> ChannelInfo:
+        """整理这份记录时给模型看的名字（没连通的就是那个频道的；连通组的每一段另外按那段的频道算）。"""
+        return self.transport.channel_info(cs.key if cs.key > 0 else next(iter(self.store.sync_members(cs.key)), 0))
 
     def _review_plan(
-        self, st: ChannelState, conv: Conversation, info: ChannelInfo, upto: int | None = None, after: int = 0
+        self, owner: Any, conv: Conversation, info: ChannelInfo, upto: int | None = None, after: int = 0, frozen: bool = False
+    ) -> _ReviewPlan | None:
+        """挑出这份记录里还没整理过的聊天（owner：频道的状态或者那份记录；见 _plan_review）。"""
+        cs = self._cs(owner)
+        if cs.key != conv.channel_id:
+            cs = self._conv_state(conv.channel_id)
+        return self._plan_review(cs, conv, upto, after, frozen)
+
+    def _plan_review(
+        self, cs: ConvState, conv: Conversation, upto: int | None = None, after: int = 0, frozen: bool = False
     ) -> _ReviewPlan | None:
         """挑出还没整理过的聊天，分成几段。不用整理（关掉了、私密频道、没人说话）时把进度记到最后，返回 None。
 
+        连通的几个频道共用的记录：按每段是哪个频道的分开，每段照那个频道的设置整理、记进那个服务器（或组）的那份；
+        那个频道找不到了的那段不整理。
+
         upto：只挑到这条记录（压缩旧记录之前：那部分马上要压成摘要，原话就看不到了）。
-        after：这条之前的不挑（正在整理的那一段已经挑走了）。"""
+        after：这条之前的不挑（正在整理的那一段已经挑走了）。
+        frozen：连通的频道连通时挑它自己原来那份（不会压掉）：预算用完了不记成整理过，以后再整理。
+        已经整理过的那几条（review_done：连通组分开整理完的、断开时拿回来在组里整理过的）不再挑。"""
         now = self.clock()
-        view = self.view(st)
         start = max(conv.reviewed_upto, after)
         turns = [t for t in conv.turns if t.id > start and (upto is None or t.id <= upto)]
         if not turns:
             if upto is None:
-                st.unreviewed_rounds = 0
+                cs.unreviewed_rounds = 0
             return None
         last_id = turns[-1].id
-        cards_ok = self._cards_on(view) and self.implicit_ok(st.channel_id, "cards")
-        memory_ok = self._memory_on(view) and self.implicit_ok(st.channel_id, "long_memory")
-        dm_ok = st.private and info.dm_user is not None and self._dm_memory_on(view)
-        live = self._live(st, view)
-        if live and (cards_ok or memory_ok or dm_ok) and self._over_budget(st, view, now)[0]:
-            if upto is not None:
-                self._set_reviewed(st, conv, last_id)  # 这部分马上就压掉了，以后也整理不了
-            st.last_review_at = now  # 今天的预算用完了：隔一阵再看（预算是按天算的）
-            return None
-        chunks = self._review_chunks(turns, info.bot_name) if live and (cards_ok or memory_ok or dm_ok) else []
+        shared = cs.key < 0
+        held = False
+        runs: list[tuple[int | None, list[Any]]] = []
+        if shared:
+            # 连通组的记录：每个频道的聊天归在一起整理（几个频道轮流说话时不切成一小段一小段）；这批里已经整理过的、
+            # 已经断开的频道的（断开时拿回去了，在它自己那份里整理）不再整理
+            # 现在在组里的频道这次从哪条开始（退出又连回来的：之前那次连通时说的，断开时拿回去整理过了）；断开时没能拿回去的
+            # 频道（它自己那份被旧版本写过）也在里面，那部分照样在组里整理
+            joined = self.store.sync_joined_turns(cs.key)
+            asking = set(cs.review_asking.turn_ids) if cs.review_asking is not None else set()
+            groups: dict[int | None, list[Any]] = {}
+            for t in turns:
+                if t.id in cs.review_done:
+                    continue  # 这批里已经整理过的
+                if t.id in asking:
+                    held = True  # 安静时整理正在问的那一段：要压掉的话，_review_before_compact 连同它一起排进去
+                    continue
+                if t.origin is not None and (t.origin not in joined or t.id <= joined[t.origin]):
+                    continue
+                groups.setdefault(t.origin, []).append(t)
+            runs = list(groups.items())
+        else:
+            for t in turns:
+                if t.id in cs.review_done:
+                    continue  # 断开时拿回来的、在连通组里已经整理过的（没连通过的记录没有这种）
+                if runs and runs[-1][0] == t.origin:
+                    runs[-1][1].append(t)
+                else:
+                    runs.append((t.origin, [t]))
+        chunks: list[_ReviewChunk] = []
+        flags: tuple[bool, bool, bool] | None = None
+        blocked = False  # 连通组：有的服务器今天的预算用完了，它那部分这次不整理
+        for origin, run in runs:
+            channel = origin if origin is not None else cs.key
+            home = self._channel_state(channel) if channel > 0 else None
+            if home is None:
+                continue  # 那个频道找不到了
+            view = self.view(home)
+            info = self.transport.channel_info(channel)
+            cards_ok = self._cards_on(view) and self.implicit_ok(channel, "cards")
+            memory_ok = self._memory_on(view) and self.implicit_ok(channel, "long_memory")
+            dm_ok = home.private and info.dm_user is not None and self._dm_memory_on(view)
+            live = self._live(home, view)
+            if live and (cards_ok or memory_ok or dm_ok) and self._over_budget(home, view, now)[0]:
+                if shared:
+                    # 这个服务器今天的预算用完了：只是它那部分不整理（别的服务器的照常）。安静时整理的等明天再说；
+                    # 马上要压掉的只好不整理
+                    blocked = blocked or upto is None
+                    continue
+                if upto is not None and not frozen:
+                    self._set_reviewed(cs, conv, last_id)  # 这部分马上就压掉了，以后也整理不了（连通时挑出来的那份不会压掉）
+                cs.last_review_at = now  # 今天的预算用完了：隔一阵再看（预算是按天算的）
+                return None
+            part = self._review_chunks(run, info.bot_name) if live and (cards_ok or memory_ok or dm_ok) else []
+            if origin is not None:
+                for chunk in part:
+                    chunk.origin, chunk.cards_ok, chunk.memory_ok, chunk.dm_ok, chunk.info = origin, cards_ok, memory_ok, dm_ok, info
+            chunks += part
+            flags = flags or (cards_ok, memory_ok, dm_ok)
         if not any(chunk.sids for chunk in chunks):
+            if blocked:
+                cs.last_review_at = now  # 有的服务器的预算用完了：隔一阵再看
+                return None
+            if held and upto is not None:
+                return None  # 正在问的那一段也要压掉：等它（连同排进去的那批）整理完再记进度
             # 这里不整理（关掉了，或者是私密频道），或者这段时间没有群友说话：以后打开了也不回头整理这些旧的
-            self._set_reviewed(st, conv, last_id)
+            self._set_reviewed(cs, conv, last_id)
             if upto is None:
-                st.unreviewed_rounds = 0
+                cs.unreviewed_rounds = 0
             return None
-        return _ReviewPlan(chunks, cards_ok, memory_ok, last_id, dm_ok)
+        cards_ok, memory_ok, dm_ok = flags or (False, False, False)
+        return _ReviewPlan(chunks, cards_ok, memory_ok, last_id, dm_ok, partial=blocked)
 
     def _review_chunks(self, turns: list[Any], bot_name: str) -> list[_ReviewChunk]:
         """把要整理的记录按字数分成几段，每段记下最后一条记录（整理完一段就记一段的进度）。"""
@@ -3246,6 +3939,7 @@ class Engine:
         size = 0
         start = 0.0
         prev_id = 0  # 上一条记录（lines 不空时一定已经有了）
+        ids: list[int] = []
         for t in turns:
             if t.role == "user":
                 turn_lines = review_text(t.content)
@@ -3263,67 +3957,209 @@ class Engine:
                 kept.append(line)
                 used += len(line) + 1
             if lines and size + used > limit:
-                chunks.append(_ReviewChunk(lines, sids, prev_id, start))
-                lines, sids, size = [], [], 0
+                chunks.append(_ReviewChunk(lines, sids, prev_id, start, turn_ids=ids))
+                lines, sids, size, ids = [], [], 0, []
             if not lines:
                 start = t.created_at
             lines += kept
             sids += [sid for sid in turn_sids if sid not in sids]
             size += used
             prev_id = t.id
+            ids.append(t.id)
         if lines:
-            chunks.append(_ReviewChunk(lines, sids, prev_id, start))
+            chunks.append(_ReviewChunk(lines, sids, prev_id, start, turn_ids=ids))
         return chunks
 
     async def _run_review(
         self,
-        st: ChannelState,
+        owner: Any,
         conv: Conversation,
         info: ChannelInfo,
         plan: _ReviewPlan,
         generation: int,
         *,
         before_compact: bool,
+        frozen: bool = False,
     ) -> None:
-        """一段一段问模型、照着改，每整理完一段就记下进度。连着失败几次就放弃这一批（免得一直花钱）。"""
-        st.last_review_at = self.clock()
+        """一段一段问模型、照着改，每整理完一段就记下进度。连着失败几次就放弃这一批（免得一直花钱）。
+        owner：频道的状态或者那份记录；连通组的记录每一段照那段的频道整理（见 _plan_review）。
+        frozen：连通的频道连通时挑出来的它自己原来那份：不会压掉，暂时的问题、段数到了上限都不记成整理过，以后再整理。"""
+        cs = self._cs(owner)
+        if cs.key < 0:
+            await self._run_shared_review(cs, conv, info, plan, generation, before_compact=before_compact)
+            return
+        cs.last_review_at = self.clock()
         for i, chunk in enumerate(plan.chunks[:MAX_REVIEW_CHUNKS]):
             if self.closing:
                 return  # 关机了：剩下的下次启动再整理（压缩前挑出来的就不整理了）
             if not before_compact:
-                if i and st.review_held > plan.chunks[i - 1].last_turn:
+                if i and cs.review_held > plan.chunks[i - 1].last_turn:
                     return  # 问模型的时候压缩了旧记录：后面的原话已经挑出来排着队了（没压掉的下次再整理）
-                st.review_held = max(st.review_held, chunk.last_turn)  # 这一段归这次整理：压缩时不再挑
+                cs.review_held = max(cs.review_held, chunk.last_turn)  # 这一段归这次整理：压缩时不再挑
+                if chunk.cards_ok is None:
+                    chunk.cards_ok, chunk.memory_ok, chunk.dm_ok = plan.cards_ok, plan.memory_ok, plan.dm_ok
+                cs.review_asking = chunk  # 问的时候压缩了旧记录：压掉的那几条另外记下（断开时用，见 _park_asking）
             if chunk.sids:
-                result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation, plan.dm_ok)
-                if result == "regroup" and st.generation == generation and not self.closing:
+                home = self._channel_state(chunk.origin if chunk.origin is not None else cs.key)
+                cards_ok = plan.cards_ok if chunk.cards_ok is None else chunk.cards_ok
+                memory_ok = plan.memory_ok if chunk.memory_ok is None else chunk.memory_ok
+                dm_ok = plan.dm_ok if chunk.dm_ok is None else chunk.dm_ok
+                where = chunk.info or info
+                if home is None:
+                    result = "ok"  # 那个频道找不到了：这段不整理
+                else:
+                    result = await self._review_chunk(home, where, chunk, cards_ok, memory_ok, generation, dm_ok, cs=cs)
+                if result == "regroup" and cs.generation == generation and not self.closing and home is not None:
                     # 问的时候连组、退组了：照新的组马上再问一次（压缩前挑出来的这批没有下一次）
-                    result = await self._review_chunk(st, info, chunk, plan.cards_ok, plan.memory_ok, generation, plan.dm_ok)
+                    result = await self._review_chunk(home, where, chunk, cards_ok, memory_ok, generation, dm_ok, cs=cs)
                 if result == "regroup":
                     result = "retry"  # 又变了：当成暂时的问题（平时的下次再整理；压缩前挑出来的那批只能跳过）
-                if st.generation != generation:
-                    return  # 整理的时候这个频道的记忆被清空了
+                if cs.generation != generation:
+                    return  # 整理的时候这份记录被清空了
                 if result != "ok":
-                    st.review_failures += 1  # 越失败等得越久
+                    cs.review_failures += 1  # 越失败等得越久
                     # 连不上、限流、余额不足这类暂时的问题：等恢复了再整理，不放弃这批聊天；
                     # 模型那边的问题（输出被截断、被拒、等太久没写完）连着几次就放弃，免得一直花钱
                     if result == "failed":
-                        st.review_bad += 1
-                    if before_compact or st.review_bad >= MAX_REVIEW_FAILURES:
-                        log.warning("频道 %s：整理记忆没成功，跳过这一批聊天", st.channel_id)
-                        self._set_reviewed(st, conv, plan.last_id)
-                        st.review_failures = st.review_bad = 0
+                        cs.review_bad += 1
+                    if (before_compact and not frozen) or cs.review_bad >= MAX_REVIEW_FAILURES:
+                        log.warning("频道 %s：整理记忆没成功，跳过这一批聊天", cs.key)
+                        self._set_reviewed(cs, conv, plan.last_id)
+                        for other in plan.chunks:
+                            other.reviewed = True  # 放弃了：断开时也不再整理
+                        cs.review_failures = cs.review_bad = 0
                         if not before_compact:
-                            st.unreviewed_rounds = 0
+                            cs.unreviewed_rounds = 0
                     return
-                st.review_failures = st.review_bad = 0
-            self._set_reviewed(st, conv, chunk.last_turn)
+                cs.review_failures = cs.review_bad = 0
+            self._set_reviewed(cs, conv, chunk.last_turn)
+            chunk.reviewed = True  # 断开时只把没整理完的交给新的那份（整理进度可能因为别的原因已经记过了它）
         if len(plan.chunks) > MAX_REVIEW_CHUNKS:
-            if before_compact:
-                self._set_reviewed(st, conv, plan.last_id)  # 剩下的马上就压掉了
+            if before_compact and not frozen:
+                self._set_reviewed(cs, conv, plan.last_id)  # 剩下的马上就压掉了
+                for other in plan.chunks:
+                    other.reviewed = True
             return  # 剩下的下次再整理
         if not before_compact:
-            st.unreviewed_rounds = 0
+            cs.unreviewed_rounds = 0
+
+    async def _run_shared_review(
+        self, cs: ConvState, conv: Conversation, info: ChannelInfo, plan: _ReviewPlan, generation: int, *, before_compact: bool
+    ) -> None:
+        """连通组的记录：每个频道的聊天分开整理（照那个频道的设置、记进那个服务器）。几段不是按先后连着的：整理完一段记一段
+        （review_done，库里每条记录上也记着，断开、重启以后都不再整理），进度只在整批都整理完时才记到最后。
+        - 一个频道的那段没整理成：这次先不问它后面的几段，别的频道的照常整理；连着失败几次就只放弃它那部分。压缩前挑出来的
+          那批没整理成的只跳过那一段，也不算进失败的次数（那是安静时整理用来等一等、放弃的）。
+        - 安静时整理一次最多问 MAX_SYNC_REVIEW_CHUNKS 段（跳过的不算）；正在问的那一段记在 review_asking：问的时候压缩了旧记录，
+          压掉的连同这一段挑出来排着队（这一段问完了，那批就跳过它），问完这段就停。
+        - 问的时候有频道断开了：它的那几段不整理，问到一半的那段也不照着改（拿回它自己那份里整理）。"""
+        cs.last_review_at = self.clock()
+        limit = len(plan.chunks) if before_compact else MAX_SYNC_REVIEW_CHUNKS
+        failed: set[int | None] = set()  # 这次没整理成的频道：它后面的几段这次不问（下次再整理）
+        given_up: set[int | None] = set()  # 连着失败、放弃了的频道：它的几段都记成整理过了
+        stopped = False  # 这次有没整理到的：进度别记到最后
+        counted = False  # 这次的失败算没算进等待的次数（一次整理只算一次，不按失败了几段算）
+        asked = 0
+        for chunk in plan.chunks:
+            if self.closing:
+                return
+            if not before_compact and cs.review_cut:
+                return  # 问模型的时候压缩了旧记录：压掉的那部分挑出来排着队了，剩下的下次照记录重新挑
+            if chunk.origin in given_up:
+                continue
+            if chunk.origin in failed:
+                stopped = True
+                continue
+            if before_compact and self._reviewed_already(chunk):
+                continue  # 压缩时安静时整理正在问的那一段：已经问完了
+            if before_compact:
+                # 它那部分连着失败的那批聊天压掉了（这一批整理了它，成没成都不再算）：以后的另算
+                cs.review_bad_by.pop(chunk.origin, None)
+            since: int | None = None
+            if chunk.origin is not None and not before_compact:
+                joined = self.store.sync_joined_turns(cs.key)
+                if chunk.origin not in joined or chunk.last_turn <= joined[chunk.origin]:
+                    continue  # 问的时候这个频道断开了：它这部分拿回去了，在它自己那份里整理
+                since = joined[chunk.origin]
+            if chunk.sids and asked >= limit:
+                stopped = True  # 这次问够了：剩下的下次再整理
+                break
+            if not before_compact:
+                cs.review_asking = chunk  # 这一段归这次（压缩时连同它一起挑出来）
+            if chunk.sids:
+                asked += 1
+                home = self._channel_state(chunk.origin if chunk.origin is not None else cs.key)
+                cards_ok = plan.cards_ok if chunk.cards_ok is None else chunk.cards_ok
+                memory_ok = plan.memory_ok if chunk.memory_ok is None else chunk.memory_ok
+                dm_ok = plan.dm_ok if chunk.dm_ok is None else chunk.dm_ok
+                where = chunk.info or info
+                result = "ok"
+                if home is not None:
+                    result = await self._review_chunk(
+                        home, where, chunk, cards_ok, memory_ok, generation, dm_ok, cs=cs, member_since=since
+                    )
+                    if result == "regroup" and cs.generation == generation and not self.closing:
+                        result = await self._review_chunk(
+                            home, where, chunk, cards_ok, memory_ok, generation, dm_ok, cs=cs, member_since=since
+                        )
+                    if result == "regroup":
+                        result = "retry"
+                if cs.generation != generation:
+                    return  # 整理的时候这份记录被清空了（压缩前挑出来、没整理完的交给新的那份接着整理）
+                if result == "left":
+                    continue  # 问的时候这个频道断开了：没照着改，在它自己那份里整理
+                if result != "ok":
+                    if before_compact:
+                        # 马上就压掉了，没有下一次：只跳过这一段，别的频道的照常整理（不算进安静时整理的失败次数）
+                        log.warning("频道 %s：整理记忆没成功，跳过频道 %s 的这一段聊天", cs.key, chunk.origin)
+                        continue
+                    if not counted:
+                        cs.review_failures += 1  # 越失败等得越久（这一次整理只算一次）
+                        counted = True
+                    if result == "failed":
+                        cs.review_bad_by[chunk.origin] = cs.review_bad_by.get(chunk.origin, 0) + 1  # 每个频道各数各的
+                    if cs.review_bad_by.get(chunk.origin, 0) < MAX_REVIEW_FAILURES:
+                        failed.add(chunk.origin)  # 暂时的问题：它这部分下次再整理（别的频道的照常）
+                        stopped = True
+                        continue
+                    log.warning("频道 %s：整理记忆没成功，跳过频道 %s 的这一批聊天", cs.key, chunk.origin)
+                    if not failed:
+                        # 放弃了这一批：等待从头算（这次别的频道也失败了的话别清零，它下次还要等一等）；清零以后，这次后面
+                        # 再有失败的照样算一次
+                        cs.review_failures = cs.review_bad = 0
+                        counted = False
+                    cs.review_bad_by.pop(chunk.origin, None)
+                    given_up.add(chunk.origin)
+                    for other in plan.chunks:
+                        if other.origin == chunk.origin:
+                            self._chunk_done(cs, other, before_compact)  # 只放弃这个频道的那部分
+                    continue
+                if not before_compact:
+                    cs.review_bad_by.pop(chunk.origin, None)  # 这个频道这一段整理成了：它连着失败的次数从头数
+                if not failed and not before_compact:
+                    cs.review_failures = cs.review_bad = 0  # 有频道刚失败过的话别清零（它下次还要等一等）
+            self._chunk_done(cs, chunk, before_compact)
+        if stopped or plan.partial:
+            if before_compact:
+                self._set_reviewed(cs, conv, plan.last_id)  # 剩下的马上就压掉了
+            return  # 剩下的下次再整理（整理过的记在 review_done、库里每条记录上）
+        self._set_reviewed(cs, conv, plan.last_id)
+        if not before_compact:
+            cs.unreviewed_rounds = 0
+
+    def _chunk_done(self, cs: ConvState, chunk: _ReviewChunk, before_compact: bool) -> None:
+        """连通组的记录：这一段整理完了（或者放弃了）。也记到库里每条记录上（断开时拿回去、重启以后都认；压缩掉的那些
+        已经不在库里了，只记在内存里）。"""
+        chunk.reviewed = True
+        cs.review_done.update(chunk.turn_ids)
+        self.store.mark_reviewed(chunk.turn_ids)
+
+    @staticmethod
+    def _reviewed_already(chunk: _ReviewChunk) -> bool:
+        """压缩前挑出来的这一段已经整理过了（它是安静时整理当时正在问的那一段里压掉的那几条：那一段后来问完了）。只认这一段
+        自己：整理进度可能因为别的原因记过了它（压缩时别的部分不用整理、问到一半断开的那段），它却还没整理过。"""
+        # 它的频道排着队的时候清空了记忆的，也当成不用整理了
+        return chunk.dropped or chunk.reviewed or (chunk.part_of is not None and chunk.part_of.reviewed)
 
     async def _review_chunk(
         self,
@@ -3334,12 +4170,20 @@ class Engine:
         memory_ok: bool,
         generation: int,
         dm_ok: bool = False,
+        *,
+        cs: ConvState | None = None,
+        member_since: int | None = None,
     ) -> str:
-        """问模型这一段聊天里有什么值得长期记住的，照着改。
+        """问模型这一段聊天里有什么值得长期记住的，照着改。st：这段聊天在哪个频道（照它的服务器记）；
+        cs：整理的是哪份记录（不填就是 st 现在用的那份；连通组的记录里的一段，或者连通的频道自己原来那份）。
+        member_since：连通组安静时整理：这一段的频道这次连进来时的那条记录（问的时候它断开了，就不照着改）。
 
         返回 "ok"；"retry"（连不上、限流、余额不足：之后再试）；"failed"（模型的输出不能用、等太久没写完）；
-        "regroup"（问的时候这个服务器连组、退组了，它看到的长期记忆不是现在这份：照新的再问）。"""
-        authors = self.store.load_authors(st.channel_id, chunk.sids)  # 编号 -> (人, 名字)；bot 和旧记录没有
+        "regroup"（问的时候这个服务器连组、退组了，它看到的长期记忆不是现在这份：照新的再问）；"left"（问的时候这一段的
+        频道断开了：它这部分拿回去了，在它自己那份里整理）。"""
+        cs = cs or st.conv
+        # 编号 -> (人, 名字)；bot 和旧记录没有。连通组压缩前挑出来的那批先记下了（组散了，库里就没了）
+        authors = chunk.authors if chunk.authors is not None else self.store.load_authors(cs.key, chunk.sids)
         guild = st.guild_id  # 花费记在这个服务器
         key = self._memory_key(guild)
         scope = key[0]  # 长期记忆记在哪（连成一组的服务器共用组里那份）
@@ -3448,8 +4292,12 @@ class Engine:
             reasoning=u.reasoning,
             cost=cost,
         )
-        if st.generation != generation:
+        if cs.generation != generation:
             return "retry"
+        if chunk.dropped:
+            return "ok"  # 问的时候这一段的频道清空了记忆：不照着改
+        if member_since is not None and self.store.sync_joined_turns(cs.key).get(chunk.origin) != member_since:
+            return "left"
         if self._memory_key(st.guild_id) != key:
             # 问模型的时候这个服务器连组、退组了：它看到的不是现在这份（长期记忆的编号对不上），照新的马上再问一次
             log.info("频道 %s：整理记忆的时候服务器组变了，照现在的再整理一次", st.channel_id)
@@ -3476,7 +4324,7 @@ class Engine:
                 who = authors.get(to) if to in chunk.sids else None
                 if who is None or who[0] not in people or who[0] in done:
                     continue  # 只能改这段记录里说过话的人自己的卡
-                if st.msg_by_sid.get(to) in st.deleted:
+                if cs.msg_by_sid.get(to) in cs.deleted:
                     continue  # 整理的时候这条被删了
                 if name is not None and not _same_name(name, people[who[0]][0], numbers.get(who[0])):
                     log.info("频道 %s：整理记忆时 #%s 和名字「%s」对不上，没改", st.channel_id, to, one_line(name, 32))
@@ -3566,9 +4414,11 @@ class Engine:
         先后；同一个服务器里普通频道在前，帖子在后，各自按名字排。"""
         out = []
         order = self._group_guilds(guild_id)
+        sync = self.store.sync_of(channel_id)
+        linked = set(self.store.sync_members(sync)) if sync is not None else set()  # 连通的频道本来就在记录里，不用翻
         for g in order:
             for cid in self.store.conversation_channels(g):
-                if cid == channel_id:
+                if cid == channel_id or cid in linked:
                     continue
                 place = self.transport.locate(cid)
                 if place is not None and place.guild_id == g and self.shares_out(cid, place):
@@ -3594,7 +4444,7 @@ class Engine:
         return name
 
     def _find_source(
-        self, sources: list[tuple[int, ChannelPlace]], wanted: str, guild_id: int
+        self, sources: list[tuple[int, ChannelPlace]], wanted: str, guild_id: int, channel_id: int | None = None
     ) -> tuple[int, ChannelPlace] | list[tuple[int, ChannelPlace]] | None:
         """按名字找要翻的频道（guild_id：现在在哪个服务器）。找到返回它；分不出是哪个（同名的帖子，组里几个服务器都有
         这个名字的频道）时返回候选列表；找不到返回 None。
@@ -3617,7 +4467,7 @@ class Engine:
                 return chans or exact  # 几个服务器都有，或者是同名的帖子：不猜
             # 这里只认给它看的写法（见 _here_named）：别的服务器截短的名字丢了“…”，碰巧和这里前面一样，也不当成这里
             servers = self._guilds_named(named["server"], {p.guild_id for _, p in sources} - {guild_id})
-            if self._here_named(named["server"], guild_id):
+            if self._here_named(named["server"], guild_id, channel_id):
                 servers.add(guild_id)
             if not servers:
                 # 不是组里哪个服务器的名字：可能频道、帖子自己就叫这个（名字里正好带着“（「X」服务器）”），先认频道。
@@ -3661,7 +4511,7 @@ class Engine:
                 return found  # 好几个帖子都对得上：不猜，免得被群友起的同名帖子冒充
         return None
 
-    def _other_server_named(self, guild_id: int) -> Callable[[str], bool]:
+    def _other_server_named(self, guild_id: int, channel_id: int | None = None) -> Callable[[str], bool]:
         """发出去的话里写明“「X」服务器”的频道名，要不要别换成这里的频道链接（会指到这里同名的频道；不链总比链错好）：
         - X 是这里（见 _here_named：全名、中和过、截到 60 字的；它自己截短、带着“…”的，或者截到 40 字的也算，只是它看得到
           别的服务器的名字时，bot 知道的别的服务器也对得上就不算）：换。和给它看过的别的服务器同名（组里的；这里开了跨服务器
@@ -3674,17 +4524,34 @@ class Engine:
             group = self._group_guilds(guild_id)
             cross = bool(self.settings.view(guild_id).cross_server)
             known = self._known_others(guild_id)
-            if self._here_named(server, guild_id):
+            if self._here_named(server, guild_id, channel_id):
                 shown = set(group[1:]) | ({g for g in known if self.settings.view(g).cross_server} if cross else set())
+                if channel_id is not None:
+                    shown |= self._sync_guilds(channel_id) - {guild_id}  # 连通的频道所在的别的服务器（记录里写着名字）
                 return bool(self._guilds_named(server, shown))
-            return bool(self._guilds_named(server, known)) or self._sees_other_servers(guild_id)
+            return bool(self._guilds_named(server, known)) or self._sees_other_servers(guild_id, channel_id)
 
         return other
 
-    def _sees_other_servers(self, guild_id: int) -> bool:
+    def _known_server_named(self, guild_id: int, channel_id: int | None = None) -> Callable[[str], bool]:
+        """只写了“「X」#频道”（没写“服务器”）时：X 是 bot 知道的别的服务器、又认不出是这里，就不换成这里的频道链接。
+        「」里是别的字（“「必看」#公告”）照常换。"""
+
+        def known(server: str) -> bool:
+            return bool(self._guilds_named(server, self._known_others(guild_id))) and not self._here_named(server, guild_id, channel_id)
+
+        return known
+
+    def _sees_other_servers(self, guild_id: int, channel_id: int | None = None) -> bool:
         """这里的提示词里会不会有别的服务器的名字：连成了组（组里的名单、能翻的频道）、开了跨服务器（近况），或者共用人设卡
-        （卡上会写着在别的服务器的事）。以前的聊天记录里也会留着。"""
-        return len(self._group_guilds(guild_id)) > 1 or bool(self.settings.view(guild_id).cross_server) or self._cards_shared()
+        （卡上会写着在别的服务器的事）；这个频道和别的服务器的频道连通了（记录里每段写着是哪个服务器的）。
+        以前的聊天记录里也会留着。"""
+        return (
+            len(self._group_guilds(guild_id)) > 1
+            or bool(self.settings.view(guild_id).cross_server)
+            or self._cards_shared()
+            or (channel_id is not None and bool(self._sync_guilds(channel_id) - {guild_id}))
+        )
 
     def _guild_ids(self) -> list[int]:
         """bot 现在在的服务器。"""
@@ -3695,7 +4562,7 @@ class Engine:
         """bot 知道的别的服务器：它在的、组里的、最近有人跟它聊过的。"""
         return (set(self._group_guilds(guild_id)[1:]) | {g for g, _ in self.interactions} | set(self._guild_ids())) - {guild_id}
 
-    def _here_named(self, server: str, guild_id: int) -> bool:
+    def _here_named(self, server: str, guild_id: int, channel_id: int | None = None) -> bool:
         """模型写的服务器名是不是这个服务器：全名，或者提示词里给它看的（中和过、截到 60 字的；带不带结尾的“…”都认）。
         别的截法（它自己截的、带着“…”，或者整理记忆时看到的 40 字）也认；只是它看得到别的服务器的名字时（见
         _sees_other_servers），bot 知道的别的服务器也对得上就不算：组里别的服务器给它看的名字截到 40 字，前面一样长的两个
@@ -3714,7 +4581,7 @@ class Engine:
             known = self._known_others(guild_id)
             if not cut and any(want in {_norm_channel(n), _norm_channel(neutralize(n))} for n in map(self._guild_name, known)):
                 return False  # 这里截到 40 字、丢了“…”，正好是别的服务器的全名：算那边的
-            return not (self._sees_other_servers(guild_id) and self._guilds_named(server, known))
+            return not (self._sees_other_servers(guild_id, channel_id) and self._guilds_named(server, known))
         return False
 
     def _guilds_named(self, server: str, guilds: Iterable[int]) -> set[int]:
@@ -3782,6 +4649,11 @@ class Engine:
         st.memory_shown = frozenset(no for no, _ in memories or [])
         group = [self._server_label(g) for g in self._group_guilds(st.guild_id)[1:]] or None
         dm_memories, dm_more = self._dm_memory_entries(st, view, info)
+        sync = sync_here = past = None
+        if self._synced(st):
+            sync = [self._sync_label(c) for c in self.store.sync_members(st.conv.key) if c != st.channel_id]
+            sync_here = self._sync_label(st.channel_id)
+            past = self._past_digest(st, info.bot_name)
         return build_system_prompt(
             guild=neutralize(one_line(info.guild_name, 60)),
             channel=neutralize(one_line(info.channel_name, 60)),
@@ -3789,7 +4661,7 @@ class Engine:
             persona=view.persona,
             summary=conv.summary,
             search=self._can_search(view),
-            share=bool(view.share_memory),
+            share=bool(view.share_memory) and not self._sync_foreign(st),
             emojis=emojis,
             stickers=stickers,
             more_emojis=len(info.emojis) - len(emojis),
@@ -3815,6 +4687,11 @@ class Engine:
             dm_memory_more=dm_more,
             group=group,
             memory_foreign=foreign,
+            sync=sync,
+            sync_here=sync_here,
+            sync_past=past,
+            sync_foreign=self._sync_foreign(st),
+            sync_cards=self._cards_shared() or not self._cards_on(view),
         )
 
     def _dm_memory_entries(
@@ -3981,24 +4858,40 @@ class Engine:
 
     def _recall_section(self, st: ChannelState, view: View, action: Action, info: ChannelInfo) -> str:
         shown = neutralize(one_line(action.channel or "", 40))
+        if self._sync_foreign(st):
+            return RECALL_SYNC_OFF  # 翻到的会进几个服务器共用的记录
         if not view.share_memory:
-            return f"（想翻「{shown}」的记录，但这里没开记忆共享，看不了别的频道。）"
+            return RECALL_NO_SHARE.format(channel=shown)
         sources = self.shared_sources(st.guild_id, st.channel_id)
-        match = self._find_source(sources, action.channel or "", st.guild_id)
+        match = self._find_source(sources, action.channel or "", st.guild_id, st.channel_id)
         if match is None:
             names = "、".join(self._source_name(c, p, st.guild_id) for c, p in sources[:10]) or "没有"
-            return f"（找不到能翻记录的频道「{shown}」。能翻的：{names}）"
+            return RECALL_MISS.format(channel=shown, names=names)
         if isinstance(match, list):
             names = "、".join(self._source_name(c, p, st.guild_id) for c, p in match[:10])
-            return f"（叫「{shown}」的有好几个：{names}。分不出是哪个，没翻。）"
+            return RECALL_AMBIGUOUS.format(channel=shown, names=names)
         channel_id, place = match
-        other = self.states.get(channel_id)
-        conv = other.conversation if other is not None and other.conversation is not None else None
+        turns, summary = self._channel_history(channel_id, place)
+        lines = history_lines([(t.role, t.content) for t in turns], info.bot_name)
+        lines = _pick_lines(lines, action.query, self.ec.recall_max_chars)
+        return render_recall(self._source_name(channel_id, place, st.guild_id), summary, lines, action.query)
+
+    def _channel_history(self, channel_id: int, place: ChannelPlace) -> tuple[list[Turn], str | None]:
+        """翻记录时那个频道的记录和摘要。连通的频道：它自己原来那份（连通之前的）在前，后面接上共用记录里它自己的那部分
+        （别的频道说的不给翻：那些频道没开给这里翻）；摘要只给它自己原来那份的（共用记录的摘要里有别的频道的事）。"""
+        own = self.convs.get(channel_id)
+        conv = own.conversation if own is not None and own.conversation is not None else None
         if conv is None:
             conv = self.store.load_conversation(channel_id, place.guild_id)
-        lines = history_lines([(t.role, t.content) for t in conv.turns], info.bot_name)
-        lines = _pick_lines(lines, action.query, self.ec.recall_max_chars)
-        return render_recall(self._source_name(channel_id, place, st.guild_id), conv.summary, lines, action.query)
+        turns = list(conv.turns)
+        sync = self.store.sync_of(channel_id)
+        if sync is not None:
+            shared = self.convs.get(sync)
+            whole = shared.conversation if shared is not None and shared.conversation is not None else None
+            if whole is None:
+                whole = self.store.load_conversation(sync, 0)
+            turns += [t for t in whole.turns if t.origin == channel_id]
+        return turns, conv.summary
 
     def _shared_context(
         self, st: ChannelState, view: View, triggers: list[IncomingMessage], now: float
@@ -4009,6 +4902,8 @@ class Engine:
         """
         lines: list[str] = []
         listed: tuple[str, ...] | None = None
+        if self._sync_foreign(st):
+            return lines, {}, listed  # 和别的服务器的频道连通了：别处的近况、能翻的频道名单都不放进几个服务器共用的记录
         sources = self.shared_sources(st.guild_id, st.channel_id) if view.share_memory else []
         if view.share_memory:
             names = tuple(self._source_name(c, p, st.guild_id) for c, p in sources[: self.ec.share_list_limit])
@@ -4018,6 +4913,7 @@ class Engine:
         ttl = self.ec.share_recent_hours * 3600
         marks: dict[int, int] = {}
         allowed = {cid: p for cid, p in sources}
+        linked = set(self.store.sync_members(st.conv.key)) if self._synced(st) else set()  # 本来就在共用的记录里
         # 连成一组的服务器当成一个服务器：组里几个服务器的都算“这里”的
         here = self._group_guilds(st.guild_id)
         # 私信和服务器的频道之间，同一个人自己跟它的对话不管开没开记忆共享都带：
@@ -4027,10 +4923,15 @@ class Engine:
                 if item.channel_id not in allowed and item.channel_id != st.channel_id:
                     place = self.transport.locate(item.channel_id)
                     if place is not None and place.guild_id in here and (place.public if st.private else place.dm):
+                        if place.dm and self._synced(st):
+                            continue  # 连通的频道：私信里聊的不带进共用的记录
                         allowed[item.channel_id] = place
         # 跨服务器：开了“跨服务器”的服务器之间，同一个人跟它的对话跟着他走（私信看它挂的那个服务器开没开：
         # 私信里聊的会记进那个服务器的人设卡、长期记忆，那边没开就不带）
         cross = bool(view.cross_server)
+        if cross and self._synced(st):
+            # 连通了组里别的服务器的频道：共用的记录那几个服务器都看得到，都开了“跨服务器”才带别的服务器的近况
+            cross = all(self.settings.view(g).cross_server for g in self._sync_guilds(st.channel_id))
         crossed: set[int] = set()  # 只是因为“跨服务器”才带得上的频道：说了要保密的那段不带（组里的服务器也一样）
         for m in triggers:
             if m.is_bot or m.author_id in marks:
@@ -4046,6 +4947,7 @@ class Engine:
                 item
                 for item in pool
                 if item.channel_id in allowed
+                and item.channel_id not in linked
                 and item.seq > since
                 and now - item.at <= ttl
                 and not (allowed[item.channel_id].dm and (_secret(item.lines) or self._dm_sensitive(m.author_id, item.lines[:1])))
@@ -4152,6 +5054,9 @@ class Engine:
             for entry in reversed(list(st.recent_files.values())):
                 m = entry.message
                 if m.author_id == t.author_id and 0 <= t.received_at - m.received_at <= AUTO_READ_WINDOW:
+                    if st.conv.key < 0 and m.message_id not in shown_ids and st.conv.key not in self.store.message_keys([m.message_id]):
+                        # 连通组的记录：不在这一批里、也没记进这份记录的（连通之前的闲聊、暂停着的频道里的、上一轮没跑成的）不读进来
+                        continue
                     candidates.append(entry)
             for entry in candidates:
                 if entry is None or not entry.unread():
@@ -4353,10 +5258,7 @@ class Engine:
             # 这批消息本身被拒（比如内容审核）：丢掉它，别卡住整个频道
             log.error("频道 %s：这批消息被 DeepSeek 拒绝，已丢弃：%s", st.channel_id, exc)
             self._consume(st, batch, now)
-            text = str(exc).lower()
-            # 只有真的是上下文太长才压缩（max_tokens 填错之类的报错里也有 token 字样，别误判）
-            too_big = exc.status == 413 or any(word in text for word in ("context", "too long", "too large", "maximum length"))
-            if too_big and st.conversation is conv:
+            if self._too_big(exc) and st.conversation is conv:
                 await self._compact(st, conv, info, force=True)
         else:
             st.error_until = now + ERROR_BACKOFF
@@ -4366,6 +5268,68 @@ class Engine:
             mid = st.msg_by_sid.get(targets[-1])
             if mid is not None:
                 await self._safe_react(st, mid, "⚠️")
+
+    @staticmethod
+    def _too_big(exc: LLMError) -> bool:
+        """被拒是因为上下文太长（只有真的是才压缩：max_tokens 填错之类的报错里也有 token 字样，别误判）。"""
+        text = str(exc).lower()
+        return exc.status == 413 or any(word in text for word in ("context", "too long", "too large", "maximum length"))
+
+    def _vetted(self, st: ChannelState) -> None:
+        """这一轮的请求过了：这份记录里没问过模型就记进去的那几轮（别的连通频道补进来的）也跟着过了。它自己那份里连通时记进去的，
+        只有这一轮的“连通之前的概要”（只带最后几千字）带全了才算；没带全的等断开以后带着整份记录的请求过了再算。"""
+        kept = bool(st.conv.unvetted or st.conv.unvetted_edits)
+        st.conv.unvetted.clear()
+        st.conv.unvetted_edits.clear()
+        own = self.convs.get(st.channel_id)
+        if kept:
+            self._keep_unvetted(st.conv)  # 库里记着的也划掉
+        if self._synced(st) and st.past_vetted and own is not None and own is not st.conv:
+            kept = bool(own.unvetted)
+            own.unvetted.clear()
+            if kept:
+                self._keep_unvetted(own)
+
+    def _keep_unvetted(self, cs: ConvState) -> None:
+        """记下这份记录里还没问过模型的那几条（记在库里：重启以后照样认得，被拒了照样换掉）。"""
+        self.store.save_unvetted(cs.key, cs.unvetted, cs.unvetted_edits)
+
+    def _withdraw_unvetted(self, st: ChannelState) -> None:
+        """这一轮的请求被 DeepSeek 拒了（不是太长）：记录里没问过模型就记进去的那几轮多半就是原因（2.7.1 里每一批都是问过模型
+        才记的，被拒的那批丢掉）。换成一句“没记下”，免得以后每一轮都被拒。"""
+        group = st.conv
+        if group.key < 0 and group.unvetted_edits:
+            # 连通组的记录里直接改成了新内容的那几条（没问过模型）：多半就是它们，当成删了
+            edits, group.unvetted_edits = group.unvetted_edits, set()
+            conv = group.conversation if group.conversation is not None else self._load(group)
+            self._apply_fixes(group, conv, {mid: None for mid in edits})
+            self._keep_unvetted(group)
+            log.warning("频道 %s：这一轮被 DeepSeek 拒了，记录 %s 里直接改过的 %d 条消息当成删了", st.channel_id, group.key, len(edits))
+        targets = [st.conv]
+        own = self.convs.get(st.channel_id)
+        if own is not None and own is not st.conv:
+            targets.append(own)
+        for cs in targets:
+            if not cs.unvetted:
+                continue
+            ids, cs.unvetted = set(cs.unvetted), []
+            conv = cs.conversation if cs.conversation is not None else self._load(cs)
+            updates: dict[int, Any] = {}
+            for t in conv.turns:
+                if t.id in ids and t.role == "user":
+                    text = t.content if isinstance(t.content, str) else ""
+                    head = text.split("\n", 1)[0]
+                    # 跟着补进来的“改成了什么”：改成的内容不留（可能就是它被拒），只说一声那条改过了（别让它一直照着旧的说）
+                    lost = [
+                        EDIT_NOTE_LOST.format(sid=found.group(1), name=found.group(2))
+                        for line in text.split("\n")
+                        if (found := _EDIT_NOTE_HEAD.match(line)) is not None
+                    ]
+                    updates[t.id] = "\n".join(([head] if head else []) + [PASSIVE_REJECTED] + lost)
+            self._rewrite_turns(updates, {t.id: t for t in conv.turns})
+            self._keep_unvetted(cs)
+            if updates:
+                log.warning("频道 %s：这一轮被 DeepSeek 拒了，记录 %s 里没问过模型就记进去的 %d 段换成了“没记下”", st.channel_id, cs.key, len(updates))
 
     def _pause_on(self, exc: LLMError, now: float) -> bool:
         """余额不足、key 不对：全局暂停一阵（返回是不是这两种）。"""
@@ -4445,7 +5409,8 @@ class Engine:
 
         for action in actions:
             if action.kind == "react":
-                mid = st.msg_by_sid.get(action.to) if action.to is not None else None
+                # 连通的别的频道的消息：不跑到那边加表情
+                mid = st.msg_by_sid.get(action.to) if action.to is not None and self._here(st, action.to) else None
                 if mid is not None and action.emoji and mid not in st.deleted:
                     reacted = await self._safe_react(st, mid, action.emoji) or reacted
                 continue
@@ -4456,7 +5421,8 @@ class Engine:
                 if not live:
                     continue  # 叫它的消息都被删了：不回
                 to = live[-1]
-            reply_mid = st.msg_by_sid.get(to) if to is not None else None
+            # 回连通的别的频道的消息：在这里直接说（挂不成回复：Discord 只能回同一个频道的消息）
+            reply_mid = st.msg_by_sid.get(to) if to is not None and self._here(st, to) else None
             if reply_mid is not None and reply_mid in st.deleted:
                 log.info("频道 %s：#%s 在它回话之前被删了，不回它", st.channel_id, to)
                 continue
@@ -4523,7 +5489,7 @@ class Engine:
                 for form in name_forms(name):
                     recent.setdefault(form, set()).add(uid)
             cards: dict[str, set[int]] = {}
-            if self.cards is not None:
+            if self.cards is not None and not self._sync_foreign(st):  # 和别的服务器的频道连通时：写的名字多半是那边的人
                 scope = self._card_scope(st.guild_id)
                 # 卡里有别的服务器的人时只认在这个服务器出现过的人、按他在这里的名字（别的服务器的同名的人不在这里，@ 不到）
                 owners = self.cards.owners(scope) if scope == st.guild_id else self.cards.owners_seen(scope, st.guild_id)
@@ -4534,7 +5500,8 @@ class Engine:
             cache["people"] = merge_tiers(cache["tiers"])
             cache["channels"] = {name: frozenset(ids) for name, ids in self.transport.channel_names(st.guild_id).items()}
             cache["searched"] = set()
-        if kind == "mention" and ("@" in text or "＠" in text):
+        if kind == "mention" and ("@" in text or "＠" in text) and not self._sync_foreign(st):
+            # 和别的服务器的频道连通时不按名字到这里的成员里找：写的多半是那边的人，这里同名的人会被 @ 到
             _, _, unknown = link(text, cache["people"], {})
             starts = [u for u in unknown if u[:2] not in cache["searched"]][:3]
             if starts and self.limiter.allow(("member-search", 0), MEMBER_SEARCHES_PER_MINUTE, 60.0, self.clock()):
@@ -4561,7 +5528,13 @@ class Engine:
         """把一段话里的 @名字、#频道名 换成真的。返回 (换好的话, 要提醒的人)。只有有人叫它的时候才提醒：
         这一轮最多 MAX_PINGS_PER_ROUND 个人，同一个人 PING_COOLDOWN 之内只提醒一次，每个服务器 10 分钟内最多
         GUILD_PINGS 次；其他的只显示成 @，不发通知。"""
-        linked, users, _ = link(chunk, people, channels, other_server=self._other_server_named(st.guild_id))
+        linked, users, _ = link(
+            chunk,
+            people,
+            channels,
+            other_server=self._other_server_named(st.guild_id, st.channel_id),
+            known_server=self._known_server_named(st.guild_id, st.channel_id),
+        )
         if len(linked) > DISCORD_LIMIT:
             return chunk, []  # 换完太长了：原样发
         if kind != "mention" or not users:
@@ -4614,28 +5587,81 @@ class Engine:
         async with self._decode_slots:
             return await asyncio.to_thread(to_data_uri, raw, max_side)
 
-    def _review_before_compact(self, st: ChannelState, conv: Conversation, info: ChannelInfo, upto: int, generation: int) -> None:
+    def _review_before_compact(
+        self, st: Any, conv: Conversation, info: ChannelInfo, upto: int, generation: int, frozen: bool = False
+    ) -> None:
         """要压掉的那部分（到 upto 为止）还没整理过记忆的：把原话挑出来，排队在后台整理（压成摘要之后就看不到原话了）。
-        正在整理的话，它正在问的那一段不再挑，挑出来的排在它后面。不等它：压缩照常做，有人叫它也不用多等。"""
+        正在整理的话，它正在问的那一段不再挑，挑出来的排在它后面。不等它：压缩照常做，有人叫它也不用多等。
+        st：频道的状态或者那份记录。frozen：连通的频道连通时，它自己原来那份也这样挑出来整理（以后不往里写，平时的整理
+        轮不到它；不会压掉：没整理成的不记成整理过，组里整理时再试）。"""
         if self.cards is None and self.memory is None:
             return
-        if max(conv.reviewed_upto, st.review_held) >= upto:
+        cs = self._cs(st)
+        if cs.key != conv.channel_id:
+            cs = self._conv_state(conv.channel_id)
+        if cs.key > 0 and not frozen:
+            self._park_asking(cs, conv, info, upto, generation)
+        if max(conv.reviewed_upto, cs.review_held) >= upto:
             return  # 都整理过了，或者正在问的那一段会整理到
         try:
-            plan = self._review_plan(st, conv, info, upto=upto, after=st.review_held)
+            plan = self._review_plan(cs, conv, info, upto=upto, after=cs.review_held, frozen=frozen)
         except Exception:
-            log.exception("频道 %s：压缩前整理记忆出错", st.channel_id)
+            log.exception("频道 %s：压缩前整理记忆出错", cs.key)
             return
-        if plan is None:
+        part = self._asking_part(cs, conv, info, upto) if cs.key < 0 else []
+        if plan is None and not part:
             return
-        st.review_jobs.append(_ReviewJob(conv, info, plan, generation))
-        if st.reviewing:
-            st.review_held = upto  # 安静时整理的那批：问完手上这一段就停，后面的归这一批
+        if part:
+            # 安静时整理正在问的那一段里也有要压掉的：那几条另外分段排进去。那一段问完了，这几段就跳过；没问成（出错、记录清空
+            # 作废了），由这批整理。没压掉的那些还在记录里，下次照常整理（断开的话跟着拿回去）
+            plan = _ReviewPlan(part, False, False, upto) if plan is None else replace(plan, chunks=[*part, *plan.chunks])
+        assert plan is not None
+        if cs.key < 0:
+            for chunk in plan.chunks:
+                # 编号是谁说的先记下：排着队的时候组散了（共用的记录连同编号映射都删掉了）也照样整理得了
+                if chunk.authors is None:
+                    chunk.authors = self.store.load_authors(cs.key, chunk.sids) if chunk.sids else {}
+        cs.review_jobs.append(_ReviewJob(conv, info, plan, generation, frozen))
+        if cs.reviewing:
+            if cs.key < 0:
+                cs.review_cut = True  # 连通组安静时整理的那批：问完手上这一段就停（剩下的下次照记录重新挑）
+            else:
+                cs.review_held = upto  # 安静时整理的那批：问完手上这一段就停，后面的归这一批
             return  # 它整理完手上的会接着整理这批
-        st.reviewing = True
-        task = asyncio.get_running_loop().create_task(self._compact_review(st))
+        cs.reviewing = True
+        task = asyncio.get_running_loop().create_task(self._compact_review(cs))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _asking_part(self, cs: ConvState, conv: Conversation, info: ChannelInfo, upto: int) -> list[_ReviewChunk]:
+        """安静时整理正在问的那一段里马上要压掉的那几条（到 upto 为止），分好段（part_of 指着那一段）。连通组的记录里那个频道
+        已经断开了的不算：它这部分（连同要压掉的）断开时拿回去了，在它自己那份里整理。"""
+        asking = cs.review_asking
+        if asking is None or not asking.turn_ids or min(asking.turn_ids) > upto:
+            return []
+        if asking.origin is not None and cs.key < 0:
+            joined = self.store.sync_joined_turns(cs.key)
+            if asking.origin not in joined or asking.last_turn <= joined[asking.origin]:
+                return []
+        ids = set(asking.turn_ids)
+        run = [t for t in conv.turns if t.id in ids and t.id <= upto]
+        part = self._review_chunks(run, (asking.info or info).bot_name) if run else []
+        for chunk in part:
+            chunk.origin, chunk.cards_ok, chunk.memory_ok, chunk.dm_ok = asking.origin, asking.cards_ok, asking.memory_ok, asking.dm_ok
+            chunk.info, chunk.part_of = asking.info, asking
+        return part
+
+    def _park_asking(self, cs: ConvState, conv: Conversation, info: ChannelInfo, upto: int, generation: int) -> None:
+        """频道自己那份：安静时整理正在问的那一段里马上要压掉的那几条，分好段另外记下，不排队（那一段问完了就用不着；没问成的话
+        跟没连通过时一样，压掉的那几条不再整理）。断开时那一段问完会作废（换了 generation）：这几条交给新的那份整理（见
+        _salvage_jobs）。"""
+        try:
+            part = self._asking_part(cs, conv, info, upto)
+        except Exception:
+            log.exception("频道 %s：压缩前整理记忆出错", cs.key)
+            return
+        if part:
+            cs.review_parked.append(_ReviewJob(conv, info, _ReviewPlan(part, False, False, upto), generation))
 
     async def _compact(self, st: ChannelState, conv: Conversation, info: ChannelInfo, *, force: bool = False) -> None:
         """把最早的一部分对话压成摘要。只在这一次会让缓存 miss。"""
@@ -4646,18 +5672,27 @@ class Engine:
         if remove < 2:
             return
         generation = st.generation
+        # 连通组的记录：它在几个服务器里的昵称可能不一样，摘要里统一这么叫它（照哪个服务器的写，别的服务器看着都像别人）
+        bot_name = SYNC_BOT_NAME if conv.channel_id < 0 else info.bot_name
         lines = []
         for t in conv.turns[:remove]:
             if t.role == "user":
                 # 别的频道带来的近况、翻到的记录、搜索结果不进摘要：那些频道清空或不再共享后，这里也不该一直记着
-                lines.append(own_text(t.content))
+                # 连通组的记录：只有原来那个服务器能看的那几句（想翻的频道找不到时列出来的名单之类）也不进摘要（摘要以后不会再查）
+                lines.append(own_text(drop_local(t.content, keep_cards=True) if conv.channel_id < 0 else t.content))
             else:
                 raw = t.content if isinstance(t.content, str) else json.dumps(t.content, ensure_ascii=False)
-                said = assistant_text(raw, info.bot_name)
+                if conv.channel_id < 0:
+                    # 连通组的记录：改长期记忆（写着那个服务器那一条的原文）、按名字查人设卡的动作不进摘要（摘要以后不会再查）
+                    raw = self._without_actions(raw, {"memory", "who"}) or raw
+                said = assistant_text(raw, bot_name)
                 if said:
                     lines.append(said)
+        summary_system = SUMMARY_SYSTEM.format(name=bot_name, limit=self.ec.summary_max_chars)
+        if self._synced(st):
+            summary_system += SUMMARY_SYNC_NOTE  # 几个连通的频道共用的记录：写明每件事是哪个频道的
         prompt = [
-            {"role": "system", "content": SUMMARY_SYSTEM.format(name=info.bot_name, limit=self.ec.summary_max_chars)},
+            {"role": "system", "content": summary_system},
             {
                 "role": "user",
                 "content": f"【旧摘要】\n{conv.summary or '（无）'}\n\n【聊天记录】\n" + "\n".join(lines),
@@ -4694,7 +5729,11 @@ class Engine:
         # 和下面的压缩之间不能有 await：挑出来的正好是压掉的那些
         self._review_before_compact(st, conv, info, last_removed, generation)
         self.store.compact(conv, summary[: self.ec.summary_max_chars * 2], remove)
-        st.listed = last_listed(conv.turns)  # 名单可能在被压掉的那部分里，那样下次被叫到时重新写
+        for member in self._members(st.conv) or [st]:
+            mine = self._mine(member, conv.turns)
+            member.listed = last_listed(mine)  # 名单可能在被压掉的那部分里，那样下次被叫到时重新写
+            if last_music_line(mine) is None:
+                member.music_seen = None  # “正在放什么”那句压掉了：下次被叫到时再写一次
         for entry in st.recent_files.values():
             # 文件内容随旧记录一起压成了摘要，被问到时要能重新读
             entry.read_turns = {k: v for k, v in entry.read_turns.items() if v > last_removed}
@@ -4703,8 +5742,6 @@ class Engine:
         # 附过人设卡的那条记录压掉了：那个人下次说话时再附一次
         st.cards_shown = {uid: v for uid, v in st.cards_shown.items() if v[0] > last_removed}
         st.dm_memory_shown = {uid: v for uid, v in st.dm_memory_shown.items() if v[0] > last_removed}
-        if last_music_line(conv.turns) is None:
-            st.music_seen = None  # “正在放什么”那句压掉了：下次被叫到时再写一次
         log.info("频道 %s：已把 %d 条旧记录压成摘要", st.channel_id, remove)
 
     @staticmethod
@@ -4729,10 +5766,31 @@ class Engine:
     # ------------------------------------------------------------------ 给命令用
 
     def reset_channel(self, channel_id: int) -> None:
+        """清空这个频道的记忆。连通的频道（或者以前连通过、组里还留着它说过的话）：组的记录里只删它那部分，见 _reset_linked；
+        要等正在跑的那一轮的话用 reset_linked。"""
+        self._drop_cleared(channel_id)
+        for orphan in [o for o in self._orphans if self._holds_origin(o, channel_id)]:
+            # 散掉的组留下的、还在整理的那几批里有这个频道压掉的聊天：不整理了（清空以后别再记进人设卡、长期记忆），别的频道的
+            # 接着整理（正在问的那一段问完会作废：换了 generation）
+            fresh = ConvState(orphan.key, 0, next(self._generations))
+            fresh.deleted, fresh.msg_by_sid = orphan.deleted, orphan.msg_by_sid
+            jobs = self._salvage_jobs(orphan, fresh, drop=channel_id)
+            orphan.generation = next(self._generations)
+            self._orphans = [o for o in self._orphans if o is not orphan]
+            self._start_jobs(fresh, jobs)
+            if fresh.reviewing:
+                self._orphans.append(fresh)
+        sync = self.store.sync_of(channel_id)
+        past = [s for s in self.store.origin_syncs(channel_id) if s != sync]
+        for group in past:
+            self._drop_from_group(channel_id, group, member=False)  # 断开以后，连通期间说的还留在那个组的记录里
+        if sync is not None:
+            self._reset_linked(channel_id, sync)
+            return
         self.store.reset_conversation(channel_id)
         st = self.states.get(channel_id)
         if st is not None:
-            st.generation += 1
+            st.generation = next(self._generations)
             st.conversation = None
             for entry in st.recent_files.values():
                 entry.read_turns.clear()  # 读过的内容随记忆一起清掉了
@@ -4746,10 +5804,19 @@ class Engine:
             st.dm_memory_shown.clear()
             st.unreviewed_rounds = 0  # 清空的记录不再整理
             st.review_jobs.clear()  # 排着队的是清空前的原话：不整理了（正在问的那一段问完会自己作废）
+            st.conv.review_parked.clear()
             st.review_held = 0
             st.edit_notes.clear()  # 旧消息被编辑的那几句：记录都清了，别带进新的对话
             st.fixes.clear()
             st.music_seen = None  # 告诉过它在放什么的那句也清掉了
+            st.conv.unvetted.clear()  # 记录清空了（库里记着的 reset_conversation 一起删了）
+            st.conv.unvetted_edits.clear()
+        elif (old := self.convs.get(channel_id)) is not None:
+            # 还没有这个频道的状态（刚断开连通、重启以后还没人说过话）：它那份记录在内存里的也换成新的，不然下次有人说话时，
+            # 接着用的还是清空前载入的那份
+            old.generation = next(self._generations)
+            old.conversation = None
+            self.convs[channel_id] = ConvState(channel_id, old.guild_id, next(self._generations), lock=old.lock)
         for key, log_ in list(self.interactions.items()):
             # 清空了这个频道的记忆，别的频道也不该再“想起”这里聊过的事
             kept = [item for item in log_ if item.channel_id != channel_id]
@@ -4758,13 +5825,622 @@ class Engine:
             else:
                 del self.interactions[key]
 
+    async def reset_linked(self, channel_id: int, timeout: float = 60.0) -> None:
+        """清空记忆，先等用这几份记录的频道正在跑的那一轮跑完（连通的频道：别的频道正在回的话不会被打断、作废）。
+        等太久抛 TimeoutError，什么都不改。"""
+        async with self.sync_guard([channel_id], timeout, extra=lambda: self.store.origin_syncs(channel_id)):
+            self.reset_channel(channel_id)
+
+    def _reset_linked(self, channel_id: int, sync: int) -> None:
+        """连通的频道清空记忆：共用记录里这个频道的那部分（连同共用的摘要）删掉，它自己原来那份也清空；别的频道说的不动。"""
+        self._drop_from_group(channel_id, sync)
+        self.store.reset_conversation(channel_id)
+        own = self.convs.get(channel_id)
+        if own is not None:
+            own.generation = next(self._generations)  # 正在整理它原来那份的那一段作废（清空了）
+            own.conversation = None  # 还拿着它的别照着内存里清空前的记录做
+            self.convs[channel_id] = ConvState(channel_id, own.guild_id, next(self._generations), lock=own.lock)
+        st = self.states.get(channel_id)
+        if st is not None:
+            st.conv_seen = None
+            st.listed = None
+            st.music_seen = None  # 告诉过它在放什么的那句也清掉了
+        for key, log_ in list(self.interactions.items()):
+            kept = [item for item in log_ if item.channel_id != channel_id]
+            if kept:
+                self.interactions[key] = deque(kept, maxlen=INTERACTIONS_PER_PERSON)
+            else:
+                del self.interactions[key]
+        log.info("频道 %s：清空了它在连通组 %s 里的记录", channel_id, sync)
+
+    def _drop_from_group(self, channel_id: int, sync: int, *, member: bool = True) -> None:
+        """连通组的记录里删掉这个频道说过的那部分（连同共用的摘要：里面分不开；以前在组里的频道——member 不是真的——只在它说的
+        压进过那份摘要时才连同摘要删）。那份记录换成新的状态从数据库重新读：
+        正在跑的那一轮作废（reset_linked 会先等它们跑完）。别的频道的照旧：还没改进去的删改、还没附上的“改成了什么”、
+        压缩前挑出来还没整理完的（接着整理）。"""
+        self.store.drop_origin(sync, channel_id, member=member)
+        old = self.convs.get(sync)
+        fresh = ConvState(sync, 0, next(self._generations))
+        jobs: list[_ReviewJob] = []
+        if old is not None:
+            fresh.lock = old.lock  # 等着旧的那份锁的（连通、断开、清空、排着的一轮），等的就是新的这份
+            # 还记着的删除、别的频道的文件链接、这批里已经整理过的接着用；这个频道读过的内容随记录一起清掉了
+            fresh.deleted = old.deleted
+            fresh.review_done = set(old.review_done)
+            fresh.unreviewed_rounds = old.unreviewed_rounds  # 别的频道还没整理的照样要整理
+            fresh.fixes = {mid: m for mid, m in old.fixes.items() if m is None or m.channel_id != channel_id}
+            fresh.hides = {mid for mid in old.hides if mid in fresh.fixes}
+            fresh.edit_notes = {mid: v for mid, v in old.edit_notes.items() if v[1].channel_id != channel_id}
+            remaining = self.store.turn_ids(sync)
+            fresh.unvetted = [t for t in old.unvetted if t in remaining]  # 别的频道补进来、还没问过模型的（这个频道的删了）
+            fresh.unvetted_edits = set(old.unvetted_edits)
+            for mid, entry in old.recent_files.items():
+                if entry.message.channel_id == channel_id:
+                    entry.read_turns.clear()
+                    entry.failed.clear()
+                else:
+                    # 别的频道的文件在这个频道的那几轮里读过的：那几条删掉了，被问到时要能重新读
+                    entry.read_turns = {k: v for k, v in entry.read_turns.items() if v in remaining}
+                fresh.recent_files[mid] = entry
+            for mid, link_entry in old.recent_links.items():
+                if link_entry.message.channel_id == channel_id:
+                    link_entry.read_turns.clear()
+                    link_entry.failed.clear()
+                else:
+                    link_entry.read_turns = {k: v for k, v in link_entry.read_turns.items() if v in remaining}
+                fresh.recent_links[mid] = link_entry
+            jobs = self._salvage_jobs(old, fresh, drop=channel_id)  # 别的频道的那几段接着整理（这个频道的不整理了）
+            old.generation = next(self._generations)
+            old.conversation = None  # 还拿着它的（等锁的整理、改删）别照着内存里清空前的记录做
+            old.fixes = {}
+        else:
+            # 重启以后还没载入过这份记录：库里记着的、还没问过模型的接着用（这个频道的删了）
+            listed, fresh.unvetted_edits = self.store.load_unvetted(sync)
+            remaining = self.store.turn_ids(sync)
+            fresh.unvetted = [t for t in listed if t in remaining]
+        self._keep_unvetted(fresh)
+        self.convs[sync] = fresh
+        for st in self.states.values():
+            if old is not None and st.conv is old:
+                st.conv = fresh
+                st.conv_seen = None
+        if fresh.fixes:
+            fixes, fresh.fixes, hides = fresh.fixes, {}, set(fresh.hides)
+            for mid, updated in fixes.items():
+                self._queue_fix_on(fresh, mid, updated, hide=mid in hides)
+        if jobs:
+            self._load(fresh)  # 整理时要认得出哪条被删掉了
+            self._start_jobs(fresh, jobs)
+
+    def _drop_cleared(self, channel_id: int) -> None:
+        """清空记忆：每份记录（散掉的组留下的也算）排着队的、正在整理的那几批里这个频道的那几段都不整理了，正在问的问完也不
+        照着改。不靠组的摘要记着谁：别的频道清空时摘要整个删了，那几批里它的聊天还在。"""
+        for cs in [*self.convs.values(), *self._orphans]:
+            jobs = [*cs.review_parked, *([cs.review_current] if cs.review_current is not None else []), *cs.review_jobs]
+            for job in jobs:
+                for chunk in job.plan.chunks:
+                    if chunk.origin == channel_id:
+                        chunk.dropped = True
+            if cs.review_asking is not None and cs.review_asking.origin == channel_id:
+                cs.review_asking.dropped = True
+
+    @staticmethod
+    def _holds_origin(cs: ConvState, channel_id: int) -> bool:
+        """这份状态排着队的（和正在整理的）压缩前挑出来的那几批里，有没有这个频道的。"""
+        jobs = ([cs.review_current] if cs.review_current is not None else []) + list(cs.review_jobs)
+        return any(chunk.origin == channel_id for job in jobs for chunk in job.plan.chunks)
+
+    def _salvage_jobs(self, old: ConvState, target: ConvState, drop: int | None) -> list[_ReviewJob]:
+        """old 这份记录排着队的（和正在整理的）压缩前挑出来的那几批，连同频道自己那份安静时整理正在问的那一段里压掉了的那几条
+        （见 _park_asking）：原话已经不在记录里了，不整理就没了。去掉 drop 这个频道的、已经整理过的那几段，改成 target 的接着整理
+        （old 正在问的那一段问完会作废：换了 generation）。"""
+        pending = [*old.review_parked, *([old.review_current] if old.review_current is not None else []), *old.review_jobs]
+        old.review_jobs.clear()
+        old.review_parked = []
+        out: list[_ReviewJob] = []
+        for job in pending:
+            if job.generation != old.generation:
+                continue  # 排队的时候就清空过：早就不整理了
+            # 整理过的那几段每段自己记着（整理进度可能因为别的原因记过了它，它却还没整理过）
+            chunks = [c for c in job.plan.chunks if (drop is None or c.origin != drop) and not self._reviewed_already(c)]
+            if chunks:
+                out.append(_ReviewJob(job.conv, job.info, replace(job.plan, chunks=chunks), target.generation, job.frozen))
+        return out
+
+    def _start_jobs(self, target: ConvState, jobs: list[_ReviewJob]) -> None:
+        """接过来的那几批排进 target 的队里，在后台整理。"""
+        if not jobs or self.closing:
+            return
+        target.review_jobs.extend(jobs)
+        if target.reviewing:
+            return  # 它整理完手上的会接着整理这几批
+        target.reviewing = True
+        task = asyncio.get_running_loop().create_task(self._compact_review(target))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    @contextlib.asynccontextmanager
+    async def sync_guard(
+        self, channels: Iterable[int], timeout: float = 60.0, extra: Iterable[int] | Callable[[], Iterable[int]] = ()
+    ) -> Any:
+        """连通、断开、清空之前：等这几个频道正在跑的一轮跑完（拿着它们现在用的记录的锁：它们自己那份、它们现在在的组的那份，
+        组里别的频道自己那份也算），没写进去的删改先写进去，免得记录换到一半。extra：另外要等的记录（可以是函数，每次照现在的
+        算）。等的时候频道连通、断开了（用的记录变了）：放开，照现在的重新等。等太久（一直有人在叫它）抛 TimeoutError，
+        什么都不改。"""
+        channels = list(channels)
+
+        def wanted() -> list[int]:
+            chans = set(channels)
+            for c in channels:
+                sync = self.store.sync_of(c)
+                if sync is not None:
+                    chans.update(self.store.sync_members(sync))  # 等的时候连进来的：断开、散组时它那份也要换
+            more = extra() if callable(extra) else extra
+            return sorted({key for c in chans for key in (c, self.store.conversation_key(c))} | set(more))
+
+        held: list[asyncio.Lock] = []
+        keys = wanted()
+        try:
+            for _ in range(SYNC_GUARD_TRIES):
+                for key in keys:
+                    cs = self.convs.get(key)
+                    if cs is None:
+                        # 等的时候才有人说话的频道也要等：先建好，它那一轮就会排在这把锁后面
+                        place = self.transport.locate(key) if key > 0 else None
+                        cs = self._conv_state(key, place.guild_id if place is not None else 0)
+                    if any(cs.lock is lock for lock in held):
+                        continue
+                    await asyncio.wait_for(cs.lock.acquire(), timeout)
+                    held.append(cs.lock)
+                if wanted() == keys and all(
+                    (cs := self.convs.get(key)) is None or any(cs.lock is lock for lock in held) for key in keys
+                ):
+                    break
+                # 等的时候频道连通、断开了：放开，照现在的重新按顺序等（一直拿着再去等别的锁，会和别的命令互相等着）
+                for lock in reversed(held):
+                    lock.release()
+                held = []
+                keys = wanted()
+            else:
+                raise asyncio.TimeoutError
+            for key in keys:
+                cs = self.convs.get(key)
+                if cs is not None and cs.fixes:
+                    self._flush_fixes(cs, self._load(cs))  # 现在用的那份（等的时候被换掉的那份，要改的已经交过来了）
+            yield
+        finally:
+            for lock in reversed(held):
+                lock.release()
+            # 等的时候有人叫它、那一轮排不上（锁被占着）：现在轮到它了（不等下一次定时检查）
+            involved = set(channels) | set(keys)
+            for st in list(self.states.values()):
+                if (st.channel_id in involved or st.conv.key in involved) and st.mention_due and st.pending and not st.scheduled:
+                    self._wake(st)
+
+    def sync_changed(self, channels: Iterable[int], *, dissolved: int | None = None) -> None:
+        """连通、断开以后（channels：这次连进来的、断开的频道；调用方还拿着 sync_guard）：每个频道改用现在的那份记录。
+        - 连进来的：改用共用的那份；它自己原来那份留着（只同步删改、给它自己看个大概），还没整理过的聊天排队整理掉
+          （以后不往里写，平时的整理也不会再轮到它）。
+        - 断开的：自己原来那份后面接上了它在共用记录里的那部分：换成新的状态从数据库重新读。
+        - 散掉的组（dissolved）：共用的那份没了（压缩前挑出来、还没整理完的那几批照样整理完）。
+        - 组里的频道不全在同一个服务器了：共用的记录里只有原来那个服务器能看的东西拿掉（见 scrub_cross）。
+        读过的文件、链接、刚删掉的消息、还没附上的“改成了什么”跟着频道走。返回拿掉了几条记录里的内容。"""
+        old_shared = self.convs.pop(dissolved, None) if dissolved is not None else None
+        touched: list[int] = []
+        joined_by: dict[int, list[int]] = {}  # 每个组这次连进来的频道
+        for cid in dict.fromkeys(channels):
+            key = self.store.conversation_key(cid)
+            st = self.states.get(cid)
+            before = st.conv if st is not None else None
+            if key == cid:
+                old = self.convs.get(cid)
+                guild = st.guild_id if st is not None else (old.guild_id if old is not None else 0)
+                fresh = ConvState(cid, guild, next(self._generations), lock=old.lock if old is not None else asyncio.Lock())
+                if old is not None:
+                    # 连通时记进它自己那份、还没问过模型的那几轮：编号不变（拿回来的只是接在后面），断开以后的请求过了才算数
+                    fresh.unvetted = list(old.unvetted)
+                else:
+                    fresh.unvetted = self.store.load_unvetted(cid)[0]  # 重启以后还没载入过它那份：库里记着的
+                # 共用的那份在前：连通期间删掉、改掉的以它为准（文件、链接连的时候已经从它自己那份搬过去了）
+                sources: list[ConvState] = []
+                for source in (before, old_shared, old):
+                    if source is not None and all(source is not s for s in sources):
+                        sources.append(source)
+                gone = {mid for source in sources for mid in source.deleted}
+                for source in sources:
+                    self._carry(source, fresh, cid, skip=gone)
+                for shared in [c for c in self.convs.values() if c.key < 0] + ([old_shared] if old_shared is not None else []):
+                    mine = [m for m, (_, upd) in shared.edit_notes.items() if upd.channel_id == cid]
+                    for mid in mine:
+                        # 很早的消息被改了、还没来得及告诉它的那句：拿回去的记录里编号照旧，跟着它走
+                        note = fresh.edit_notes[mid] = shared.edit_notes.pop(mid)
+                        if shared is not old_shared:
+                            shared.fixes.setdefault(mid, note[1])  # 组里的记录：它不会再在那边说话了，直接改进去
+                    if mine and shared is not old_shared:
+                        self._flush_fixes(shared, self._load(shared))
+                own_jobs: list[_ReviewJob] = []
+                if old is not None:
+                    # 它自己那份压缩前挑出来、还没整理完的（连进来之前就在整理了）：原话已经不在记录里，交给新的这份接着整理
+                    # （连的时候挑出来的那批不用：那些还在记录里，新的这份照常整理）
+                    own_jobs = [job for job in self._salvage_jobs(old, fresh, drop=None) if not job.frozen]
+                    old.generation = next(self._generations)
+                self.convs[cid] = fresh
+                conv = self._load(fresh)
+                if old is not None and old.hidden_edits:
+                    # 暂停（变成私密的、被关掉了）时改过的、组里那份当成删了的消息：拿回来的那一行照改过的写（只有它自己看）
+                    for mid, later in old.hidden_edits.items():
+                        if mid not in gone:
+                            fresh.fixes.setdefault(mid, later)
+                    old.hidden_edits = {}
+                    self._flush_fixes(fresh, conv)
+                # 拿回来的、连通之前没整理完的：照样要整理（不用等它再聊几轮）
+                fresh.unreviewed_rounds = sum(
+                    1 for t in conv.turns if t.role == "user" and t.id > conv.reviewed_upto and t.id not in fresh.review_done
+                )
+                self._start_jobs(fresh, own_jobs)
+                target = fresh
+            else:
+                if key not in touched:
+                    touched.append(key)
+                joined_by.setdefault(key, []).append(cid)
+                target = self._conv_state(key, 0)
+                target.review_bad_by.pop(cid, None)  # 退出又连回来的：以前那次连着失败的次数不算
+                if st is not None and st.pending and before is not None and before.key == cid:
+                    self._settle_before_link(st)  # 连通之前攒着、还没进记录的：记进它自己那份（不进共用的）
+                if target.conversation is not None:
+                    # 连的时候库里的编号往后挪过（接在连进来的频道自己用过的后面）：内存里的跟上，免得同一个编号用两次
+                    target.conversation.next_short_id = max(target.conversation.next_short_id, self.store.next_short_id(key))
+                own = self.convs.get(cid)
+                if own is not None and own.edit_notes:
+                    # 很早的消息被改了、还没附上的那句：它自己那份以后不往后写了，直接改进去（连通之前的概要照改过的写）
+                    notes, own.edit_notes = own.edit_notes, {}
+                    for mid, (_, updated) in notes.items():
+                        own.fixes.setdefault(mid, updated)
+                    self._flush_fixes(own, self._load(own))
+                for source in (own, before):
+                    if source is not None and source is not target:
+                        self._carry(source, target, cid, move=True)
+                self._review_frozen(cid)
+            if st is not None:
+                st.conv = target
+                st.conv_seen = None
+                st.listed = None
+                st.music_seen = None
+        if old_shared is not None:
+            # 组散了：压缩前挑出来、还没整理完的那几批照样整理完（各记进那个频道的服务器，用不着共用的记录）
+            orphan = ConvState(old_shared.key, 0, next(self._generations))
+            orphan.deleted, orphan.msg_by_sid = old_shared.deleted, old_shared.msg_by_sid
+            jobs = self._salvage_jobs(old_shared, orphan, drop=None)
+            old_shared.generation = next(self._generations)
+            self._start_jobs(orphan, jobs)
+            if orphan.reviewing:
+                self._orphans.append(orphan)
+        scrubbed = 0
+        for key in touched:
+            try:
+                scrubbed += self.scrub_cross(key)
+            except Exception:
+                log.exception("连通组 %s：跨服务器了，拿掉只有原来那边能看的内容时出错（下次启动再查）", key)
+            try:
+                scrubbed += self._scrub_crossed(key, joined_by.get(key, []))  # 还在一个服务器组里，连进来的服务器没开“跨服务器”
+            except Exception:
+                log.exception("连通组 %s：拿掉从服务器组外带来的近况时出错", key)
+            try:
+                self.scrub_outsiders(key)  # 断开了的频道的服务器已经不在组里了：新来的频道不该看那边才能看的（退组时没查成的）
+            except Exception:
+                log.exception("连通组 %s：拿掉断开了的频道那边才能看的内容时出错", key)
+            try:
+                self._label_music(key)  # 开始跨好几个服务器了：之前写的“在放什么”写明是哪个服务器的
+            except Exception:
+                log.exception("连通组 %s：给之前写的“在放什么”补上服务器时出错", key)
+        return scrubbed
+
+    def _label_music(self, sync_id: int) -> int:
+        """连通组的频道开始跨好几个服务器了（跨服务器的、服务器组里的都算）：之前写进共用记录的“语音频道在放什么”
+        写明是哪个服务器的（当时只有一个服务器，没写；别的服务器的频道看到了会当成自己那边的）。返回改了几条。"""
+        if len(self._guilds_of(self.store.sync_members(sync_id))) < 2:
+            return 0
+        cs = self.convs.get(sync_id)
+        loaded = {t.id: t for t in cs.conversation.turns} if cs is not None and cs.conversation is not None else {}
+        servers: dict[int, str | None] = {}
+        updates: dict[int, Any] = {}
+        for turn_id, role, content, origin in self.store.record_turns(sync_id):
+            if role != "user" or origin is None:
+                continue
+            if origin not in servers:
+                guilds = self._guilds_of([origin])
+                servers[origin] = self._server_label(next(iter(guilds))) if guilds else None
+            server = servers[origin]
+            if server is None:
+                continue  # 那个频道找不到了
+            new = label_music(content, server)
+            if new != content:
+                updates[turn_id] = new
+        self._rewrite_turns(updates, loaded)
+        if updates and cs is not None:
+            for st in self._members(cs):
+                st.conv_seen = None  # “正在放什么”照改过的重新认
+        return len(updates)
+
+    def _rewrite_turns(self, updates: dict[int, Any], loaded: dict[int, Turn]) -> None:
+        """改写几条记录：库里一次改完（一个事务），已经载入的那份跟着改。"""
+        if not updates:
+            return
+        self.store.update_turns(updates.items())
+        for turn_id, content in updates.items():
+            if turn_id in loaded:
+                loaded[turn_id].content = content
+
+    @staticmethod
+    def _without_actions(content: Any, kinds: set[str]) -> str | None:
+        """它的一条回话去掉这几种动作（规范地重写一遍，和 _drop_from_record 一样）；认不出、没有这几种是 None。"""
+        raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        actions, ok = parse_actions(raw)
+        if not ok:
+            return None
+        kept = [a for a in actions if a.kind not in kinds]
+        if len(kept) == len(actions) and not mentions_kinds(raw, kinds):
+            return None  # 原话里也没写这几种（写错了没认出来的也算写了：整条按认出来的重写，那些就没了）
+        new = dump_actions(kept)
+        return None if new == raw else new
+
+    def scrub_cross(self, sync_id: int, *, lookups: bool = False, whole: bool = False) -> int:
+        """连通组跨服务器了（连进来别的服务器的频道、组里的服务器退出了服务器组）：共用的记录里只有原来那个服务器（组）
+        能看的东西拿掉——别的频道带来的近况、能翻记录的频道名单、翻到的记录、按名字查到的人设卡，人设卡不是所有服务器共用
+        的话附着的卡也拿掉（写进去的时候还不跨服务器；跨服务器的连通本来就不放这些）。它自己的回话里也一样：人设卡不是所有
+        服务器共用的话，它写过的卡（card 动作里是整张卡）拿掉；结果拿掉了的那几步，前面那条回话里的“翻记录”“查人设卡”
+        动作也拿掉（里面写着频道名、找的是什么）。和群友删消息一样直接改记录。跨服务器的连通自己会写的都不动：再查一遍
+        不会改记录。不跨服务器就什么都不做。返回改了几条记录。lookups：刚跑完的那一轮问模型的时候组还没变成跨服务器
+        （见 groups_changed）：它要翻记录、查人设卡的动作也拿掉。whole：组里的频道还在一个服务器组里，可是组里原来有的服务器
+        退出了服务器组：不跨服务器也照样整份查一遍（只在那个时候查一次）。"""
+        if not whole and not self.channels_cross(self.store.sync_members(sync_id)):
+            return 0
+        keep_cards = self._cards_shared()
+        cs = self.convs.get(sync_id)
+        loaded = {t.id: t for t in cs.conversation.turns} if cs is not None and cs.conversation is not None else {}
+        rows = self.store.record_turns(sync_id)
+        updates: dict[int, Any] = {}
+        for turn_id, role, content, _ in rows:
+            if role == "user":
+                new = drop_local(content, keep_cards=keep_cards)
+                if new != content:
+                    updates[turn_id] = new
+        # 记录里有只该原来那边看的（刚拿掉了）：那段时间它要翻记录、查人设卡的动作也都拿掉（动作里写着频道名、找的是什么；
+        # 查到的拿掉了，没查成的也一样）。跨服务器以后的那些动作当时就被拒了，留着不碍事，这一次一并拿掉；以后再查，没什么
+        # 要拿的就不碰它们。人设卡各服务器分开时，它写过的卡（card 动作里是整张卡）每次都拿：跨服务器的连通里写卡的动作
+        # 当时就从记录里拿掉了，不会一次次改记录
+        kinds = {"memory"} | (set() if keep_cards else {"card"}) | ({"recall", "who"} if updates or lookups else set())
+        if kinds:
+            for turn_id, role, content, _ in rows:
+                if role == "assistant":
+                    new = self._without_actions(content, kinds)
+                    if new is not None:
+                        updates[turn_id] = new
+        self._rewrite_turns(updates, loaded)
+        changed = len(updates)
+        if changed:
+            if cs is not None:
+                cs.cards_shown.clear()  # 附着的、查到的卡拿掉了：照现在能附的重新附
+                cs.digest_seen.clear()
+                for st in self._members(cs):
+                    st.listed = None
+            log.info("连通组 %s 跨服务器了：共用的记录里有 %d 条拿掉了只有原来那个服务器能看的内容", sync_id, changed)
+        return changed
+
+    def _scrub_crossed(self, sync_id: int, joined: Iterable[int]) -> int:
+        """连通组的频道还在一个服务器（组）里，连进来的频道（joined）带来了组里原来没有、又没开“跨服务器”的服务器：共用的记录里
+        写着是哪个服务器的近况都拿掉（组外的只有都开了“跨服务器”时才会带进来，没开的那边平时看不到；写下来的服务器名分不出当时
+        是组里还是组外的——同名、改过名、bot 退出了那个服务器——组里的也一起拿掉，只是少了点背景）。原来就在组里的服务器看过的，
+        它自己后来关掉了“跨服务器”也照旧留着。返回改了几条记录。"""
+        members = self.store.sync_members(sync_id)
+        joined = list(joined)
+        guilds = self._guilds_of(members)
+        if not guilds or self.channels_cross(members) or not self.brings_cross_off([c for c in members if c not in joined], joined):
+            return 0
+        cs = self.convs.get(sync_id)
+        loaded = {t.id: t for t in cs.conversation.turns} if cs is not None and cs.conversation is not None else {}
+        updates: dict[int, Any] = {}
+        for turn_id, role, content, _ in self.store.record_turns(sync_id):
+            if role == "user":
+                new = drop_recents(content)
+                if new != content:
+                    updates[turn_id] = new
+        self._rewrite_turns(updates, loaded)
+        if updates:
+            log.info("连通组 %s：有服务器没开“跨服务器”，共用的记录里有 %d 条拿掉了从服务器组外带来的近况", sync_id, len(updates))
+        return len(updates)
+
+    def scrub_outsiders(self, sync_id: int) -> int:
+        """连通组还在一个服务器（组）里，记录里留着已经断开的频道说过的话，它的服务器现在不在这个组里了（退出了服务器组）：它那几轮
+        里只有它那个服务器能看的东西拿掉，和组变成跨服务器时一样（见 scrub_cross：别的频道带来的近况、能翻的频道名单、翻到的记录、
+        按名字查到的人设卡，人设卡各服务器一张时连同附着的卡；它的回话里写卡、改长期记忆、翻记录、查人设卡的动作）。它不会再往
+        这份记录里写，查一次就够（退组时、有频道连进来时、启动时都会查）。返回改了几条记录。"""
+        members = self.store.sync_members(sync_id)
+        guilds = self._guilds_of(members)
+        if not guilds or self.channels_cross(members):
+            return 0  # 跨服务器的组：scrub_cross 整份都查
+        group = set(self._group_guilds(min(guilds)))
+        rows = self.store.record_turns(sync_id)
+        origins = {origin for _, _, _, origin in rows if origin is not None and origin not in members}
+        outside = {o for o in origins if not (self._place_former(o) & group)}
+        if not outside:
+            return 0
+        keep_cards = self._cards_shared()
+        kinds = {"memory", "recall", "who"} | (set() if keep_cards else {"card"})
+        cs = self.convs.get(sync_id)
+        loaded = {t.id: t for t in cs.conversation.turns} if cs is not None and cs.conversation is not None else {}
+        updates: dict[int, Any] = {}
+        for turn_id, role, content, origin in rows:
+            if origin not in outside:
+                continue
+            new = drop_local(content, keep_cards=keep_cards) if role == "user" else self._without_actions(content, kinds)
+            if new is not None and new != content:
+                updates[turn_id] = new
+        self._rewrite_turns(updates, loaded)
+        if updates:
+            if cs is not None:
+                cs.cards_shown.clear()
+                for st in self._members(cs):
+                    st.listed = None
+            log.info("连通组 %s：断开了的频道的服务器不在组里了，它那几轮里有 %d 条拿掉了只有那边能看的内容", sync_id, len(updates))
+        return len(updates)
+
+    def _place_former(self, channel_id: int) -> set[int]:
+        """断开了的频道在哪个服务器：找得到的照现在的；找不到（还没连上 Discord、频道删了、bot 退出了那个服务器）照它自己那份记录
+        记下的；都没有是空的（当成组外的）。"""
+        guilds = self._guilds_of([channel_id])
+        if guilds:
+            return guilds
+        guild = self.store.record_guild(channel_id)
+        return {guild} if guild is not None else set()
+
+    def _scrub_now(self, cs: ConvState) -> None:
+        """这一轮跑的时候组变成跨服务器了（服务器退出了服务器组）：还拿着锁，照现在的组把写进去的再查一遍（排在后面等锁的
+        轮次就看不到了）。"""
+        lookups, whole = cs.scrub_lookups, cs.scrub_whole
+        cs.scrub_due, cs.scrub_lookups, cs.scrub_whole = False, False, False
+        try:
+            stored = self.store.pending_scrub(cs.key)
+            if stored is not None:
+                # 库里还记着以前哪一轮写完以后要查、没查成的（出错了）：一起查（下面划掉了就再也不查了）
+                lookups, whole = lookups or stored[0], whole or stored[1]
+            self.scrub_cross(cs.key, lookups=lookups, whole=whole)
+            self.store.clear_scrub(cs.key)  # 查过了（出错的话库里还记着：下次启动时再查）
+        except Exception:
+            log.exception("连通组 %s：这一轮跑完以后拿掉只有原来那边能看的内容时出错", cs.key)
+
+    @staticmethod
+    def _carry(
+        source: ConvState, target: ConvState, channel_id: int, *, move: bool = False, skip: set[int] | frozenset[int] = frozenset()
+    ) -> None:
+        """这个频道的消息带着的文件、链接（读过的记成没读过：内容在原来那份记录里）和刚删掉的消息，搬到它现在用的那份。
+        move：原来那份里的拿走（连进来时：它自己那份以后不用了；断开时只以共用的那份为准，连通期间删掉、改掉的不会又冒出来）；
+        不拿走的话给 target 另外一份（原来那份还要接着用：读过没读过各记各的）。skip：刚删掉的消息（不带过去）。"""
+        for mid, entry in list(source.recent_files.items()):
+            if entry.message.channel_id != channel_id:
+                continue
+            if mid not in target.recent_files and mid not in skip:
+                if move:
+                    entry.read_turns.clear()
+                    target.recent_files[mid] = entry
+                else:
+                    target.recent_files[mid] = FileEntry(entry.message, failed=set(entry.failed))
+            if move:
+                del source.recent_files[mid]
+        for mid, link_entry in list(source.recent_links.items()):
+            if link_entry.message.channel_id != channel_id:
+                continue
+            if mid not in target.recent_links and mid not in skip:
+                if move:
+                    link_entry.read_turns.clear()
+                    target.recent_links[mid] = link_entry
+                else:
+                    target.recent_links[mid] = LinkEntry(
+                        link_entry.message, failed=set(link_entry.failed), titles=dict(link_entry.titles)
+                    )
+            if move:
+                del source.recent_links[mid]
+        for mid in source.deleted:
+            target.deleted.setdefault(mid, None)
+        while len(target.deleted) > DELETED_KEEP:
+            del target.deleted[next(iter(target.deleted))]
+
+    def _settle_before_link(self, st: ChannelState) -> None:
+        """刚连进来的频道（调用方拿着 sync_guard，st.conv 还是它自己那份）：缓冲区里连通之前的闲聊记进它自己那份记录，
+        当成它看过、没说话；不进共用的记录（连通之前的聊天不给别的频道看）。叫它的那几条留着，连通以后照常回。"""
+        quiet = [m for m in st.pending if not m.trigger]  # 叫它的那几条留着（连通以后回），别的都是连通之前的闲聊
+        if not quiet:
+            return
+        now = self.clock()
+        take = [m for m in quiet if m.message_id not in st.deleted]
+        if take:
+            conv = self._conversation(st)
+            shown = take[-max(1, self.ec.max_batch_messages) :]
+            numbered = self._number(st, conv, shown)
+            content = render_round(
+                numbered,
+                sid_by_msg=st.sid_by_msg,
+                kind="proactive",
+                targets=[],
+                now=now,
+                tz=self.tz,
+                omitted=st.omitted + len(take) - len(shown),
+                max_chars=self.ec.max_chars_per_message,
+            )
+            assigned = [(sid, m.message_id, None if m.is_bot else m.author_id, m.author_name) for sid, m in numbered]
+            self.store.append_round(conv, content, PASSIVE_REPLY, assigned, now=now)
+            st.conv.unvetted.append(conv.turns[-2].id)  # 没问过模型：连通以后带着它（连通之前的概要）的请求过了才算数
+            self._keep_unvetted(st.conv)
+            st.unreviewed_rounds += 1
+            # 连的时候按它自己那份原来的编号记下了从哪接着编：用掉了几个，跟着往后挪
+            self.store.raise_join_marks(st.channel_id, conv.next_short_id)
+        self._take_pending(st, quiet)
+
+    def _review_frozen(self, channel_id: int) -> None:
+        """连通的频道：它自己原来那份里还没整理过的聊天，排队整理掉（以后不往里写，平时的整理轮不到它）。连进来时整理一次；
+        没整理成的（暂时出错、预算用完了）不记成整理过，组里整理记忆时再试。"""
+        if self.cards is None and self.memory is None:
+            return
+        try:
+            own = self.convs.get(channel_id)
+            if own is None:
+                place = self.transport.locate(channel_id)
+                if place is None:
+                    return
+                own = self._conv_state(channel_id, place.guild_id)
+            if own.reviewing:
+                return  # 正在整理它这份（上次排的还没整理完）
+            conv = self._load(own)
+            if not conv.turns or conv.reviewed_upto >= conv.turns[-1].id:
+                return
+            self._review_before_compact(
+                own, conv, self.transport.channel_info(channel_id), conv.turns[-1].id, own.generation, frozen=True
+            )
+        except Exception:
+            log.exception("频道 %s：连通前整理记忆出错", channel_id)
+
     def groups_changed(self, guilds: Iterable[int], *, left: bool) -> None:
         """服务器组变了（guilds：组里原来的、加进来的、退出的服务器）。人设卡、长期记忆、翻记录、近况每次都按现在的组算，
         不用另外处理；退出了（组散了）的话，频道里附过的私信记忆里现在不能带的撤回：附的时候是按原来的组算的（私信挂在
-        组里别的服务器），现在不一定还能带。还能带的不动（免得整个组的频道记录都改一遍、缓存全失效）。"""
+        组里别的服务器），现在不一定还能带。还能带的不动（免得整个组的频道记录都改一遍、缓存全失效）。和组里别的服务器的频道
+        连通的连通组也跨服务器了：共用的记录里只有原来那边能看的拿掉（scrub_cross）。"""
         if not left:
             return
-        for guild_id in dict.fromkeys(guilds):
+        affected = list(dict.fromkeys(guilds))
+        for sync_id, members in self.store.syncs().items():
+            member_guilds = self._guilds_of(members)
+            if member_guilds & set(affected):
+                changed = 0
+                # 组里的频道还在一个服务器组里，可是组里原来有的服务器退出了：记录里那个服务器才能看的（附着、查到的人设卡，翻到的
+                # 记录，近况……组里的频道那几轮里也有）分不出是哪个服务器的，整份记录照变成跨服务器时那样查一遍
+                departed = not self.channels_cross(members) and bool(
+                    set(affected) - set(self._group_guilds(min(member_guilds))) - member_guilds
+                )
+                try:
+                    changed = self.scrub_cross(sync_id, whole=departed)  # 和组里别的服务器的频道连通的：现在跨服务器了
+                except Exception:
+                    log.exception("连通组 %s：服务器退出服务器组以后，拿掉只有原来那边能看的内容时出错", sync_id)
+                try:
+                    self.scrub_outsiders(sync_id)  # 还在一个组里，但记录里断开了的频道是退出的那个服务器的
+                except Exception:
+                    log.exception("连通组 %s：服务器退出服务器组以后，拿掉断开了的频道那边才能看的内容时出错", sync_id)
+                cs = self.convs.get(sync_id)
+                if cs is not None and any(st.inflight for st in self._members(cs)):
+                    # 正在跑的那一轮（按原来的组带上的东西）写进去以后、放开锁之前再查一遍（锁被连通、断开的命令占着的话不用：
+                    # 等它的那几轮是退组以后才开始的）
+                    cs.scrub_due = True
+                    # 记录里有只该原来那边看的（刚拿掉了）：那一轮按原来的组要翻记录、查人设卡的动作，写完以后也拿掉
+                    # （名单在更早的一轮里的话，到时候就查不出别的了）
+                    cs.scrub_lookups = cs.scrub_lookups or changed > 0
+                    cs.scrub_whole = cs.scrub_whole or departed
+                    if cs.scrub_lookups or cs.scrub_whole:
+                        try:
+                            # 也记在库里：那一轮写完以后、再查之前就停了（断电、强制关掉）的话，下次启动时照样查（只看跨不跨服务器的
+                            # 那一遍，启动时本来就查）
+                            self.store.mark_scrub(cs.key, lookups=cs.scrub_lookups, whole=cs.scrub_whole)
+                        except Exception:
+                            log.exception("连通组 %s：没能记下正在跑的那一轮写完以后要再查一遍", sync_id)
+        for guild_id in affected:
             view = self.settings.view(guild_id)
             here = self._group_guilds(guild_id)
 
@@ -4785,6 +6461,7 @@ class Engine:
         st = self.states.get(channel_id)
         if st is not None:
             st.guild_id = guild_id
+            st.conv.guild_id = guild_id  # 私信不会连通：记录就是它自己的
             for m in st.pending:
                 m.guild_id = guild_id  # 还没回的那几条是他自己说的：换到新的服务器下接着回
             if any(m.trigger for m in st.pending):
@@ -4825,6 +6502,11 @@ class Engine:
             "cards_shared": self._cards_shared(),  # 所有服务器共用一张人设卡（上面是一共几张）
             "memory_count": self.memory.count(self._scope(guild_id)) if self.memory is not None else 0,
             "group": self._group_guilds(guild_id)[1:],  # 连成一组的别的服务器（不在组里是空的）
+            # 和这个频道连通的别的频道（没连通是空的）
+            "sync": [c for c in self.store.sync_members(sync) if c != channel_id]
+            if (sync := self.store.sync_of(channel_id)) is not None
+            else [],
+            "sync_paused": sync is not None and not self._sync_public(channel_id),  # 连通的频道变成私密的了
             "memory_max": self.ec.memory_max_entries,
             "review_here": self.implicit_ok(channel_id, "cards") or self.implicit_ok(channel_id, "long_memory"),
             "last_review_ago": (now - st.last_review_at) if st and st.last_review_at else None,

@@ -129,6 +129,7 @@ class Deletes(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(501, "@小D 秘密", mentions_bot=True))
         await engine.drain()
         engine.states.clear()  # 像刚重启：内存里什么都没有
+        engine.convs.clear()  # 记录的状态也在内存里（连通的频道共用一份），一起清掉
         engine.handle_delete(GUILD, CHANNEL, [501])
         await engine.drain()
         self.assertIn(MESSAGE_DELETED, content_text(stored(engine)[0].content))

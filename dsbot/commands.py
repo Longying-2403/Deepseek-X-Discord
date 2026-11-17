@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import PurePath
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import discord
 from discord import app_commands
@@ -41,6 +42,7 @@ from .groups import (
     unlink,
 )
 from .memory import SHARED
+from .store import SyncError
 from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
 from .textutil import one_line
 
@@ -84,11 +86,6 @@ MEMORY_ACTIONS = [
     Choice(name="添加", value="add"),
     Choice(name="删除", value="delete"),
     Choice(name="清空", value="clear"),
-]
-GROUP_ACTIONS = [
-    Choice(name="查看", value="list"),
-    Choice(name="连起来", value="link"),
-    Choice(name="退出", value="leave"),
 ]
 LINK_MODES = {
     "all": "读链接：开（推文走 FxTwitter，网页由 DeepSeek 读，Tavily 备用）",
@@ -424,6 +421,15 @@ class CardModal(discord.ui.Modal):
                 text += "\n（这里关掉了人设卡：在这里不会用，开着人设卡的服务器照常用。）"
             else:
                 text += "\n（这里关掉了人设卡，它暂时不会用。）"
+        elif (
+            value.strip()
+            and interaction.guild_id is not None
+            and interaction.channel_id is not None
+            and not cards_shared(self.bot)
+            and self.bot.engine.sync_foreign_at(interaction.channel_id, interaction.guild_id)
+        ):
+            # 和别的服务器的频道连通了、人设卡各服务器一张：这里不附人设卡（见 Engine._card_context）
+            text += "\n（这个频道和别的服务器的频道连通了，人设卡在这里不会用；这个服务器别的频道照常用。）"
         await _reply(interaction, text)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
@@ -565,6 +571,8 @@ def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     names = "、".join(
         f"<#{cid}>" + (server_label(bot, p.guild_id) if p.guild_id != guild_id else "") for cid, p in sources[:15]
     ) or "暂时没有（别的频道开了共享、并且跟它聊过之后才会出现）"
+    if bot.engine.sync_foreign_at(channel_id, guild_id):
+        names = "无（这个频道和别的服务器的频道连通了：别的频道的记录这里不翻，别处的近况也不带进来）"
     return f"记忆共享：开（来自{view.source('share_memory')}）· {out_text}\n能翻记录的频道：{names}"
 
 
@@ -615,6 +623,17 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         others = "、".join(server_label(bot, g) for g in st["group"])
         what = "长期记忆共用" if shared else "人设卡、长期记忆共用"
         lines.append(f"服务器组（Beta）：和{others}连成了一组（{what}；开了记忆共享的频道能互相翻记录）")
+    if st.get("sync"):
+        others = "、".join(channel_label(bot, c) for c in st["sync"])
+        lines.append(
+            f"📡 连通（Beta）：这个频道和{others}共用一份聊天记录（bot 主人连的；它在哪个频道就只在那里说话；"
+            "私信里聊的、私信记忆都不带进来）"
+        )
+        if bot.engine.sync_foreign_at(channel_id, guild_id):
+            cards = "人设卡照常附（所有服务器共用一张）" if shared else "人设卡不附、也不在这里改（各服务器分开）"
+            lines.append(f"和别的服务器的频道连通：别的频道的记录不翻、别处的近况不带，@ 人只认在这里说过话的，{cards}")
+        if st.get("sync_paused"):
+            lines.append("⚠️ 这个频道现在不是公开频道：连通暂停，它不看这里的消息（请 bot 主人断开连通，或者把频道改回公开）")
     if st["cards_on"] and shared:
         lines.append(f"人设卡：开 · 所有服务器共用，每人一张，一共 {st['card_count']} 张（群友用 /ds-rp 管自己的卡）")
     elif st["cards_on"]:
@@ -865,7 +884,7 @@ def groups_text(bot: "DSBot") -> str:
     lines: list[str] = []
     if not groups:
         lines.append(
-            f"还没有服务器组（Beta 功能）。用 `/dsowner 服务器组 操作:连起来 服务器:… 连到:…` 把两个服务器连起来：之后它们共用{what}，"
+            f"还没有服务器组（Beta 功能）。用 `/dsowner 服务器组 连起来 服务器:… 连到:…` 把两个服务器连起来：之后它们共用{what}，"
             "开了记忆共享的频道能互相翻记录。"
         )
     else:
@@ -876,7 +895,7 @@ def groups_text(bot: "DSBot") -> str:
             names = "、".join(server_label(bot, g) for g in members)
             counts = f"共用长期记忆 {memories} 条" if shared else f"共用人设卡 {cards} 张、长期记忆 {memories} 条"
             lines.append(f"{group_name(group)}：{names} · {counts}")
-        lines.append(f"退出用 `/dsowner 服务器组 操作:退出 服务器:…`（那个服务器会带走一份组里的{what}）。")
+        lines.append(f"退出用 `/dsowner 服务器组 退出 服务器:…`（那个服务器会带走一份组里的{what}）。")
     if shared:
         lines.append("人设卡是所有服务器共用的（config.toml 里 [bot] shared_cards = true）：连组、退组都不动人设卡。")
     for group, (cards, memories) in lost.items():
@@ -1017,7 +1036,15 @@ def recover_groups(bot: "DSBot") -> None:
 def start_groups(bot: "DSBot") -> None:
     """启动时：先把上次没做完的连组、退组接着做完，再照 config.toml 换人设卡的共用方式。接着做（或者检查有没有要接着做的）
     时出错了就先不换（换的时候要按做完以后的样子并卡、分卡：没并进组的卡直接并成共用的，组里删掉的卡可能被顶回来），
-    下次启动再试。"""
+    下次启动再试。连通的频道里，自己那份记录在连通期间被写过的（换回旧版本跑过）也提醒一声。"""
+    try:
+        for channel_id in bot.store.stale_syncs():
+            log.warning(
+                "连通：频道 %s 连通期间它自己那份记录被写过（多半是换回 2.8.0 以前的版本跑过）：断开时不会把连通期间的聊天拿回去",
+                channel_id,
+            )
+    except Exception:
+        log.exception("连通：启动时检查连通的频道出错")
     try:
         recover_groups(bot)
     except Exception:
@@ -1029,8 +1056,35 @@ def start_groups(bot: "DSBot") -> None:
                 "人设卡：启动时接着做（检查）上次的连组、退组出错了，这次先不换成%s，还按原来的方式用（下次启动再换）",
                 "所有服务器共用一张" if want else "每个服务器一张",
             )
+        _scrub_syncs(bot)
         return
     apply_card_mode(bot)
+    _scrub_syncs(bot)
+
+
+def _scrub_syncs(bot: "DSBot") -> None:
+    """跨服务器的连通组：共用的记录里只有原来那个服务器能看的东西拿掉（人设卡从所有服务器共用改回各服务器一张、
+    上次退组接着做完了，都可能让已经写进去的变得不该给别的服务器看）。上次服务器退出服务器组时正在跑的那一轮写完以后、
+    还没来得及再查就停了（断电、强制关掉）的：照那时记下的查（见 Engine.groups_changed）。"""
+    try:
+        pending = bot.store.pending_scrubs()
+    except Exception:
+        log.exception("连通：启动时读上次没查完的连通组出错")
+        pending = {}
+    for sync_id in list(bot.store.syncs()):
+        try:
+            lookups, whole = pending.pop(sync_id, (False, False))
+            bot.engine.scrub_cross(sync_id, lookups=lookups, whole=whole)
+            bot.engine.scrub_outsiders(sync_id)  # 断开了的频道的服务器退出了服务器组：它那几轮里那边才能看的
+            if lookups or whole:
+                bot.store.clear_scrub(sync_id)
+        except Exception:
+            log.exception("连通：启动时检查跨服务器的连通组 %s 出错", sync_id)  # 别的组照样查（没查完的下次启动再查）
+    for sync_id in pending:
+        try:
+            bot.store.clear_scrub(sync_id)  # 组已经散了
+        except Exception:
+            log.exception("连通：启动时清掉已经散了的连通组 %s 的检查出错", sync_id)
 
 
 def apply_card_mode(bot: "DSBot") -> None:
@@ -1163,6 +1217,414 @@ async def group_command(bot: "DSBot", interaction: discord.Interaction, op: str,
         text, view=ConfirmGroup(interaction.user.id, run, label, check, expected), ephemeral=True
     )
 
+
+# ---------------------------------------------------------------------------
+# /dsowner chatsync：把几个服务器的频道连通（共用一份聊天记录）
+# ---------------------------------------------------------------------------
+
+# 连通、断开时 bot 在相关频道里发的说明（大家看得到）
+SYNC_NOTICE_LINKED = (
+    "📡 bot 主人把这个频道和{others}连通了：之后这几个频道里说的话，bot 记在同一份聊天记录里，在哪个频道它都知道别的频道"
+    "在聊什么（它在哪个频道就只在那里说话）。连通之前这里的聊天不会给那边看，私信里的事也不会带过来。"
+)
+SYNC_NOTICE_ADDED = (
+    "📡 bot 主人把这个频道加进了连通组（{others}）：之后这里说的话，bot 记在和那几个频道共用的聊天记录里，那几个频道之前共用的"
+    "记录它也知道（它在哪个频道就只在那里说话）。连通之前这里的聊天不会给那边看，私信里的事也不会带过来。"
+)
+SYNC_NOTICE_JOINED = "📡 {new}也连进来了：现在{members}共用一份聊天记录。这里之前共用的记录（连同更早的摘要），那边以后也看得到。"
+SYNC_NOTICE_LEFT = "📡 这个频道和{others}不再连通了：之后各记各的（连通期间这边说过的，这里还记得{rest}）。"
+SYNC_NOTICE_LEFT_REST = "，还连着的频道也还记得：要让它们也忘掉，在这里用 /ds 清空记忆"
+SYNC_NOTICE_GONE = "📡 {gone}断开了连通，之后不再和这里共用聊天记录（它连通期间说过的，这里还记得）。"
+# 它自己那份记录在连通期间被旧版本写过：连通期间的聊天没拿回来（编号会撞上）
+SYNC_NOTICE_LEFT_STALE = "📡 这个频道和{others}不再连通了：之后各记各的（连通期间这边说过的没能拿回这里{rest}）。"
+
+
+def sync_name(sync_id: int) -> str:
+    return f"连通组 {-sync_id}"
+
+
+def channel_label(bot: "DSBot", channel_id: int) -> str:
+    """「服务器」#频道；频道找不到了（删掉了、bot 被移出那个服务器）用连的时候记下的名字。连通的频道变成私密的了也用连的时候
+    记下的名字（说明是发在大家看得到的频道里的：私密频道现在叫什么，别的服务器的人不该知道）。"""
+    channel = bot.get_channel(channel_id)
+    guild = getattr(channel, "guild", None)
+    saved = bot.store.sync_place(channel_id)
+    if channel is not None and guild is not None:
+        if saved is not None and not bot.engine._sync_public(channel_id):
+            return f"「{discord_safe(guild.name)}」#{discord_safe(saved[1])}"
+        return f"「{discord_safe(guild.name)}」#{discord_safe(getattr(channel, 'name', '') or str(channel_id))}"
+    if saved is None:
+        return f"频道 {channel_id}（找不到了）"
+    home = bot.get_guild(saved[0])
+    return f"「{discord_safe(home.name if home is not None else str(saved[0]))}」#{discord_safe(saved[1])}（找不到这个频道了）"
+
+
+def channel_choices(bot: "DSBot", current: str) -> list[Choice[str]]:
+    """/dsowner chatsync 的“频道”“连到”两栏：bot 在的服务器里的文字频道（服务器名、频道名、ID 都能筛选），已经连通的
+    标上是哪个组；连通了、却找不到了的频道也列在后面（好断开它）。"""
+    words = (current or "").strip().casefold()
+    out: list[Choice[str]] = []
+
+    def add(label: str, channel_id: int) -> bool:
+        if words and words not in label.casefold() and words not in str(channel_id):
+            return False
+        out.append(Choice(name=label if len(label) <= 100 else label[:99] + "…", value=str(channel_id)))
+        return len(out) >= 25
+
+    seen: set[int] = set()
+    for guild in sorted(bot.guilds, key=lambda g: (g.name.casefold(), g.id)):
+        for channel in sorted(guild.text_channels, key=lambda c: (c.position, c.id)):
+            seen.add(channel.id)
+            sync = bot.store.sync_of(channel.id)
+            label = f"{guild.name} · #{channel.name}" + (f" · {sync_name(sync)}" if sync is not None else "")
+            if add(label, channel.id):
+                return out
+    for sync, members in bot.store.syncs().items():
+        for channel_id in members:
+            if channel_id not in seen and add(f"{channel_label(bot, channel_id)} · {sync_name(sync)}", channel_id):
+                return out
+    return out
+
+
+def owner_channel_choices(bot: "DSBot", user_id: int, current: str) -> list[Choice[str]]:
+    """频道名单（bot 在哪些服务器、哪些频道连通了）只给 bot 主人看：/dsowner 的命令别人看得到，但用不了。"""
+    return channel_choices(bot, current) if user_id == bot.secrets.owner_id else []
+
+
+_CHANNEL_MENTION = re.compile(r"<#(\d{1,24})>")
+
+
+def _channel_arg(bot: "DSBot", raw: str | None) -> tuple[int | None, list[str]]:
+    """「频道」「连到」两栏填的是哪个频道：从弹出的列表里选的是频道 ID；用 # 选的频道（手机、平板上常这样选）是 <#ID>；只打了名字
+    的，在 bot 看得到的文字频道里找（「服务器名 · #频道名」「服务器名 #频道名」，或者只打频道名：只有一个叫这个名字的就是它）。
+    返回 (频道 ID, 同名的那几个频道)：认不出、有几个同名的时 ID 是 None。"""
+    text = (raw or "").strip()
+    if text.isdecimal() and len(text) < 25:
+        return int(text), []
+    found = _CHANNEL_MENTION.fullmatch(text)
+    if found is not None:
+        return int(found.group(1)), []
+    want = text.casefold()
+    if not want:
+        return None, []
+    bare = want.removeprefix("#").strip()
+    hits: list[int] = []
+    for guild in sorted(bot.guilds, key=lambda g: (g.name.casefold(), g.id)):
+        for channel in sorted(guild.text_channels, key=lambda c: (c.position, c.id)):
+            name = channel.name.casefold()
+            server = guild.name.casefold()
+            if bare == name or want in (f"{server} · #{name}", f"{server} #{name}", f"{server} {name}"):
+                hits.append(channel.id)
+    if len(hits) == 1:
+        return hits[0], []
+    return None, [channel_label(bot, cid) for cid in hits]
+
+
+def _pick_hint(hint: str, same: list[str]) -> str:
+    """没认出填的是哪个频道：照常请他从列表里选；有几个同名的，先说是哪几个。"""
+    if len(same) > 1:
+        names = "、".join(same[:5]) + ("……" if len(same) > 5 else "")
+        return f"有 {len(same)} 个频道都叫这个名字（{names}）。{hint}"
+    return hint
+
+
+def sync_check(bot: "DSBot", channel_id: int) -> tuple[Any, str | None, list[str]]:
+    """能不能连这个频道：(频道, 不能连的原因, 提醒)。只能连 bot 看得到的公开文字频道。"""
+    channel = bot.get_channel(channel_id)
+    if channel is None or getattr(channel, "guild", None) is None:
+        return None, f"bot 看不到频道 {channel_id}（删掉了，或者 bot 不在那个服务器里）。", []
+    label = channel_label(bot, channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return channel, f"{label}不是文字频道：只能连文字频道（帖子、论坛、语音频道不行）。", []
+    place = bot.engine.transport.locate(channel_id)
+    if place is None or not place.public:
+        return channel, f"{label}是私密频道（不是所有人都看得到，或者是成人内容频道）：私密频道不能连通。", []
+    notes: list[str] = []
+    if not bot.engine.enabled(channel.guild.id, channel_id, None, safe_category_id(channel)):
+        notes.append(f"⚠️ {label}没开“允许回应”：bot 看不到那里的消息（先在那个服务器用 `/ds 区域` 打开）。")
+    try:
+        perms = channel.permissions_for(channel.guild.me)
+        if not (perms.view_channel and perms.send_messages):
+            notes.append(f"⚠️ bot 在{label}没有看消息、发消息的权限：连了也听不到、回不了。")
+    except Exception:
+        pass
+    return channel, None, notes
+
+
+def syncs_text(bot: "DSBot") -> str:
+    syncs = bot.store.syncs()
+    if not syncs:
+        return (
+            "还没有连通的频道（Beta 功能）。用 `/dsowner chatsync 连通 频道:… 连到:…` 把两个频道连通：之后它们共用一份聊天记录，"
+            "在哪个频道叫它都知道别的频道在聊什么（它在哪个频道就只在那里说话）。"
+        )
+    lines = ["**连通的频道**（Beta）"]
+    for sync, members in syncs.items():
+        lines.append(f"{sync_name(sync)}：" + "、".join(channel_label(bot, c) + _paused_mark(bot, c) for c in members))
+    lines.append(
+        "加一个频道进去：`/dsowner chatsync 连通 频道:… 连到:（组里的任意一个）`；断开：`/dsowner chatsync 断开 频道:…`。"
+    )
+    return "\n".join(lines)
+
+
+def _paused_mark(bot: "DSBot", channel_id: int) -> str:
+    """连通的频道变成私密的了（或者找不到了）：连通暂停，它不看那里的消息。"""
+    return "" if bot.engine._sync_public(channel_id) else "（⚠️ 现在不是公开频道：连通暂停）"
+
+
+def sync_key(bot: "DSBot", *channels: int) -> tuple[Any, ...]:
+    """连通、断开前后对一对：给主人看的时候和点确认的时候，这几个频道的连通情况一样才办。"""
+    syncs = [bot.store.sync_of(c) for c in channels]
+    return tuple(syncs) + tuple(tuple(bot.store.sync_members(s)) if s is not None else () for s in syncs)
+
+
+def sync_link_preview(bot: "DSBot", channel_id: int, other_id: int, notes: list[str]) -> str:
+    sync = bot.store.sync_of(other_id) or bot.store.sync_of(channel_id)
+    if sync is None:
+        lines = [f"把{channel_label(bot, channel_id)}和{channel_label(bot, other_id)}连通？"]
+    else:
+        members = bot.store.sync_members(sync)
+        newcomer = channel_id if channel_id not in members else other_id
+        lines = [
+            f"把{channel_label(bot, newcomer)}加进{sync_name(sync)}（{'、'.join(channel_label(bot, c) for c in members)}）？",
+            f"- {channel_label(bot, newcomer)}也会看到组里已经共用的记录（更早的摘要、已经断开的频道连通期间说过的也算）；组里的频道会收到说明。",
+        ]
+        if not bot.engine.channels_cross(members) and bot.engine.channels_cross([*members, newcomer]):
+            cards = "" if bot.engine._cards_shared() else "、附着的人设卡"
+            lines.append(
+                f"- 组里原来都在同一个服务器（或服务器组）：{channel_label(bot, newcomer)}连进来就跨服务器了。共用记录里只有原来那边能看的"
+                f"内容（别的频道带来的近况、能翻的频道名单、翻到的记录、按名字查到的人设卡{cards}）会先拿掉。"
+            )
+        elif not bot.engine.channels_cross([*members, newcomer]) and bot.engine.brings_cross_off(members, [newcomer]):
+            lines.append(
+                f"- {channel_label(bot, newcomer)}所在的服务器没开“跨服务器”：共用记录里从服务器组外带来的近况（有的话）会先拿掉"
+                "（那边平时看不到组外的）。"
+            )
+    lines += [
+        "- 连通以后几个频道共用一份聊天记录：在哪个频道叫它，它都知道别的频道在聊什么（记录里写明是哪个服务器、哪个频道的）。"
+        "它只在被叫（或者主动发言）的那个频道说话，不会跑到别的频道去。",
+        "- 连通之前各频道的旧聊天不给别的频道看（每个频道自己还记得）；私信记忆不带进来。",
+        "- 人设、设置、预算还是各管各的；@ 人只认那个服务器里的人。",
+        "- bot 会在这几个频道各发一条说明，让大家知道连通了。",
+        "- 以后断开时，每个频道留下连通期间自己这边的聊天。",
+        "- ⚠️ 连通是 Beta 功能。共用的记录长得快，压缩得也勤，费用会比各聊各的高一些。还没备份过的话，最好先备份 `data/` 文件夹。",
+    ]
+    return "\n".join(lines + notes)
+
+
+def sync_unlink_preview(bot: "DSBot", channel_id: int) -> str:
+    sync = bot.store.sync_of(channel_id)
+    assert sync is not None
+    rest = [c for c in bot.store.sync_members(sync) if c != channel_id]
+    stale = set(bot.store.stale_syncs())  # 自己那份在连通期间被旧版本写过：断开时拿不回连通期间的聊天（编号会撞上）
+    label = channel_label(bot, channel_id)
+    lines = [f"让{label}断开{sync_name(sync)}？"]
+    if channel_id in stale:
+        lines.append(
+            f"- ⚠️ {label}自己那份记录在连通期间被旧版本写过：这次连通期间的聊天拿不回去（编号会撞上），断开后它只记得连通之前的"
+            + ("。" if len(rest) == 1 else "（组里还留着）。")
+        )
+    else:
+        lines.append(
+            f"- {label}把共用记录里自己这次连通期间的聊天（这里说的、它在这里回的）带回去接着用；别的频道说的不带走，"
+            "共用记录更早的摘要也不带走（里面有别的频道的事）。"
+        )
+    if len(rest) == 1 and rest[0] in stale:
+        lines.append(
+            f"- 组里只剩{channel_label(bot, rest[0])}：组就散了，共用的记录（连同更早的摘要）删掉。⚠️ 它自己那份记录在连通期间被旧版本"
+            "写过，拿不回连通期间的聊天。"
+        )
+    elif len(rest) == 1:
+        lines.append(f"- 组里只剩{channel_label(bot, rest[0])}：组就散了，它也拿回自己那部分，共用的记录（连同更早的摘要）删掉。")
+    else:
+        lines.append(
+            f"- 组里还剩{'、'.join(channel_label(bot, c) for c in rest)}，照样共用（{label}连通期间说过的，它们还记得；"
+            f"要让它们也忘掉，在{label}用 `/ds 清空记忆`）。"
+        )
+    lines.append("- bot 会在相关的频道各发一条说明。")
+    return "\n".join(lines)
+
+
+async def _sync_notify(bot: "DSBot", texts: dict[int, str]) -> list[int]:
+    """在几个频道里发说明，返回没发出去的频道。"""
+    failed: list[int] = []
+    for channel_id, text in texts.items():
+        try:
+            sent = await bot.engine.transport.send(channel_id, text, reply_to=None, ping=False)
+        except Exception:
+            log.exception("连通：在频道 %s 发说明出错", channel_id)
+            sent = None
+        if sent is None:
+            failed.append(channel_id)
+    return failed
+
+
+async def do_sync_link(bot: "DSBot", channel_id: int, other_id: int) -> str:
+    for cid in (channel_id, other_id):
+        _, problem, _ = sync_check(bot, cid)
+        if problem is not None:
+            return f"没连成：{problem}"
+    before = bot.store.sync_of(other_id) or bot.store.sync_of(channel_id)
+    involved = [channel_id, other_id] + (bot.store.sync_members(before) if before is not None else [])
+    a, b = bot.get_channel(channel_id), bot.get_channel(other_id)
+    try:
+        async with bot.engine.sync_guard(involved):
+            sync, joined = bot.store.link_channels((channel_id, a.guild.id, a.name), (other_id, b.guild.id, b.name), now=time.time())
+            scrubbed = bot.engine.sync_changed(joined)
+    except asyncio.TimeoutError:
+        return "这几个频道一直在忙（它正在回话），这次没连。过一会儿再试。"
+    except SyncError as exc:
+        return f"没连成：{exc}"
+    members = bot.store.sync_members(sync)
+    labels = {c: channel_label(bot, c) for c in members}
+    texts: dict[int, str] = {}
+    added = len(joined) < len(members)  # 加进已经有的组（不是新建）
+    for cid in members:
+        if cid in joined:
+            notice = SYNC_NOTICE_ADDED if added else SYNC_NOTICE_LINKED
+            texts[cid] = notice.format(others="、".join(labels[c] for c in members if c != cid))
+        else:
+            texts[cid] = SYNC_NOTICE_JOINED.format(new="、".join(labels[c] for c in joined), members="、".join(labels.values()))
+    failed = await _sync_notify(bot, texts)
+    log.info("bot 主人把频道 %s 连进了%s（%s）", joined, sync_name(sync), members)
+    text = f"已经连通：{sync_name(sync)} 现在有 {'、'.join(labels.values())}。"
+    if scrubbed and bot.engine.channels_cross(members):
+        text += f"\n组里现在跨服务器了：共用记录里有 {scrubbed} 条拿掉了只有原来那边能看的内容。"
+    elif scrubbed:
+        text += f"\n有服务器没开“跨服务器”：共用记录里有 {scrubbed} 条拿掉了从服务器组外带来的近况。"
+    if failed:
+        text += f"\n⚠️ 在{'、'.join(labels[c] for c in failed)}没能发出说明（多半是没有发消息的权限）：最好自己跟那边的人说一声。"
+    return text
+
+
+async def do_sync_unlink(bot: "DSBot", channel_id: int) -> str:
+    sync = bot.store.sync_of(channel_id)
+    if sync is None:
+        return "这个频道没有连通。"
+    members = bot.store.sync_members(sync)
+    labels = {c: channel_label(bot, c) for c in members}  # 断开之前算好（找不到的频道断开后就没有记下的名字了）
+    try:
+        async with bot.engine.sync_guard(members):
+            stale = set(bot.store.stale_syncs())  # 断开以后就查不到了
+            for c in bot.store.sync_members(bot.store.sync_of(channel_id) or sync):
+                if c not in labels:
+                    labels[c] = channel_label(bot, c)  # 等的时候连进来的
+            sync, left, rest = bot.store.unlink_channel(channel_id, now=time.time())
+            bot.engine.sync_changed(left, dissolved=sync if not rest else None)
+    except asyncio.TimeoutError:
+        return "这几个频道一直在忙（它正在回话），这次没断开。过一会儿再试。"
+    except SyncError as exc:
+        return f"没断开：{exc}"
+    for c in [*left, *rest]:
+        labels.setdefault(c, channel_label(bot, c))
+    everyone = [*left, *rest]
+    texts = {
+        cid: (SYNC_NOTICE_LEFT_STALE if cid in stale else SYNC_NOTICE_LEFT).format(
+            others="、".join(labels[c] for c in everyone if c != cid), rest=SYNC_NOTICE_LEFT_REST if rest else ""
+        )
+        for cid in left
+    }
+    texts.update({cid: SYNC_NOTICE_GONE.format(gone=labels[channel_id]) for cid in rest})
+    failed = await _sync_notify(bot, {c: t for c, t in texts.items() if bot.get_channel(c) is not None})
+    log.info("bot 主人让频道 %s 断开了%s（还剩 %s）", left, sync_name(sync), rest)
+    took = [c for c in left if c not in stale]
+    lost = [c for c in left if c in stale]
+    if rest:
+        done = "拿回了自己那部分聊天" if took else "它自己那份记录在连通期间被旧版本写过，没拿回连通期间的聊天"
+        text = f"{labels[channel_id]}已经断开{sync_name(sync)}，{done}；组里还有：{'、'.join(labels[c] for c in rest)}。"
+    else:
+        text = f"{sync_name(sync)}散了，共用的记录删掉了。"
+        if took:
+            text += f"{'、'.join(labels[c] for c in took)}拿回了自己那部分聊天。"
+        if lost:
+            text += f"{'、'.join(labels[c] for c in lost)}自己那份记录在连通期间被旧版本写过，没拿回连通期间的聊天。"
+    if failed:
+        text += f"\n⚠️ 在{'、'.join(labels[c] for c in failed)}没能发出说明。"
+    return text
+
+
+class ConfirmSync(discord.ui.View):
+    """连通、断开之前再确认一次（只有发起的人能点）。点的时候照当时的情况再看一次，和给他看的对不上就不办。"""
+
+    def __init__(self, user_id: int, run: Callable[[], Awaitable[str]], label: str, check: Callable[[], Any], expected: Any):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.run = run
+        self.check = check
+        self.expected = expected
+        button: discord.ui.Button[Any] = discord.ui.Button(label=label, style=discord.ButtonStyle.danger)
+        button.callback = self.confirm  # type: ignore[method-assign]
+        self.add_item(button)
+
+    async def confirm(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            await _reply(interaction, "只有发起的人能确认。")
+            return
+        self.stop()
+        if self.check() != self.expected:
+            await interaction.response.edit_message(
+                content="情况变了（刚才有别的连通、断开）：这次没办。再执行一次命令，照现在的情况看看会怎样。", view=None
+            )
+            return
+        await interaction.response.edit_message(content="正在办……（要等这几个频道正在回的话说完）", view=None)
+        try:
+            text = await self.run()
+        except Exception as exc:
+            log.exception("连通：连通、断开出错")
+            text = f"出错了：{exc}"
+        await interaction.edit_original_response(content=text[:1900])
+
+
+async def sync_command(bot: "DSBot", interaction: discord.Interaction, op: str, channel: str | None, other: str | None) -> None:
+    """/dsowner chatsync：查看；连通、断开要先确认。"""
+    if op == "list":
+        await _reply_long(interaction, syncs_text(bot))
+        return
+    channel_id, same = _channel_arg(bot, channel)
+    if channel_id is None:
+        log.info("连通：没认出「频道」一栏填的 %r", channel)
+        await _reply(interaction, _pick_hint("在「频道」一栏从弹出的列表里选一个频道（输入服务器名、频道名能筛选）。", same))
+        return
+    run: Callable[[], Awaitable[str]]
+    check: Callable[[], Any]
+    if op == "link":
+        other_id, same = _channel_arg(bot, other)
+        if other_id is None:
+            log.info("连通：没认出「连到」一栏填的 %r", other)
+            await _reply(interaction, _pick_hint("在「连到」一栏从弹出的列表里选要连到哪个频道。", same))
+            return
+        if other_id == channel_id:
+            await _reply(interaction, "不能把一个频道连到它自己。")
+            return
+        notes: list[str] = []
+        for cid in (channel_id, other_id):
+            _, problem, more = sync_check(bot, cid)
+            if problem is not None:
+                await _reply(interaction, problem)
+                return
+            notes += more
+        a, b = bot.store.sync_of(channel_id), bot.store.sync_of(other_id)
+        if a is not None and a == b:
+            await _reply(interaction, f"这两个频道已经在{sync_name(a)}里了。")
+            return
+        if a is not None and b is not None:
+            await _reply(interaction, "两个频道都已经在别的连通组里了：先把其中一个断开。")
+            return
+        text = sync_link_preview(bot, channel_id, other_id, notes)
+        run = lambda: do_sync_link(bot, channel_id, other_id)  # noqa: E731
+        label = "确认连通"
+        expected = sync_key(bot, channel_id, other_id)
+        check = lambda: sync_key(bot, channel_id, other_id)  # noqa: E731
+    else:
+        if bot.store.sync_of(channel_id) is None:
+            await _reply(interaction, "这个频道没有连通。")
+            return
+        text = sync_unlink_preview(bot, channel_id)
+        run = lambda: do_sync_unlink(bot, channel_id)  # noqa: E731
+        label = "确认断开"
+        expected = sync_key(bot, channel_id)
+        check = lambda: sync_key(bot, channel_id)  # noqa: E731
+    await interaction.response.send_message(text[:1900], view=ConfirmSync(interaction.user.id, run, label, check, expected), ephemeral=True)
 
 def register_dm_commands(bot: "DSBot") -> None:
     """/ds-dm：服务器里和私信里都能用（回复只有自己看得到）。"""
@@ -1733,8 +2195,25 @@ def register_commands(bot: "DSBot") -> None:
 
     @admin.command(name="清空记忆", description="清空本频道的对话记录和摘要，让它从头开始")
     async def reset_cmd(interaction: discord.Interaction) -> None:
-        bot.engine.reset_channel(interaction.channel_id)
-        await _reply(interaction, "已清空本频道的对话记录和摘要。")
+        channel_id = interaction.channel_id
+        linked = bot.store.sync_of(channel_id) is not None
+        past = bool(bot.store.origin_syncs(channel_id))  # 以前连通过：组的记录里还留着它说过的话
+        if not linked and not past:
+            bot.engine.reset_channel(channel_id)
+            await _reply(interaction, "已清空本频道的对话记录和摘要。")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)  # 要等用这些记录的频道正在回的话说完
+        try:
+            await bot.engine.reset_linked(channel_id)
+        except asyncio.TimeoutError:
+            await _reply(interaction, "这个频道（或者和它连通的频道）一直在忙，这次没清空。过一会儿再试。")
+            return
+        linked = bot.store.sync_of(channel_id) is not None  # 等的时候可能刚连通、断开
+        if linked:
+            text = "已清空：这个频道在连通的记录里说过的话（连同共用的摘要）和连通之前的记录。别的频道说的不动；之后照样连通。"
+        else:
+            text = "已清空本频道的对话记录和摘要；以前连通时留在别的频道共用记录里的那部分也删掉了。"
+        await _reply(interaction, text)
 
     bot.tree.add_command(admin)
 
@@ -1918,21 +2397,69 @@ def register_commands(bot: "DSBot") -> None:
         else "（Beta）把几个服务器连成一组：共用人设卡和长期记忆，开了记忆共享的频道能互相翻记录"
     )
 
-    @owner.command(name="服务器组", description=group_text)
-    @app_commands.rename(action="操作", server="服务器", other="连到")
-    @app_commands.describe(
-        action="查看 / 连起来 / 退出",
-        server="连起来、退出时：哪个服务器（输入几个字能筛选）",
-        other="连起来时：连到哪个服务器（它已经在组里就加进那个组）",
-    )
-    @app_commands.choices(action=GROUP_ACTIONS)
-    @app_commands.autocomplete(server=server_options, other=server_options)
-    async def owner_groups(
-        interaction: discord.Interaction, action: Choice[str], server: Optional[str] = None, other: Optional[str] = None
-    ) -> None:
+    # 查看、连起来、退出分成三个子命令（要填的栏都是必填，按顺序出来）：只有一个“操作”选项、别的栏选填时，iPad 上先填了选填的栏、
+    # 再选“操作”，选填的栏就没送过来
+    servers_group = app_commands.Group(name="服务器组", description=group_text, parent=owner)
+    taken = "长期记忆" if cards_shared(bot) else "人设卡和长期记忆"
+
+    @servers_group.command(name="查看", description="现在有哪些服务器组")
+    async def owner_groups_list(interaction: discord.Interaction) -> None:
         if not await is_owner(interaction):
             return
-        await group_command(bot, interaction, action.value, server, other)
+        await group_command(bot, interaction, "list", None, None)
+
+    @servers_group.command(name="连起来", description="把两个服务器连成一组（连到的那个已经在组里，就加进那个组）")
+    @app_commands.rename(server="服务器", other="连到")
+    @app_commands.describe(server="哪个服务器（从弹出的列表里选，输入几个字能筛选）", other="连到哪个服务器（它已经在组里，就加进那个组）")
+    @app_commands.autocomplete(server=server_options, other=server_options)
+    async def owner_groups_link(interaction: discord.Interaction, server: str, other: str) -> None:
+        if not await is_owner(interaction):
+            return
+        await group_command(bot, interaction, "link", server, other)
+
+    @servers_group.command(name="退出", description=f"让一个服务器退出它的组（它带走一份组里的{taken}）")
+    @app_commands.rename(server="服务器")
+    @app_commands.describe(server="哪个服务器（从弹出的列表里选，输入几个字能筛选）")
+    @app_commands.autocomplete(server=server_options)
+    async def owner_groups_leave(interaction: discord.Interaction, server: str) -> None:
+        if not await is_owner(interaction):
+            return
+        await group_command(bot, interaction, "leave", server, None)
+
+    async def channel_options(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        return owner_channel_choices(bot, interaction.user.id, current)
+
+    # 和服务器组一样分成三个子命令：要填的栏都是必填
+    sync_group = app_commands.Group(
+        name="chatsync", description="（Beta）把几个服务器的频道连通：共用一份聊天记录，在哪个频道叫它都知道别处在聊什么", parent=owner
+    )
+
+    @sync_group.command(name="查看", description="现在有哪些连通组")
+    async def owner_chatsync_list(interaction: discord.Interaction) -> None:
+        if not await is_owner(interaction):
+            return
+        await sync_command(bot, interaction, "list", None, None)
+
+    @sync_group.command(name="连通", description="把两个频道连通（连到的那个已经连通了，就加进它那一组）")
+    @app_commands.rename(channel="频道", other="连到")
+    @app_commands.describe(
+        channel="哪个频道（从弹出的列表里选，能按服务器名、频道名筛选；也可以用 # 选，或者打频道名）",
+        other="连到哪个频道（它已经连通了，就加进它那一组）",
+    )
+    @app_commands.autocomplete(channel=channel_options, other=channel_options)
+    async def owner_chatsync_link(interaction: discord.Interaction, channel: str, other: str) -> None:
+        if not await is_owner(interaction):
+            return
+        await sync_command(bot, interaction, "link", channel, other)
+
+    @sync_group.command(name="断开", description="让一个频道断开连通（它带回自己这次连通期间的聊天）")
+    @app_commands.rename(channel="频道")
+    @app_commands.describe(channel="哪个频道（从弹出的列表里选，能按服务器名、频道名筛选；也可以用 # 选，或者打频道名）")
+    @app_commands.autocomplete(channel=channel_options)
+    async def owner_chatsync_unlink(interaction: discord.Interaction, channel: str) -> None:
+        if not await is_owner(interaction):
+            return
+        await sync_command(bot, interaction, "unlink", channel, None)
 
     # CONTROL_GUILD_ID 可以填几个服务器：每个里面都放一份（是同一个命令，在哪个服务器用都一样）
     bot.tree.add_command(owner, guilds=[discord.Object(id=g) for g in bot.secrets.control_guild_ids])

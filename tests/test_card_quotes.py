@@ -440,6 +440,7 @@ class CardQuotes(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(500, "@小D 早", author=11, name="阿明", mentions_bot=True))
         await engine.drain()  # 附上了阿明的卡
         engine.states.clear()  # 重启：cards_shown 没了，记录从数据库重新读
+        engine.convs.clear()  # 记录的状态也在内存里（连通的频道共用一份），一起清掉
         cards.delete(GUILD, 11)  # 卡也删了，但记录里还在
         clock.advance(30)
         await engine.handle_message(msg(501, "@小D 阿明的卡上写了啥", author=12, name="小雨", mentions_bot=True))
@@ -458,6 +459,7 @@ class CardQuotes(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(500, "@小D 早", author=11, name="阿明", mentions_bot=True))
         await engine.drain()
         engine.states.clear()
+        engine.convs.clear()  # 记录的状态也在内存里（连通的频道共用一份），一起清掉
         cards.delete(GUILD, 11)
         clock.advance(30)
         await engine.handle_message(msg(501, "@小D 在吗", author=12, name="小雨", mentions_bot=True))

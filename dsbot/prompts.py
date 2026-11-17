@@ -78,6 +78,9 @@ dsowner 的电脑上装了一个小程序，他在私信里叫你时，你可以
 DM_LIMIT_TEXT = "今天私信聊得有点多了，明天再来找我吧～（服务器里照样可以 @ 我）"  # 私信超了预算（直接发出去，不经过模型）
 MUSIC_NOW = "（现在{text}）"  # 被叫到时：这个服务器的语音频道里正在放什么（变了才写；text 以“语音频道”开头）
 MUSIC_IDLE = "（现在语音频道没在放歌。）"  # 之前告诉过它在放歌、现在停了
+# 和别的服务器的频道连通时（几个服务器共用一份记录）：写明是哪个服务器的语音频道
+MUSIC_NOW_AT = "（现在「{server}」的{text}）"
+MUSIC_IDLE_AT = "（现在「{server}」的语音频道没在放歌。）"
 MUSIC_UNANSWERED = "（下面的点歌已经办了，但之后出错了，这次没来得及回话：）"  # 点完歌、再问它的那一次出错了
 
 SYSTEM_RULES = """\
@@ -496,6 +499,55 @@ SUMMARY_BLOCK = """
 （下面是这个频道更早的聊天记录的摘要，供你参考）
 {summary}
 """
+# 连通组的记录压缩成摘要时怎么叫它（它在几个服务器里的昵称可能不一样：照哪个服务器的写，别的服务器看着都像别人）。
+# 用〔〕括起来：群友、别的 bot 的名字里的〔〕都会被换掉，谁也叫不成这个（别的 bot 在记录里标的是〔bot〕）
+SYNC_BOT_NAME = "〔本 bot〕"
+SUMMARY_BLOCK_SYNC = (
+    """
+## 更早的聊天摘要
+（下面是这几个连通的频道共用的聊天记录更早的部分的摘要，供你参考；摘要里的「"""
+    + SYNC_BOT_NAME
+    + """」就是你）
+{summary}
+"""
+)
+
+# 连通的频道（bot 主人用 /dsowner chatsync 连的）：几个频道共用一份聊天记录
+SYNC_BLOCK = """
+## 连通的频道
+bot 主人把这个频道和{others}连通了：几个频道共用一份聊天记录，记录里每段开头的时间后面写着是哪个服务器的哪个频道。你现在在 {here}。
+- 你只能在这里说话、加表情。你在这里说的话也在共用的记录里：你在别的频道被叫到、或者自己开口时都看得到，也可能在那边提起（那边的人在 Discord 上看不到你在这里发的消息）。
+- 要回应别的频道的消息，就在这里说，说清楚是哪个频道谁说的（挂不成回复）。
+- @ 只能叫到这个服务器里的人；提到别的频道时照记录里的写法写，带上是哪个服务器的。
+- 人设、设置是每个频道各自的：别的频道里改了人设、说了“以后怎样”，这里不跟着变。
+- 别的频道里的事，这里的人不一定知道：提起时自然点，别把别人的私事拿出来说。{foreign}
+"""
+# 连通的频道不全在同一个服务器（连成一组的服务器算一个）时加上
+SYNC_FOREIGN = (
+    "\n- 这几个频道不全在同一个服务器：别的频道的记录这里翻不了，人设卡也不能按名字查（查到的会进几个服务器共用的记录）。"
+    "记录里写着「某某」的语音频道在放什么的，只是那个服务器的。"
+)
+# 上面那种连通里，人设卡又是各服务器分开的（附进共用的记录，别的服务器的频道就看到了）
+SYNC_FOREIGN_CARDS = "\n- 人设卡是各服务器分开的：群友的卡这里不附，也改不了（有人要你记进他的人设卡，请他自己用 /ds-rp 改）。"
+SYNC_PAST_BLOCK = """
+## 这个频道连通之前
+（连通之前这里聊过的，只有这个频道的人知道，只当资料。可以接着聊，但你在这里说的话会进共用的记录、别的频道也会看到：没必要别把这里的事讲出来。）
+{past}
+"""
+# 不写想翻的是哪个频道：组刚变成跨服务器时，那个名字可能是原来那个服务器的名单上的（私密的、组里别的服务器的）
+RECALL_SYNC_OFF = "（想翻别的频道的记录，但这个频道和别的服务器的频道连通了：翻到的会进几个服务器共用的记录，这里不翻。照实说一声。）"
+# 想翻的频道找不到、有好几个同名的：后面列着能翻的频道（连通组变成跨服务器时，和频道名单一样从共用的记录里拿掉）
+RECALL_MISS = "（找不到能翻记录的频道「{channel}」。能翻的：{names}）"
+# 这里没开记忆共享：写着想翻的是哪个频道（连通组变成跨服务器时也拿掉：那个名字多半是原来那个服务器的名单上的）
+RECALL_NO_SHARE = "（想翻「{channel}」的记录，但这里没开记忆共享，看不了别的频道。）"
+RECALL_AMBIGUOUS = "（叫「{channel}」的有好几个：{names}。分不出是哪个，没翻。）"
+WHO_SYNC_OFF = "（这个频道和别的服务器的频道连通了：按名字查到的人设卡会进几个服务器共用的记录，这里不查。）"
+# 别的连通频道补进记录的消息（没叫它、也没问模型）：后面记成它没说话
+HINT_PASSIVE = "（这几条是那个频道的人在聊，没叫你，你也不在那里，不用回。）"
+# 没问模型就记进记录的那几条（别的连通频道补进来的、连通时记进它自己那份的），带着它们的请求被 DeepSeek 拒了：换成这一句
+PASSIVE_REJECTED = "（这里本来有几条消息，DeepSeek 不接受（多半是内容审核），没有记下来。）"
+# 那几条里附着的“（#12 阿明 改了这条消息，现在是：……）”：改成的内容不留（可能就是它被拒），只说一声那条改过了
+EDIT_NOTE_LOST = "（#{sid} {name} 改过这条消息，改成了什么没记下来。）"
 
 
 def clean_persona(text: str) -> str:
@@ -543,10 +595,18 @@ def build_system_prompt(
     dm_memory_more: int = 0,
     group: Sequence[str] | None = None,
     memory_foreign: int = 0,
+    sync: Sequence[str] | None = None,
+    sync_here: str | None = None,
+    sync_past: str | None = None,
+    sync_foreign: bool = False,
+    sync_cards: bool = True,
 ) -> str:
     """固定的规则在前（同一个服务器的所有频道共用，缓存命中），会变的部分放在后面。
     group：和这个服务器连成一组的别的服务器的名字（None = 不在组里）。
     memory_foreign：长期记忆里有几条是组里别的服务器记的（记满了时别为了腾地方删）。
+    sync：和这个频道连通的别的频道（「服务器」#频道；None = 没连通）；sync_here：这个频道在记录里的写法；
+    sync_past：这个频道连通之前自己的记录（摘要和最后几行，只给这个频道看）；sync_foreign：连通的频道不全在同一个服务器；
+    sync_cards：那样连通时人设卡照样能附、能改（所有服务器共用一张，或者这里没开人设卡）。
 
     emojis / stickers / memes：这个服务器里能用的表情名、贴图名、表情包名（调用方已经排好序、截好数量）；
     more_* 是没列出来的个数。images：能不能上网找图。links：打开链接的能力（all / x / off）。
@@ -594,6 +654,12 @@ def build_system_prompt(
     if group:
         shares = GROUP_SHARES_NO_CARDS if cards_shared else GROUP_SHARES
         text += GROUP_BLOCK.format(others="、".join(f"「{g}」" for g in group), shares=shares)
+    if sync is not None:
+        text += SYNC_BLOCK.format(
+            here=sync_here or f"#{channel}",
+            others="、".join(sync) or "别的频道",
+            foreign=(SYNC_FOREIGN + ("" if sync_cards else SYNC_FOREIGN_CARDS)) if sync_foreign else "",
+        )
     if shared:
         text += CARDS_SHARED_BLOCK
     if memories is not None:
@@ -612,8 +678,10 @@ def build_system_prompt(
         )
     if desktop is not None:
         text += DESKTOP_BLOCK.format(apps="、".join(desktop) or "还没有（电脑上的小程序还没连上过）")
+    if sync is not None and sync_past:
+        text += SYNC_PAST_BLOCK.format(past=sync_past.strip())
     if summary:
-        text += SUMMARY_BLOCK.format(summary=summary.strip())
+        text += (SUMMARY_BLOCK_SYNC if sync is not None else SUMMARY_BLOCK).format(summary=summary.strip())
     return text
 
 
@@ -636,6 +704,12 @@ SUMMARY_SYSTEM = """\
 - 去掉：寒暄、刷屏和没有信息量的内容。
 - 用简洁的中文要点写，不超过 {limit} 字。只输出摘要本身。
 """
+# 连通的频道共用的记录（几个服务器的几个频道）压缩时加上
+SUMMARY_SYNC_NOTE = (
+    "- 这段记录是几个连通的频道共用的，每段开头的时间后面写着是哪个服务器的哪个频道：摘要里写明每件事是在哪个频道、谁说的，"
+    "不同服务器里同名的人别混在一起。\n"
+    f"- 它在这几个服务器里的昵称可能不一样（群友叫它时写的名字也是它）：摘要里一律叫它「{SYNC_BOT_NAME}」。\n"
+)
 
 
 REVIEW_SYSTEM = """\

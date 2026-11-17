@@ -23,6 +23,8 @@ _CARD_KINDS = ("card", "set_card", "update_card", "persona_card", "人设卡")
 _WHO_KINDS = ("who", "lookup_card", "find_card", "card_lookup", "查人设卡")
 _MUSIC_KINDS = ("music", "play_music", "song", "play", "点歌", "放歌")
 _DESKTOP_KINDS = ("desktop", "computer", "pc", "电脑")
+# 动作的几种写法（mentions_kinds 用）：翻记录只认这几个名字（"remember" 带着频道的也算翻记录，那种认得出的已经解析出来了）
+_KIND_NAMES = {"card": _CARD_KINDS, "who": _WHO_KINDS, "recall": ("recall", "history", "look_back")}
 _DESKTOP_OPS = {
     "open": "open", "launch": "open", "start": "open", "run": "open", "打开": "open", "开": "open", "启动": "open",
     "close": "close", "quit": "close", "exit": "close", "kill": "close", "stop": "close", "关": "close", "关掉": "close", "关闭": "close",
@@ -277,6 +279,15 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
         elif kind in ("pass", "none", "silence"):
             continue
     return actions, True
+
+
+def mentions_kinds(raw: str, kinds: Any) -> bool:
+    """模型原话里有没有写这几种动作（写错了没认出来的、超过条数没看的也算）：只看 "type" 写的是什么。"""
+    names = [n for k in kinds for n in _KIND_NAMES.get(k, (k,))]
+    if not names:
+        return False
+    pattern = r'"type"\s*:\s*"\s*(?:' + "|".join(re.escape(n) for n in names) + r')\s*"'
+    return re.search(pattern, raw, re.IGNORECASE) is not None
 
 
 def dump_actions(actions: list[Action]) -> str:

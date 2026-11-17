@@ -24,15 +24,23 @@ MAX_NAME = 100  # Discord 的名字、频道名最长 100 字
 _SERVER_AFTER = re.compile(r"\s*(?:[）)]\s*)?[（(]「(?P<server>[^」\n]{1,100})」服务器[）)]")
 # （近况里别的服务器的帖子写成“「别的服」服务器的 帖子「攻略」（在 #大厅）”）
 _SERVER_BEFORE = re.compile(r"「(?P<server>[^」\n]{1,100})」服务器的\s*(?:帖子「[^」\n]*」\s*[（(]在\s*)?$")
+# 没写“服务器”两个字的“「别的服」#大厅”：「」里是 bot 知道的别的服务器时才算（「」也常用来框住别的字）
+_SERVER_SHORT = re.compile(r"「(?P<server>[^」\n]{1,100})」\s*$")
 
 
-def _other_server(text: str, start: int, size: int, other_server: Callable[[str], bool] | None) -> bool:
+def _other_server(
+    text: str, start: int, size: int, other_server: Callable[[str], bool] | None, known_server: Callable[[str], bool] | None = None
+) -> bool:
     """text[start] 是 #，后面 size 个字是频道名：前后写明了是哪个服务器的，other_server 说那不能当成这里（是 bot 知道的
-    别的服务器，或者认不出是这里，见 Engine._other_server_named），就不换成这里的频道链接（会指到这个服务器同名的频道）。"""
+    别的服务器，或者认不出是这里，见 Engine._other_server_named），就不换成这里的频道链接（会指到这个服务器同名的频道）。
+    只写了“「X」#频道”的：known_server 说 X 是 bot 知道的别的服务器才不换。"""
     if other_server is None:
         return False
     found = _SERVER_AFTER.match(text, start + 1 + size) or _SERVER_BEFORE.search(text, 0, start)
-    return found is not None and other_server(found["server"])
+    if found is not None:
+        return other_server(found["server"])
+    short = _SERVER_SHORT.search(text, 0, start) if known_server is not None else None
+    return short is not None and known_server(short["server"])
 
 
 def name_forms(name: str) -> set[str]:
@@ -75,20 +83,22 @@ def link(
     *,
     exclude: frozenset[int] = frozenset(),
     other_server: Callable[[str], bool] | None = None,
+    known_server: Callable[[str], bool] | None = None,
 ) -> tuple[str, list[int], list[str]]:
     """换掉 text 里的 @名字 和 #频道名。返回 (换好的文字, 按出现顺序 @ 到的人, 没对上的 @ 后面那一段字)。
 
     exclude：不能 @ 的人（它自己）。没对上的那几段给按名字在服务器里找人用。
-    other_server：写明的“「X」服务器”不能当成这里吗（是的话，那个频道不换成这里的链接；None = 都照常换）。"""
+    other_server：写明的“「X」服务器”不能当成这里吗（是的话，那个频道不换成这里的链接；None = 都照常换）。
+    known_server：只写了“「X」#频道”时，X 是不是 bot 知道的别的服务器（是的话也不换；None = 不认这种写法）。"""
     out: list[str] = []
     users: list[int] = []
     unknown: list[str] = []
     last = 0
     for code in _SKIP.finditer(text):
-        out.append(_link_plain(text[last : code.start()], people, channels, exclude, users, unknown, other_server))
+        out.append(_link_plain(text[last : code.start()], people, channels, exclude, users, unknown, other_server, known_server))
         out.append(code.group(0))
         last = code.end()
-    out.append(_link_plain(text[last:], people, channels, exclude, users, unknown, other_server))
+    out.append(_link_plain(text[last:], people, channels, exclude, users, unknown, other_server, known_server))
     return "".join(out), users, unknown
 
 
@@ -100,6 +110,7 @@ def _link_plain(
     users: list[int],
     unknown: list[str],
     other_server: Callable[[str], bool] | None = None,
+    known_server: Callable[[str], bool] | None = None,
 ) -> str:
     out: list[str] = []
     i = 0
@@ -123,7 +134,12 @@ def _link_plain(
             else:
                 found = _longest(rest, channels)
                 # 纯数字的不换：#12 是它自己看的消息编号
-                if found is not None and len(found[1]) == 1 and not found[0].isdigit() and not _other_server(text, i, len(found[0]), other_server):
+                if (
+                    found is not None
+                    and len(found[1]) == 1
+                    and not found[0].isdigit()
+                    and not _other_server(text, i, len(found[0]), other_server, known_server)
+                ):
                     out.append(f"<#{next(iter(found[1]))}>")
                     i += 1 + len(found[0])
                     continue

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -108,7 +109,46 @@ CREATE TABLE IF NOT EXISTS server_group_leaving (
     group_id INTEGER NOT NULL,
     at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chat_syncs (
+    channel_id INTEGER PRIMARY KEY, -- 连通的频道（bot 主人用 /dsowner chatsync 连的）
+    sync_id INTEGER NOT NULL,       -- 哪一组：负数。这一组共用的聊天记录按它存（conversations、turns、msgmap 的 channel_id 填它）
+    guild_id INTEGER NOT NULL,      -- 频道在哪个服务器
+    name TEXT NOT NULL DEFAULT '',  -- 连的时候的频道名（频道删掉了、bot 被移出那个服务器了，列名单时照样认得出）
+    joined_at REAL NOT NULL,
+    joined_turn INTEGER NOT NULL DEFAULT 0,  -- 连进来时最新的一条记录：断开时只拿回这之后它的那些（之前那次连通拿回过的不再拿）
+    joined_sid INTEGER NOT NULL DEFAULT 0,   -- 连进来时共用记录的下一个编号：它这次连通期间的消息编号都不小于它
+    joined_next INTEGER NOT NULL DEFAULT 0   -- 连进来时它自己那份的下一个编号：断开时比这大，就是连通期间旧版本往里写过
+);
+CREATE INDEX IF NOT EXISTS idx_msgmap_msgid ON msgmap (message_id);
+CREATE TABLE IF NOT EXISTS chat_sync_seq (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    next_no INTEGER NOT NULL        -- 下一个新组的编号（组的 ID 是它的负数；散掉的组的编号不再用）
+);
+CREATE TABLE IF NOT EXISTS chat_sync_summary (
+    sync_id INTEGER NOT NULL,       -- 连通组：它共用的记录压缩出的摘要里有这个频道的事
+    channel_id INTEGER NOT NULL,    -- （这个频道断开以后清空记忆，原话都压掉了也知道要清掉那份摘要）
+    PRIMARY KEY (sync_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_sync_summary_channel ON chat_sync_summary (channel_id);
+CREATE TABLE IF NOT EXISTS chat_sync_kept (
+    sync_id INTEGER NOT NULL,       -- 断开时没能拿回自己那部分的频道（它自己那份记录在连通期间被旧版本写过）：
+    channel_id INTEGER NOT NULL,    -- 那部分留在组里，照样在组里整理记忆
+    from_turn INTEGER NOT NULL,     -- 那次连进来时最新的那条记录（这之后的是那次连通期间说的）
+    PRIMARY KEY (sync_id, channel_id)
+);
+CREATE TABLE IF NOT EXISTS chat_unvetted (
+    channel_id INTEGER PRIMARY KEY,   -- 哪份记录（连通组共用的那份是负数，频道自己那份是频道 ID）
+    turns TEXT NOT NULL DEFAULT '[]', -- 没问过模型就记进去的那几轮（turns 的 id）：带着它们的请求过了才划掉，被拒了换成一句
+    edits TEXT NOT NULL DEFAULT '[]'  -- 连通组的记录里直接改成了新内容、还没问过模型的那几条消息（message id）
+);                                    -- （记在库里：重启以后照样认得，不然被拒了换不掉，组里的频道从此每一轮都被拒）
+CREATE TABLE IF NOT EXISTS chat_sync_scrub (
+    sync_id INTEGER PRIMARY KEY,        -- 服务器退出服务器组时这个连通组正在跑一轮：那一轮写完以后要再查一遍（scrub_cross）
+    lookups INTEGER NOT NULL DEFAULT 0, -- 那一轮按原来的组要翻记录、查人设卡的动作也拿掉
+    whole INTEGER NOT NULL DEFAULT 0    -- 整份记录都查（组里原来有的服务器退出了服务器组）
+);                                      -- （记在库里：那一轮写完、还没查就停了的话，下次启动时照样查）
 """
+
+log = logging.getLogger(__name__)
 
 MSGMAP_KEEP = 3000  # 每个频道保留最近多少个消息编号的映射
 # 旧版本的数据库缺的列：启动时自动补上，原有数据不动
@@ -116,6 +156,16 @@ _MIGRATIONS = (
     ("msgmap", "author_id", "INTEGER"),
     ("msgmap", "author_name", "TEXT"),
     ("conversations", "reviewed_upto", "INTEGER NOT NULL DEFAULT 0"),
+    # 连通的频道共用一份记录：每条记录、每个消息编号是哪个频道的（NULL = 就是记录所属的那个频道，没连通的都是 NULL）
+    ("turns", "origin", "INTEGER"),
+    ("msgmap", "origin", "INTEGER"),
+    # 断开时拿回过共用记录里那部分的记录：编号中间跳了一段，旧的编号映射按条数留（不按编号差）
+    ("conversations", "took_back", "INTEGER NOT NULL DEFAULT 0"),
+    ("chat_syncs", "joined_turn", "INTEGER NOT NULL DEFAULT 0"),
+    ("chat_syncs", "joined_sid", "INTEGER NOT NULL DEFAULT 0"),
+    ("chat_syncs", "joined_next", "INTEGER NOT NULL DEFAULT 0"),
+    # 连通组的记录几个频道分开整理，不是按先后连着整理完的：这一条整理过了（断开时拿回去的也照这个算，免得整理两遍）
+    ("turns", "reviewed", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -150,16 +200,22 @@ class Turn:
     role: str
     content: Any  # str 或 list[dict]
     created_at: float = 0.0
+    origin: int | None = None  # 连通的几个频道共用的记录里：这一条是哪个频道的（没连通的记录都是 None）
 
 
 @dataclass
 class Conversation:
-    channel_id: int
-    guild_id: int
+    channel_id: int  # 记录按它存：没连通的频道就是频道自己；连通的几个频道共用一份，是连通组的 ID（负数）
+    guild_id: int  # 连通组的记录是 0（几个服务器共用）
     summary: str | None = None
     next_short_id: int = 1
     turns: list[Turn] = field(default_factory=list)
     reviewed_upto: int = 0  # 整理记忆整理到哪条记录了（记录的 id）
+    sparse: bool = False  # 断开连通时拿回过共用记录里的那部分：编号中间跳了一段（旧的编号映射按条数留）
+
+
+class SyncError(ValueError):
+    """连通、断开做不了（频道已经在别的组里、不在组里……）：说明给 bot 主人看。"""
 
 
 def _dump(value: Any) -> str:
@@ -182,6 +238,11 @@ class Store:
             for r in self.db.execute("SELECT guild_id, group_id FROM server_groups ORDER BY joined_at, guild_id")
         }
         self._epochs: dict[int, int] = {}  # 服务器 -> 它的服务器组变过几次（问模型期间变过没有：连了又退回来，归属一样、编号却变了）
+        # 连通的频道 -> 连通组（每条消息进来都要查：放在内存里，按连进来的先后排）
+        self._syncs: dict[int, int] = {
+            r["channel_id"]: r["sync_id"]
+            for r in self.db.execute("SELECT channel_id, sync_id FROM chat_syncs ORDER BY joined_at, channel_id")
+        }
 
     def _migrate(self) -> None:
         """旧版本建的表少几列：补上（新建的表直接按 SCHEMA 建，已经有这些列）。"""
@@ -220,17 +281,18 @@ class Store:
     # ---- 对话 ----
     def load_conversation(self, channel_id: int, guild_id: int) -> Conversation:
         row = self.db.execute(
-            "SELECT guild_id, summary, next_short_id, reviewed_upto FROM conversations WHERE channel_id = ?", (channel_id,)
+            "SELECT guild_id, summary, next_short_id, reviewed_upto, took_back FROM conversations WHERE channel_id = ?", (channel_id,)
         ).fetchone()
         conv = Conversation(channel_id=channel_id, guild_id=guild_id)
         if row is not None:
             conv.summary = row["summary"]
             conv.next_short_id = row["next_short_id"]
             conv.reviewed_upto = row["reviewed_upto"] or 0
+            conv.sparse = bool(row["took_back"])
         for r in self.db.execute(
-            "SELECT id, role, content, created_at FROM turns WHERE channel_id = ? ORDER BY id", (channel_id,)
+            "SELECT id, role, content, created_at, origin FROM turns WHERE channel_id = ? ORDER BY id", (channel_id,)
         ):
-            conv.turns.append(Turn(r["id"], r["role"], json.loads(r["content"]), r["created_at"] or 0.0))
+            conv.turns.append(Turn(r["id"], r["role"], json.loads(r["content"]), r["created_at"] or 0.0, r["origin"]))
         return conv
 
     def load_msgmap(self, channel_id: int) -> dict[int, int]:
@@ -240,6 +302,14 @@ class Store:
             (channel_id, MSGMAP_KEEP),
         ).fetchall()
         return {r["short_id"]: r["message_id"] for r in rows}
+
+    def load_msg_origins(self, channel_id: int) -> dict[int, int]:
+        """连通组的记录里：short_id -> 那条消息在哪个频道（最近的一批；没连通的记录是空的）。"""
+        rows = self.db.execute(
+            "SELECT short_id, origin FROM msgmap WHERE channel_id = ? AND origin IS NOT NULL ORDER BY short_id DESC LIMIT ?",
+            (channel_id, MSGMAP_KEEP),
+        ).fetchall()
+        return {r["short_id"]: r["origin"] for r in rows}
 
     def load_authors(self, channel_id: int, short_ids: Iterable[int]) -> dict[int, tuple[int, str]]:
         """消息编号 -> (发消息的人, 当时的名字)。bot 发的、旧版本记下的（没记作者）不在里面。"""
@@ -256,12 +326,15 @@ class Store:
                 out[r["short_id"]] = (r["author_id"], r["author_name"] or "")
         return out
 
-    def recent_authors(self, channel_id: int, limit: int) -> list[tuple[int, str]]:
-        """这个频道最近说过话的人（不含 bot）：[(用户 ID, 最近一次的名字)]，最近的在前。"""
+    def recent_authors(self, channel_id: int, limit: int, origin: int | None = None) -> list[tuple[int, str]]:
+        """这个频道最近说过话的人（不含 bot）：[(用户 ID, 最近一次的名字)]，最近的在前。
+        origin：连通组的记录（channel_id 是组的 ID）里只看这个频道的。"""
+        where = "" if origin is None else " AND origin = ?"
         rows = self.db.execute(
-            "SELECT author_id, author_name FROM msgmap WHERE channel_id = ? AND author_id IS NOT NULL "
-            "ORDER BY short_id DESC LIMIT ?",
-            (channel_id, limit * 5),
+            "SELECT author_id, author_name FROM msgmap WHERE channel_id = ? AND author_id IS NOT NULL"
+            + where
+            + " ORDER BY short_id DESC LIMIT ?",
+            (channel_id, limit * 5) if origin is None else (channel_id, origin, limit * 5),
         ).fetchall()
         seen: dict[int, str] = {}
         for r in rows:
@@ -330,6 +403,11 @@ class Store:
         r = self.db.execute("SELECT content FROM turns WHERE id = ?", (turn_id,)).fetchone()
         return json.loads(r["content"]) if r is not None else None
 
+    def update_turns(self, pairs: Iterable[tuple[int, Any]]) -> None:
+        """一次改写好几条记录（一个事务里：要么都改了，要么都没改）。"""
+        with self.db:
+            self.db.executemany("UPDATE turns SET content = ? WHERE id = ?", [(_dump(content), turn_id) for turn_id, content in pairs])
+
     def update_turn(self, turn_id: int, content: Any) -> None:
         """改写一条记录（消息被删、被编辑时用；平时记录只追加）。"""
         with self.db:
@@ -353,29 +431,32 @@ class Store:
         assistant_content: str,
         assigned: Iterable[tuple[Any, ...]],
         now: float | None = None,
+        origin: int | None = None,
     ) -> None:
         """追加一轮（user + assistant）。conv.turns 和 conv.next_short_id 同步更新。
 
-        assigned：这一轮新编的号，(编号, 消息 id) 或 (编号, 消息 id, 发消息的人, 名字)（bot 发的人填 None）。"""
+        assigned：这一轮新编的号，(编号, 消息 id) 或 (编号, 消息 id, 发消息的人, 名字)（bot 发的人填 None）。
+        origin：连通组共用的记录里，这一轮是哪个频道的（这一轮的消息都在那个频道；没连通的不填）。"""
         now = time.time() if now is None else now
         with self.db:
             cur = self.db.execute(
-                "INSERT INTO turns (channel_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
-                (conv.channel_id, _dump(user_content), now),
+                "INSERT INTO turns (channel_id, role, content, created_at, origin) VALUES (?, 'user', ?, ?, ?)",
+                (conv.channel_id, _dump(user_content), now, origin),
             )
             user_id = cur.lastrowid
             cur = self.db.execute(
-                "INSERT INTO turns (channel_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-                (conv.channel_id, _dump(assistant_content), now),
+                "INSERT INTO turns (channel_id, role, content, created_at, origin) VALUES (?, 'assistant', ?, ?, ?)",
+                (conv.channel_id, _dump(assistant_content), now, origin),
             )
             assistant_id = cur.lastrowid
             rows = []
             for item in assigned:
                 sid, mid, *who = item
                 author, name = (who + [None, None])[:2]
-                rows.append((conv.channel_id, sid, mid, author, name))
+                rows.append((conv.channel_id, sid, mid, author, name, origin))
             self.db.executemany(
-                "INSERT OR REPLACE INTO msgmap (channel_id, short_id, message_id, author_id, author_name) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO msgmap (channel_id, short_id, message_id, author_id, author_name, origin) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self.db.execute(
@@ -384,21 +465,147 @@ class Store:
                 "next_short_id = excluded.next_short_id, updated_at = excluded.updated_at",
                 (conv.channel_id, conv.guild_id, conv.summary, conv.next_short_id, now),
             )
-            self.db.execute(
-                "DELETE FROM msgmap WHERE channel_id = ? AND short_id < ?",
-                (conv.channel_id, conv.next_short_id - MSGMAP_KEEP),
-            )
+            self._trim_msgmap(conv.channel_id, conv.next_short_id, sparse=conv.sparse)
         # JSON 往返一次，保证内存里的内容和以后从库里读出来的完全一致
-        conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content)), now))
-        conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content)), now))
+        conv.turns.append(Turn(user_id, "user", json.loads(_dump(user_content)), now, origin))
+        conv.turns.append(Turn(assistant_id, "assistant", json.loads(_dump(assistant_content)), now, origin))
+
+    def _trim_msgmap(self, key: int, next_short_id: int, *, sparse: bool = False) -> None:
+        """只留最近的 MSGMAP_KEEP 个消息编号的映射（调用方开着事务）。编号中间会跳过一大段的记录按条数留：断开连通时拿回过
+        共用记录里那部分的（sparse），还有连通组共用的记录（key 是负数：有频道连进来时编号接在它自己用过的后面，会往后跳）。
+        按编号差算会把跳之前、还在记录里的那些也删掉（删了它们，之后有人删消息、改消息就改不到记录了）。"""
+        if not sparse and key >= 0:
+            self.db.execute("DELETE FROM msgmap WHERE channel_id = ? AND short_id < ?", (key, next_short_id - MSGMAP_KEEP))
+            return
+        self.db.execute(
+            "DELETE FROM msgmap WHERE channel_id = ? AND short_id < "
+            "(SELECT short_id FROM msgmap WHERE channel_id = ? ORDER BY short_id DESC LIMIT 1 OFFSET ?)",
+            (key, key, MSGMAP_KEEP - 1),
+        )
+
+    def message_keys(self, message_ids: Iterable[int]) -> set[int]:
+        """这几条消息在哪几份记录里（记录的 ID：频道自己的、连通组的；连通期间、断开以后可能两份都有）。"""
+        ids = sorted(set(message_ids))
+        out: set[int] = set()
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            marks = ",".join("?" for _ in chunk)
+            out.update(r["channel_id"] for r in self.db.execute(f"SELECT DISTINCT channel_id FROM msgmap WHERE message_id IN ({marks})", chunk))
+        return out
+
+    def origin_syncs(self, channel_id: int) -> list[int]:
+        """共用记录里还有这个频道说过的话的连通组（它现在在的、和断开以后还留着它那部分的）：原话还在的，和压进了摘要的。"""
+        rows = self.db.execute(
+            "SELECT DISTINCT channel_id FROM turns WHERE origin = ? AND channel_id < 0 "
+            "UNION SELECT sync_id FROM chat_sync_summary WHERE channel_id = ?",
+            (channel_id, channel_id),
+        )
+        return sorted((int(r[0]) for r in rows), reverse=True)
+
+    def mark_reviewed(self, turn_ids: Iterable[int]) -> None:
+        """这几条记录整理过记忆了（连通组的记录几个频道分开整理：整理完一段记一段）。"""
+        ids = sorted(set(turn_ids))
+        if not ids:
+            return
+        with self.db:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i : i + 500]
+                marks = ",".join("?" for _ in chunk)
+                self.db.execute(f"UPDATE turns SET reviewed = 1 WHERE id IN ({marks})", chunk)
+
+    def reviewed_turns(self, key: int, after: int) -> set[int]:
+        """这份记录里 after 之后已经整理过的记录（连通组分开整理完的那几段；断开时拿回来、在组里整理过的）。"""
+        rows = self.db.execute("SELECT id FROM turns WHERE channel_id = ? AND id > ? AND reviewed = 1", (key, after))
+        return {int(r["id"]) for r in rows}
+
+    def record_guild(self, channel_id: int) -> int | None:
+        """这个频道自己那份记录记下的服务器（没有这份记录是 None）。"""
+        row = self.db.execute("SELECT guild_id FROM conversations WHERE channel_id = ?", (channel_id,)).fetchone()
+        return int(row[0]) if row is not None and row[0] else None
+
+    def turn_ids(self, key: int) -> set[int]:
+        """这份记录现在有的记录（的 id）。"""
+        return {int(r["id"]) for r in self.db.execute("SELECT id FROM turns WHERE channel_id = ?", (key,))}
+
+    def load_unvetted(self, key: int) -> tuple[list[int], set[int]]:
+        """这份记录里还没问过模型的：(那几轮的 id, 直接改成了新内容的那几条消息)。"""
+        row = self.db.execute("SELECT turns, edits FROM chat_unvetted WHERE channel_id = ?", (key,)).fetchone()
+        if row is None:
+            return [], set()
+        return [int(t) for t in json.loads(row["turns"])], {int(m) for m in json.loads(row["edits"])}
+
+    def mark_scrub(self, sync_id: int, *, lookups: bool, whole: bool) -> None:
+        """记下这个连通组正在跑的那一轮写完以后要再查一遍（已经记着的只会多查，不会少查）。"""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO chat_sync_scrub (sync_id, lookups, whole) VALUES (?, ?, ?) ON CONFLICT (sync_id) DO UPDATE SET "
+                "lookups = MAX(lookups, excluded.lookups), whole = MAX(whole, excluded.whole)",
+                (sync_id, int(lookups), int(whole)),
+            )
+
+    def pending_scrubs(self) -> dict[int, tuple[bool, bool]]:
+        """上次写完以后没来得及再查的连通组：组 -> (lookups, whole)。"""
+        rows = self.db.execute("SELECT sync_id, lookups, whole FROM chat_sync_scrub")
+        return {int(r["sync_id"]): (bool(r["lookups"]), bool(r["whole"])) for r in rows}
+
+    def pending_scrub(self, sync_id: int) -> tuple[bool, bool] | None:
+        """这个连通组记着的、写完以后还没查的：(lookups, whole)，没有是 None。"""
+        row = self.db.execute("SELECT lookups, whole FROM chat_sync_scrub WHERE sync_id = ?", (sync_id,)).fetchone()
+        return (bool(row["lookups"]), bool(row["whole"])) if row is not None else None
+
+    def clear_scrub(self, sync_id: int) -> None:
+        """这个连通组那一轮写完以后要查的查过了。"""
+        with self.db:
+            self.db.execute("DELETE FROM chat_sync_scrub WHERE sync_id = ?", (sync_id,))
+
+    def save_unvetted(self, key: int, turns: Iterable[int], edits: Iterable[int]) -> None:
+        """记下这份记录里还没问过模型的（都过了、都换掉了就删掉这一行）。"""
+        listed, changed = sorted(set(turns)), sorted(set(edits))
+        with self.db:
+            if listed or changed:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO chat_unvetted (channel_id, turns, edits) VALUES (?, ?, ?)",
+                    (key, _dump(listed), _dump(changed)),
+                )
+            else:
+                self.db.execute("DELETE FROM chat_unvetted WHERE channel_id = ?", (key,))
+
+    def record_turns(self, key: int) -> list[tuple[int, str, Any, int | None]]:
+        """这份记录的每一条，按先后：[(id, user / assistant, 内容, 哪个频道的)]。"""
+        rows = self.db.execute("SELECT id, role, content, origin FROM turns WHERE channel_id = ? ORDER BY id", (key,))
+        return [(int(r["id"]), r["role"], json.loads(r["content"]), r["origin"]) for r in rows]
+
+    def msg_origins(self, key: int, short_ids: Iterable[int]) -> dict[int, int]:
+        """连通组的记录里，这几个编号的消息各在哪个频道（不在映射里的不在结果里）。"""
+        ids = sorted(set(short_ids))
+        out: dict[int, int] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            marks = ",".join("?" for _ in chunk)
+            for r in self.db.execute(
+                f"SELECT short_id, origin FROM msgmap WHERE channel_id = ? AND short_id IN ({marks}) AND origin IS NOT NULL",
+                (key, *chunk),
+            ):
+                out[int(r["short_id"])] = int(r["origin"])
+        return out
+
+    def next_short_id(self, key: int) -> int:
+        """这份记录的下一个消息编号（库里记的）。"""
+        row = self.db.execute("SELECT next_short_id FROM conversations WHERE channel_id = ?", (key,)).fetchone()
+        return int(row["next_short_id"]) if row is not None else 1
 
     def compact(self, conv: Conversation, summary: str, remove_count: int) -> None:
         """用摘要替换最早的 remove_count 条 turn。"""
         if remove_count <= 0:
             return
         last_removed = conv.turns[remove_count - 1].id
+        # 连通组的记录：压进摘要的有哪几个频道的事（那个频道以后清空记忆时，就算它的原话都压掉了，也知道要清掉这份摘要）
+        origins = sorted({t.origin for t in conv.turns[:remove_count] if t.origin is not None}) if conv.channel_id < 0 else []
         with self.db:
             self.db.execute("DELETE FROM turns WHERE channel_id = ? AND id <= ?", (conv.channel_id, last_removed))
+            self.db.executemany(
+                "INSERT OR IGNORE INTO chat_sync_summary (sync_id, channel_id) VALUES (?, ?)", [(conv.channel_id, o) for o in origins]
+            )
             self.db.execute(
                 "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) ON CONFLICT (channel_id) DO UPDATE SET "
@@ -409,11 +616,13 @@ class Store:
         conv.turns = conv.turns[remove_count:]
 
     def conversation_channels(self, guild_id: int) -> list[int]:
-        """这个服务器里有对话记录（或摘要）的频道。"""
+        """这个服务器里有对话记录（或摘要）的频道。连通的频道：连通之前自己的记录，或者共用的记录里有它的。"""
         rows = self.db.execute(
             "SELECT channel_id FROM conversations c WHERE guild_id = ? AND (summary IS NOT NULL "
-            "OR EXISTS (SELECT 1 FROM turns t WHERE t.channel_id = c.channel_id)) ORDER BY channel_id",
-            (guild_id,),
+            "OR EXISTS (SELECT 1 FROM turns t WHERE t.channel_id = c.channel_id)) "
+            "UNION SELECT s.channel_id FROM chat_syncs s WHERE s.guild_id = ? "
+            "AND EXISTS (SELECT 1 FROM turns t WHERE t.channel_id = s.sync_id AND t.origin = s.channel_id) ORDER BY channel_id",
+            (guild_id, guild_id),
         ).fetchall()
         return [r["channel_id"] for r in rows]
 
@@ -425,6 +634,7 @@ class Store:
     def reset_conversation(self, channel_id: int) -> None:
         with self.db:
             self.db.execute("DELETE FROM turns WHERE channel_id = ?", (channel_id,))
+            self.db.execute("DELETE FROM chat_unvetted WHERE channel_id = ?", (channel_id,))  # 记录清空了：没问过模型的也没了
             self.db.execute(
                 "UPDATE conversations SET summary = NULL, updated_at = ? WHERE channel_id = ?",
                 (time.time(), channel_id),
@@ -642,6 +852,242 @@ class Store:
     def done_leaving(self, guild_id: int) -> None:
         with self.db:
             self.db.execute("DELETE FROM server_group_leaving WHERE guild_id = ?", (guild_id,))
+
+    # ---------------------------------------------------------------- 连通的频道（/dsowner chatsync）
+
+    def sync_of(self, channel_id: int) -> int | None:
+        """这个频道在哪个连通组（负数）；没连通是 None。"""
+        return self._syncs.get(channel_id)
+
+    def conversation_key(self, channel_id: int) -> int:
+        """这个频道现在的聊天记录按哪个 ID 存：连通了是连通组的 ID，不然就是频道自己。"""
+        return self._syncs.get(channel_id, channel_id)
+
+    def sync_members(self, sync_id: int) -> list[int]:
+        """连通组里的频道，按连进来的先后。"""
+        return [c for c, s in self._syncs.items() if s == sync_id]
+
+    def syncs(self) -> dict[int, list[int]]:
+        """连通组 -> 组里的频道（按连进来的先后）；组按建的先后。"""
+        out: dict[int, list[int]] = {}
+        for channel_id, sync_id in self._syncs.items():
+            out.setdefault(sync_id, []).append(channel_id)
+        return dict(sorted(out.items(), key=lambda item: -item[0]))
+
+    def sync_place(self, channel_id: int) -> tuple[int, str] | None:
+        """连的时候记下的 (服务器, 频道名)：频道找不到了（删掉了、bot 被移出那个服务器）时用。"""
+        row = self.db.execute("SELECT guild_id, name FROM chat_syncs WHERE channel_id = ?", (channel_id,)).fetchone()
+        return (int(row["guild_id"]), row["name"]) if row is not None else None
+
+    def link_channels(
+        self, channel: tuple[int, int, str], other: tuple[int, int, str], now: float | None = None
+    ) -> tuple[int, list[int]]:
+        """把 channel 和 other（都是 (频道, 服务器, 名字)）连通：都没连通就建一个新组（other 排在前面）；有一个已经在
+        组里，另一个加进那个组。返回 (组, 这次连进来的频道)。
+
+        连进来的频道自己原来的记录留着不动：连通期间不往里写，只给它自己的频道看（断开后接着用）。共用的记录从这一刻开始，
+        编号接在每个连进来的频道自己用过的编号后面：断开时把它自己的那部分拿回去，编号不会撞上。"""
+        now = time.time() if now is None else now
+        if channel[0] == other[0]:
+            raise SyncError("不能把一个频道连到它自己。")
+        a, b = self._syncs.get(channel[0]), self._syncs.get(other[0])
+        if a is not None and b is not None:
+            raise SyncError("这两个频道已经连通了。" if a == b else "两个频道都已经在别的连通组里了：先把其中一个断开。")
+        with self.db:
+            if a is None and b is None:
+                row = self.db.execute("SELECT next_no FROM chat_sync_seq WHERE id = 1").fetchone()
+                low = self.db.execute("SELECT MIN(channel_id) AS m FROM conversations").fetchone()["m"]
+                # 编号表被单独还原过也不撞上库里已经有的组
+                no = max(row["next_no"] if row is not None else 1, 1 - min(0, low or 0))
+                self.db.execute(
+                    "INSERT INTO chat_sync_seq (id, next_no) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET next_no = excluded.next_no",
+                    (no + 1,),
+                )
+                sync_id, joining = -no, [other, channel]
+            else:
+                sync_id = a if a is not None else b  # type: ignore[assignment]
+                joining = [other] if a is not None else [channel]
+            ids = [c for c, _, _ in joining]
+            marks = ",".join("?" for _ in ids)
+            nexts = {
+                int(r["channel_id"]): int(r["next_short_id"])
+                for r in self.db.execute(
+                    f"SELECT channel_id, next_short_id FROM conversations WHERE channel_id IN ({marks}, ?)", (*ids, sync_id)
+                )
+            }
+            start = max([1, *nexts.values()])
+            self.db.execute(
+                "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at) VALUES (?, 0, NULL, ?, ?) "
+                "ON CONFLICT (channel_id) DO UPDATE SET next_short_id = MAX(conversations.next_short_id, excluded.next_short_id)",
+                (sync_id, start, now),
+            )
+            last = self.db.execute("SELECT MAX(joined_at) AS t FROM chat_syncs").fetchone()["t"]
+            newest = self.db.execute("SELECT COALESCE(MAX(id), 0) AS m FROM turns").fetchone()["m"]
+            for cid, guild_id, name in joining:
+                at = max(now, last + 0.001) if last is not None else now  # 先后要分得出来：重启以后顺序不变
+                last = at
+                self.db.execute(
+                    "INSERT INTO chat_syncs (channel_id, sync_id, guild_id, name, joined_at, joined_turn, joined_sid, joined_next) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (cid, sync_id, guild_id, name, at, newest, start, nexts.get(cid, 1)),
+                )
+            # 又连回同一个组：之前断开时没能拿回去、留在组里整理的那部分不再算（不然这次连通期间说的，组里和它自己那份都会整理）
+            self.db.execute(f"DELETE FROM chat_sync_kept WHERE sync_id = ? AND channel_id IN ({marks})", (sync_id, *ids))
+        for cid in ids:
+            self._syncs[cid] = sync_id
+        return sync_id, ids
+
+    def unlink_channel(self, channel_id: int, now: float | None = None) -> tuple[int, list[int], list[int]]:
+        """把这个频道从连通组里断开。返回 (组, 断开的频道, 组里还剩的频道)。组里只剩一个时组就散了：剩下的那个也断开
+        （也在“断开的频道”里），共用的记录删掉。
+
+        断开的频道把共用记录里自己的那部分（它的频道里说的、它在那里回的）复制回自己原来的记录后面，接着用；别的频道说的
+        不带走，共用记录更早的摘要（里面有别的频道的事）也不带走。还在组里的频道照样看得到它连通期间说过的。"""
+        now = time.time() if now is None else now
+        sync_id = self._syncs.get(channel_id)
+        if sync_id is None:
+            raise SyncError("这个频道没有连通。")
+        rest = [c for c in self.sync_members(sync_id) if c != channel_id]
+        leaving = [channel_id] + (rest if len(rest) <= 1 else [])
+        with self.db:
+            shared = self.db.execute(
+                "SELECT next_short_id, reviewed_upto FROM conversations WHERE channel_id = ?", (sync_id,)
+            ).fetchone()
+            for cid in leaving:
+                self._take_back(sync_id, cid, shared, now, keep=len(rest) > 1)
+            marks = ",".join("?" for _ in leaving)
+            self.db.execute(f"DELETE FROM chat_syncs WHERE channel_id IN ({marks})", leaving)
+            if len(rest) <= 1:
+                self.db.execute(
+                    "DELETE FROM dm_memory_attached WHERE turn_id IN (SELECT id FROM turns WHERE channel_id = ?)", (sync_id,)
+                )
+                self.db.execute("DELETE FROM turns WHERE channel_id = ?", (sync_id,))
+                self.db.execute("DELETE FROM msgmap WHERE channel_id = ?", (sync_id,))
+                self.db.execute("DELETE FROM conversations WHERE channel_id = ?", (sync_id,))
+                self.db.execute("DELETE FROM chat_sync_summary WHERE sync_id = ?", (sync_id,))
+                self.db.execute("DELETE FROM chat_sync_kept WHERE sync_id = ?", (sync_id,))
+                self.db.execute("DELETE FROM chat_unvetted WHERE channel_id = ?", (sync_id,))
+                self.db.execute("DELETE FROM chat_sync_scrub WHERE sync_id = ?", (sync_id,))
+        for cid in leaving:
+            self._syncs.pop(cid, None)
+        return sync_id, leaving, (rest if len(rest) > 1 else [])
+
+    def _take_back(self, sync_id: int, channel_id: int, shared: Any, now: float, *, keep: bool = False) -> None:
+        """断开时（调用方开着事务）：共用记录里这个频道这次连通期间的那部分（之前哪次连通拿回过的不再拿）复制回它自己的
+        记录后面，编号照旧。在共用记录里已经整理过记忆的那些（整批整理完的，或者分开整理完的那几段），复制回来也记成整理过
+        （别再整理一遍）；它自己那份连通之前还有没整理完的，整理进度不跳过去。
+        它自己那份在连通期间被写过（旧版本跑过：不认连通组，照常往里写）的话不拿：编号会撞上，记录就乱了。组还在（keep）的话，
+        那部分留在组里，记在 chat_sync_kept：照样在组里整理记忆（不然哪边都不整理）。"""
+        mark = self.db.execute(
+            "SELECT guild_id, joined_turn, joined_sid, joined_next FROM chat_syncs WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        own = self.db.execute(
+            "SELECT next_short_id, reviewed_upto FROM conversations WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        own_next = int(own["next_short_id"]) if own is not None else 1
+        if mark["joined_next"] and own_next > mark["joined_next"]:
+            log.warning(
+                "连通：频道 %s 连通期间它自己那份记录被写过（多半是换回旧版本跑过），断开时不把连通期间的聊天拿回去（免得编号撞上）",
+                channel_id,
+            )
+            if keep:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO chat_sync_kept (sync_id, channel_id, from_turn) VALUES (?, ?, ?)",
+                    (sync_id, channel_id, mark["joined_turn"]),
+                )
+            return
+        reviewed = shared["reviewed_upto"] if shared is not None else 0
+        own_reviewed = int(own["reviewed_upto"] or 0) if own is not None else 0
+        # 整理进度只能跳过整理过的：它自己那份后面还有没整理的（连通时没整理完），拿回来的就算整理过也只记在每一条上
+        whole = (
+            self.db.execute(
+                "SELECT 1 FROM turns WHERE channel_id = ? AND id > ? AND reviewed = 0 LIMIT 1", (channel_id, own_reviewed)
+            ).fetchone()
+            is None
+        )
+        last_reviewed = 0
+        rows = self.db.execute(
+            "SELECT id, role, content, created_at, reviewed FROM turns WHERE channel_id = ? AND origin = ? AND id > ? ORDER BY id",
+            (sync_id, channel_id, mark["joined_turn"]),
+        ).fetchall()
+        for r in rows:
+            done = r["id"] <= reviewed or bool(r["reviewed"])
+            cur = self.db.execute(
+                "INSERT INTO turns (channel_id, role, content, created_at, origin, reviewed) VALUES (?, ?, ?, ?, NULL, ?)",
+                (channel_id, r["role"], r["content"], r["created_at"], int(done)),
+            )
+            if not done:
+                whole = False
+            elif whole:
+                last_reviewed = int(cur.lastrowid)
+        self.db.execute(
+            "INSERT OR IGNORE INTO msgmap (channel_id, short_id, message_id, author_id, author_name, origin) "
+            "SELECT ?, short_id, message_id, author_id, author_name, NULL FROM msgmap "
+            "WHERE channel_id = ? AND origin = ? AND short_id >= ?",
+            (channel_id, sync_id, channel_id, mark["joined_sid"]),
+        )
+        nxt = max(own_next, shared["next_short_id"] if shared is not None else 1)
+        self.db.execute(
+            "INSERT INTO conversations (channel_id, guild_id, summary, next_short_id, updated_at, reviewed_upto, took_back) "
+            "VALUES (?, ?, NULL, ?, ?, ?, 1) ON CONFLICT (channel_id) DO UPDATE SET "
+            "next_short_id = MAX(conversations.next_short_id, excluded.next_short_id), updated_at = excluded.updated_at, "
+            "reviewed_upto = MAX(conversations.reviewed_upto, excluded.reviewed_upto), took_back = 1",
+            (channel_id, mark["guild_id"], nxt, now, last_reviewed),
+        )
+        self._trim_msgmap(channel_id, nxt, sparse=True)
+
+    def raise_join_marks(self, channel_id: int, own_next: int) -> None:
+        """连进来以后才把它缓冲区里连通之前的闲聊记进它自己那份（编号往后用了几个）：连进来时记下的编号跟着往后挪，共用记录
+        的下一个编号也不能比它小。不然同一个编号会用两次，断开时也会被当成“连通期间被旧版本写过”、不拿回自己那部分。"""
+        sync = self._syncs.get(channel_id)
+        if sync is None:
+            return
+        with self.db:
+            self.db.execute(
+                "UPDATE chat_syncs SET joined_next = MAX(joined_next, ?), joined_sid = MAX(joined_sid, ?) WHERE channel_id = ?",
+                (own_next, own_next, channel_id),
+            )
+            self.db.execute("UPDATE conversations SET next_short_id = MAX(next_short_id, ?) WHERE channel_id = ?", (own_next, sync))
+
+    def sync_joined_turns(self, sync_id: int) -> dict[int, int]:
+        """连通组里每个频道这次连进来时最新的那条记录：之前哪次连通时说的（断开时拿回去、在它自己那份里整理过了）在这之前。
+        断开时没能拿回去的频道（chat_sync_kept）也在里面：那次连通期间说的留在组里，照样在组里整理。"""
+        out = {
+            int(r["channel_id"]): int(r["from_turn"])
+            for r in self.db.execute("SELECT channel_id, from_turn FROM chat_sync_kept WHERE sync_id = ?", (sync_id,))
+        }
+        for r in self.db.execute("SELECT channel_id, joined_turn FROM chat_syncs WHERE sync_id = ?", (sync_id,)):
+            out[int(r["channel_id"])] = int(r["joined_turn"])  # 又连回来了：按这次的算
+        return out
+
+    def stale_syncs(self) -> list[int]:
+        """连通的频道里，它自己那份记录在连通期间被写过的（旧版本跑过）：启动时提醒一声。"""
+        rows = self.db.execute(
+            "SELECT s.channel_id FROM chat_syncs s JOIN conversations c ON c.channel_id = s.channel_id "
+            "WHERE s.joined_next > 0 AND c.next_short_id > s.joined_next ORDER BY s.channel_id"
+        )
+        return [int(r["channel_id"]) for r in rows]
+
+    def drop_origin(self, sync_id: int, channel_id: int, *, member: bool = True) -> None:
+        """连通的频道清空记忆：共用记录里这个频道的那部分删掉，更早的摘要也删掉（里面有它的事，分不开）。以前在组里的频道
+        （member 不是真的）：只在它说的压进过那份摘要时才删摘要（chat_sync_summary 里记着）。别的频道的不动。"""
+        with self.db:
+            in_summary = member or (
+                self.db.execute(
+                    "SELECT 1 FROM chat_sync_summary WHERE sync_id = ? AND channel_id = ?", (sync_id, channel_id)
+                ).fetchone()
+                is not None
+            )
+            self.db.execute(
+                "DELETE FROM dm_memory_attached WHERE turn_id IN (SELECT id FROM turns WHERE channel_id = ? AND origin = ?)",
+                (sync_id, channel_id),
+            )
+            self.db.execute("DELETE FROM turns WHERE channel_id = ? AND origin = ?", (sync_id, channel_id))
+            self.db.execute("DELETE FROM msgmap WHERE channel_id = ? AND origin = ?", (sync_id, channel_id))
+            if in_summary:
+                self.db.execute("UPDATE conversations SET summary = NULL, updated_at = ? WHERE channel_id = ?", (time.time(), sync_id))
+                self.db.execute("DELETE FROM chat_sync_summary WHERE sync_id = ?", (sync_id,))  # 摘要整个清掉了
+            self.db.execute("DELETE FROM chat_sync_kept WHERE sync_id = ? AND channel_id = ?", (sync_id, channel_id))
 
     def spend_by_guild(self, day: str) -> dict[int, float]:
         rows = self.db.execute("SELECT guild_id, SUM(cost) AS c FROM usage WHERE day = ? GROUP BY guild_id", (day,))

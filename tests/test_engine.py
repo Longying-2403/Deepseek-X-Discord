@@ -316,6 +316,7 @@ class Memory(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(501, "@小D 我叫阿明", mentions_bot=True))
         await engine.drain()
         engine.states.clear()  # 模拟重启：内存状态清空，只剩数据库
+        engine.convs.clear()  # 记录的状态也在内存里（连通的频道共用一份），一起清掉
         await engine.handle_message(msg(502, "@小D 我叫啥", mentions_bot=True))
         await engine.drain()
         messages = llm.calls[-1]["messages"]

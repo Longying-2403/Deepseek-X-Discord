@@ -22,11 +22,17 @@ from .prompts import (
     GALLERY_FOOT,
     GALLERY_HEAD,
     HINT_MENTION,
+    HINT_PASSIVE,
     HINT_PROACTIVE,
     MESSAGE_DELETED,
     MUSIC_IDLE,
+    MUSIC_IDLE_AT,
     MUSIC_NOW,
+    MUSIC_NOW_AT,
     MUSIC_RESULT,
+    RECALL_AMBIGUOUS,
+    RECALL_MISS,
+    RECALL_NO_SHARE,
     WHO_HEAD,
     WHO_NONE,
     WHO_OFF,
@@ -291,15 +297,17 @@ def rewrite_message(
     return _untokens(out), True
 
 
-def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str) -> str:
+def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str, where: str | None = None) -> str:
+    """每轮开头的时间。where：连通的几个频道共用的记录里，这一段是哪个频道的（「服务器」#频道，写在时间后面）。"""
     zone = ZoneInfo(tz)
     end = datetime.fromtimestamp(now, zone)
     starts = [m.received_at for _, m in messages if m.received_at]
+    place = f" · {where}" if where else ""
     if not starts or now - min(starts) < 300:
-        return f"【{end:%m-%d %H:%M}】"
+        return f"【{end:%m-%d %H:%M}{place}】"
     start = datetime.fromtimestamp(min(starts), zone)
     tail = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%m-%d %H:%M}"
-    return f"【{start:%m-%d %H:%M} ~ {tail}】"
+    return f"【{start:%m-%d %H:%M} ~ {tail}{place}】"
 
 
 def render_doc(block: DocBlock) -> tuple[list[str], list[str]]:
@@ -387,6 +395,8 @@ def render_who(name: str, cards: Sequence[tuple[str, str] | tuple[str, str, str]
 def _hint(kind: str, targets: list[int]) -> str:
     if kind == "mention" and targets:
         return HINT_MENTION.format(targets="、".join(f"#{t}" for t in targets))
+    if kind == "passive":
+        return HINT_PASSIVE  # 连通的别的频道补进记录的
     return HINT_PROACTIVE
 
 
@@ -404,13 +414,15 @@ def render_round(
     max_chars: int = 1800,
     context: list[str] | None = None,
     cards: list[str] | None = None,
+    where: str | None = None,
 ) -> str | list[dict[str, Any]]:
     """messages: [(编号, 消息)]；images: message_id -> [(data_uri, detail)]；docs: message_id -> 放在这条消息后面的文件块。
     context：放在消息前面的背景（比如这个人刚才在别的频道跟它聊过什么）。cards：在场的人的人设卡（render_cards 的结果）。
+    where：连通的频道共用的记录里，这些消息是哪个频道的（写在开头的时间后面）。kind 是 passive：别的连通频道补进来的。
 
     没有图片时返回字符串；有图片时返回内容块数组，图片紧跟在它所属的那条消息后面。
     """
-    out = _Builder(_stamp(messages, now, tz))
+    out = _Builder(_stamp(messages, now, tz, where))
     out.lines += context or []
     out.lines += cards or []
     if omitted > 0:
@@ -494,6 +506,19 @@ _WHO_NONE_START, _WHO_NONE_END = WHO_NONE.split("{name}")
 # 点歌的结果、“现在在放什么”：里面的歌名是 B站上来的，和搜索结果一样不进摘要和整理记忆（它点了什么歌，它自己的动作里有）
 _MUSIC_NOW_START = MUSIC_NOW.split("{", 1)[0] + "语音频道"  # “（现在语音频道”（MUSIC_IDLE 也是这样开头）
 _MUSIC_LINES = (MUSIC_RESULT.split("{", 1)[0], _MUSIC_NOW_START)
+# 和别的服务器的频道连通时写的：“（现在「某某」的语音频道……）”
+_MUSIC_AT = re.compile(r"^（现在「.{1,100}?」的语音频道")  # 服务器名里有“」”的也认得
+_MUSIC_AT_IDLE = "的语音频道没在放歌。）"
+_MUSIC_NOW_HEAD = MUSIC_NOW.split("{", 1)[0]  # “（现在”
+# 想翻的频道找不到、有好几个同名的那句（后面列着能翻的频道）
+_RECALL_MISS_START = RECALL_MISS.split("{", 1)[0]
+_RECALL_AMBIGUOUS_START, _RECALL_AMBIGUOUS_END = RECALL_AMBIGUOUS.split("{channel}")[0], RECALL_AMBIGUOUS.split("{names}")[1]
+_RECALL_NO_SHARE_START, _RECALL_NO_SHARE_END = RECALL_NO_SHARE.split("{channel}")
+
+
+def _music_line(line: str) -> bool:
+    """记录里“现在语音频道在放什么”的那一行（连通时写明了服务器的也算）。"""
+    return line.startswith(_MUSIC_NOW_START) or bool(_MUSIC_AT.match(line))
 
 
 def render_channel_list(names: list[str], hidden: int = 0) -> list[str]:
@@ -539,8 +564,8 @@ def last_music_line(turns: list[Any]) -> str | None:
                 fenced = line != ">>>"  # 文件、链接的内容里写的不算
             elif line == "<<<":
                 fenced = True
-            elif line.startswith(_MUSIC_NOW_START):
-                found, seen = (None if line == MUSIC_IDLE else line), True
+            elif _music_line(line):
+                found, seen = (None if line == MUSIC_IDLE or line.endswith(_MUSIC_AT_IDLE) else line), True
         if seen:
             return found
     return None
@@ -643,12 +668,136 @@ def own_text(content: Any) -> str:
             after_search = line.startswith("（你搜了")
         elif line == WHO_OFF or (line.startswith(_WHO_NONE_START) and line.endswith(_WHO_NONE_END)):
             continue
-        elif line.startswith(_MUSIC_LINES):
+        elif line.startswith(_MUSIC_LINES) or _MUSIC_AT.match(line):
             continue
         elif line != LIST_EMPTY and line != GALLERY_FOOT and not is_deleted_line(line):
             out.append(line)
             after_file = bool(_FILE_HEAD.match(line))
     return "\n".join(out)
+
+
+_RECENT_SERVER = re.compile(r"在「.{1,200}」服务器的 ")  # 近况的标题行里写着是哪个服务器的
+
+
+def drop_recents(content: Any) -> Any:
+    """连通组的记录的一条里拿掉写着是哪个服务器的近况（标题行里有“在「…」服务器的”：那个频道所在服务器以外的服务器带来的；群友
+    名字里也写着这几个字的也拿掉，只会多拿）。没写服务器的（那个频道所在服务器自己的）、别的原样不动（<<< >>> 里写的字不当成
+    标记）。"""
+
+    def fix(text: str) -> str:
+        out: list[str] = []
+        block = kept = False
+        for line in text.split("\n"):
+            if kept:
+                out.append(line)
+                kept = line != ">>>"
+                continue
+            if block:
+                if line.startswith("  "):
+                    continue
+                block = False
+            if line.startswith("（") and line.endswith("跟你聊过：") and _RECENT_SERVER.search(line) is not None:
+                block = True
+                continue
+            out.append(line)
+            kept = line == "<<<"
+        return "\n".join(out)
+
+    if isinstance(content, str):
+        return fix(content)
+    if isinstance(content, list):
+        return [
+            {**part, "text": fix(part["text"])}
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            else part
+            for part in content
+        ]
+    return content
+
+
+def drop_local(content: Any, *, keep_cards: bool) -> Any:
+    """连通组跨服务器了以后：从共用记录的一条里拿掉只有原来那个服务器能看的东西——别的频道带来的近况、能翻记录的频道名单
+    （想翻的频道找不到、有好几个同名时列出来的也算）、翻到的记录、按名字查到的人设卡（查不到的那句也算）；keep_cards 不是真的
+    话，附着的人设卡也拿掉。别的原样不动：群友的消息、文件和链接的内容、搜索结果、找图的候选图（这些 <<< >>> 里写的字不当成
+    标记），还有跨服务器的连通自己也会写的那几句（“这里没开人设卡”、不翻、不查的说明）：再查一遍也不会改记录。"""
+
+    def fix(text: str) -> str:
+        out: list[str] = []
+        block = dropping = kept = False
+        for line in text.split("\n"):
+            if kept:  # 留着的那段（文件、链接、搜索结果……）原样留着
+                out.append(line)
+                kept = line != ">>>"
+                continue
+            if dropping:  # 拿掉的那段：标题行后面的 <<< … >>>
+                dropping = line != ">>>"
+                continue
+            if block:  # 拿掉的近况、名单：标题行后面缩进的几行
+                if line.startswith("  "):
+                    continue
+                block = False
+                if line == "）":  # 名单的收尾
+                    continue
+            if line.startswith("（") and (line.endswith("跟你聊过：") or line == LIST_HEAD):
+                block = True
+            elif (
+                line == LIST_EMPTY
+                or (line.startswith(_WHO_NONE_START) and line.endswith(_WHO_NONE_END))
+                or line.startswith(_RECALL_MISS_START)
+                or (line.startswith(_RECALL_AMBIGUOUS_START) and line.endswith(_RECALL_AMBIGUOUS_END))
+                or (line.startswith(_RECALL_NO_SHARE_START) and line.endswith(_RECALL_NO_SHARE_END))
+            ):
+                continue
+            elif line.startswith(("（你翻了", _WHO_START)) or (not keep_cards and line in _CARDS_HEADS):
+                dropping = True
+            else:
+                out.append(line)
+                kept = line == "<<<"
+        return "\n".join(out)
+
+    if isinstance(content, str):
+        return fix(content)
+    if isinstance(content, list):
+        return [
+            {**part, "text": fix(part["text"])}
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            else part
+            for part in content
+        ]
+    return content
+
+
+def label_music(content: Any, server: str) -> Any:
+    """连通组的频道开始跨好几个服务器了：这一条里“语音频道在放什么”那句（当时只有一个服务器，没写是哪个的）写明是 server 的，
+    别的服务器的频道看到了不会当成自己那边的。写明了的、文件链接里写的原样不动。"""
+
+    def fix(text: str) -> str:
+        out: list[str] = []
+        fenced = False
+        for line in text.split("\n"):
+            if fenced:
+                out.append(line)
+                fenced = line != ">>>"
+                continue
+            if line == "<<<":
+                fenced = True
+            elif line == MUSIC_IDLE:
+                line = MUSIC_IDLE_AT.format(server=server)
+            elif line.startswith(_MUSIC_NOW_START) and line.endswith("）"):
+                line = MUSIC_NOW_AT.format(server=server, text=line[len(_MUSIC_NOW_HEAD) : -1])
+            out.append(line)
+        return "\n".join(out)
+
+    if isinstance(content, str):
+        return fix(content)
+    if isinstance(content, list):
+        return [
+            {**part, "text": fix(part["text"])}
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            else part
+            for part in content
+        ]
+    return content
 
 
 def card_texts(content: Any) -> list[str]:
@@ -905,7 +1054,7 @@ def review_text(content: Any) -> list[str]:
             fenced = True
             out.append("（内容略）")
             continue
-        if not line.strip() or line == HINT_PROACTIVE or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
+        if not line.strip() or line in (HINT_PROACTIVE, HINT_PASSIVE) or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
             continue
         out.append(line)
     return out

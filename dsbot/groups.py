@@ -127,7 +127,7 @@ def plan_link(store: Any, cards: Any, memory: Any, guild_id: int, other_id: int)
         raise GroupError("两个是同一个服务器。")
     leaving = {g for g, _ in store.leaving()}
     if guild_id in leaving or other_id in leaving:
-        raise GroupError("有一个服务器上次退出组还没做完：再执行一次命令（比如 `操作:查看`）就会接着做完。")
+        raise GroupError("有一个服务器上次退出组还没做完：再执行一次命令（比如 `/dsowner 服务器组 查看`）就会接着做完。")
     mine, theirs = store.group_of(guild_id), store.group_of(other_id)
     if mine is not None and theirs is not None:
         if mine == theirs:
