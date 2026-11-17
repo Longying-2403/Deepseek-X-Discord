@@ -2,6 +2,101 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.7.1] - 2026-11-09
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**修复**
+
+- **频道链接**：2.7.0 起，它话里写明“「某某」服务器的 #频道”时，不换成频道链接（免得链到这里同名的频道）。但这个服务器的名字带【】之类的符号、或者长得被截短时，它写的明明是这里，也不换了；“「生存」服务器的 #公告”这种游戏里的服务器也不换。现在：
+  - 写的是这个服务器（全名，或者截短、中和过的名字）：照常换。这里和组里的服务器（开了跨服务器时，还有也开了跨服务器的服务器）同名、分不出是哪个时不换；它自己截短（带着“…”）或者截到 40 字的名字，连了组、开了跨服务器或者共用人设卡时，bot 知道的别的服务器也对得上就不换（聊天里给它看的、截到 60 字的照常换）。
+  - 写的是 bot 在的别的服务器、组里的、最近有人在那边跟它聊过的服务器：不换。
+  - 认不出是哪个服务器的：这个服务器没连组、没开跨服务器、不共用人设卡时（它看不到别的服务器的名字）照常换；连了组、开了跨服务器或者共用人设卡（卡上会写着别的服务器）就不换（名字写得和它看到的不一样时，也不会链到这里）。
+- **`/ds-dm 记忆`**：私信记忆记得很多、一次发不完时，2.7.0 比以前少列了大约 9 条。现在和 `/ds 长期记忆` 一样，每条截短，编号全部列出来（几千条时只列编号也发不完，最后会说还有几段没发出来）；查看时选上编号，能看那一条的全文。
+- **`/ds 长期记忆`**：条目多到每条截短也放不下时（调高了上限，或者组里服务器很多、名字很长），2.7.0 后面的编号会漏掉（2.7.0 的更新日志说“编号照样全部列出来”，这种情况下其实做不到）。现在放不下的也会列出编号（分成几行，一个编号不会被切到两条消息里；几千条时只列编号也发不完，最后会说还有几段没发出来，那些编号在「编号」一栏输入还找得到）；截短时，标着是哪个服务器记的那部分也截短。查看时选上编号，能看那一条的全文。
+- **服务器组**（Beta）：
+  - 组里两个服务器同名（或者名字很长、截短以后一样）时，翻“#大厅（「某某」服务器）”会翻成这里同名的频道。现在先照名单里的写法认，翻的是名单里那个；抄的时候丢了截短的“…”也一样。那边有两个同名的频道时，和这里一样认第一个。
+  - 组散了以后又连成一组，所有长期记忆都会算成“连到”那边记的：加入方自己记的，它整理时改不了也删不了。现在退出组时带走的那份照样记着是谁记的，再连成一组时，记的那个服务器也在组里的还算它的，不在的算带进来的那个服务器的（那个服务器后来再加进来也不改回去）；没在组里时这边改过的那条，算这边记的。连到一半断了、再连一次时也一样。
+  - 连组、退组出错时的提示说“下次会接着做完”，可新建的组只连上了一个服务器的，下次是先散掉。现在提示里写明了：要连的话再连一次。
+  - 长期记忆正好记满（50 条）、里面又有组里别的服务器记的时：
+    - 聊天里叫它记新的，它可能为了腾地方删掉别的服务器记的条目；
+    - 整理记忆时它被要求“快满了就合并、删掉旧的”，可别的服务器记的它删不了，就一直记不进新的，也没有提示。
+
+    现在聊天时不会为了腾地方删条目（会说记满了），整理时只合并、删掉这个服务器自己记的；`/ds 长期记忆` 会提醒记满了，连组的预览里也会说并完正好到上限。
+- **所有服务器共用一张人设卡**：启动时接着做（检查）上次的连组、退组出错的话（比如数据库正被别的程序占着），2.7.0 照样换共用方式：上次有没做完的，没并进组的卡会直接并成共用的，组里删掉的卡可能被顶回来。现在先不换，还按原来的用，下次启动再换。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.7.1 启动中`。数据库不变。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `mentions.link` 的参数 `here` 换成 `other_server`（写明的“「X」服务器”能不能当成这里）。`Engine._other_server_named`：X 是这里（`_here_named`：全名、中和过、截到 60 字的；它自己截短、带着“…”的，或者截到 40 字的也认，只是连了组、开了跨服务器、共用人设卡时，bot 知道的别的服务器也对得上、或者正好是它的全名就不算）就换，和给它看过的别的服务器同名时不换；X 是 bot 知道的别的服务器（transport 的 `guild_ids()`、组里的、`interactions` 里的，按 `_guilds_named` 认）不换；都认不出时，它看得到别的服务器的名字（`_sees_other_servers`：连了组、开了跨服务器、共用人设卡）就不换。
+- `Engine._find_source`：写明了服务器的，先照 `_source_name` 的写法原样对（同一个服务器里同名的频道认第一个）；对不上再找服务器时，这里只按 `_here_named` 认。
+- `MemoryStore.copy_scope` 保留 `origin`；`MemoryStore.merge_scope(src, dst, members)`：记的服务器在 `members`（连完以后组里的服务器）里的照旧，不知道是谁记的、不在里面的算 `src` 的。`groups._merge` / `_sweep` 传进连完以后的成员；`_sweep` 扫只有一个服务器的组（连到一半断了，接着就散掉）时，记着是谁记的都留着（不知道是谁记的算它的）。`MemoryStore.edit` 改服务器自己名下（没连组）的条目时，`origin` 改成这个服务器。
+- `prompts.MEMORY_FULL`、`REVIEW_MEMORY_FULL`；`build_system_prompt(memory_foreign=…)`（只在连成组、正好记满时用上，没连组时提示词不变）。
+- `commands.fit_listing`（`/ds 长期记忆`、`/ds-dm 记忆` 共用；只列编号的分成几行（`numbers_lines`），每行最多 `NUMBERS_LINE` 字；前面列几条先二分着找，再往后试最多 120 条）；`memory_entry_text`、`dm_memory_entry_text`（查看时选了编号）；`commands.start_groups`（启动时先 `recover_groups`，成功了才 `apply_card_mode`）。
+- 补上改坏了也没有测试会失败的地方：
+  - 共用卡时，卡上的名字不跟着昵称变；
+  - `/ds-rp` 会记下他在哪个服务器出现过；
+  - 一轮里说话的人多、卡附不完时，没附上卡的也记成出现过；
+  - 加入方忘掉了的卡，旧版本排在组里自己的旧版本后面；
+  - 退出复制到一半时，那份副本不会被扫回组里；
+  - 别的服务器连组时，不打断这边改记忆、整理记忆；
+  - 退出没做完时，不带走他在别处重写的卡；
+  - 第三个服务器加进组时，这边照样改得了记忆；
+  - 启动时真的会先接着做完连组、退组再换共用方式（建一个真的 `DSBot` 试）。
+- 测试共 1042 个。
+
+### English
+
+**Fixed**
+
+- **Channel links**: since 2.7.0, a channel the bot mentions as "「X」服务器的 #channel" (X's #channel) isn't turned into a channel link, so it can't point at this server's channel of the same name. But when this server's own name contains symbols like 【】, or is long enough to be cut short, the bot was writing about this very server and the link was still dropped. A game server ("「生存」服务器的 #公告", the survival server's #announcements) lost its link too. Now:
+  - this server (its full name, or a shortened or neutralized form of it) is linked. It isn't linked when a server in the group (or, with cross-server on, another server that also has it on) has the same name, since the bot can't tell which one is meant; nor is a name the bot shortened itself (ending in "…") or cut to 40 characters, when it also matches another server the bot knows and this server is in a group, has cross-server on, or uses shared cards (the 60-character form shown in chat is still linked);
+  - another server the bot is in, a server in the same group, or a server where someone talked to the bot recently is not linked;
+  - a server name the bot can't recognize is linked if this server isn't in a group, has cross-server off and doesn't use shared cards (the bot sees no other server's name); in a group, with cross-server on or with shared cards (cards mention other servers) it stays plain text, so a misspelled name of another server can't link here either.
+- **`/ds-dm 记忆`** (DM memory): with a very large DM memory that doesn't fit in one reply, 2.7.0 listed about 9 fewer entries than before. Like `/ds 长期记忆`, it now shortens each entry and lists every number (with several thousand entries even the numbers don't fit; the reply then says how many parts were left out). Picking a number when viewing shows that entry in full.
+- **`/ds 长期记忆`** (long-term memory): when the entries didn't fit even after shortening each one (a raised limit, or many linked servers with long names), 2.7.0 dropped the last numbers. Its changelog said every number would still be listed, which wasn't true there. The numbers that don't fit are now listed too, on several lines so no number is split across two messages (with several thousand entries even the numbers don't fit; the reply then says how many parts were left out, and those numbers can still be found by typing in the 编号 field), and the "written by" server names are shortened along with the entries. Picking a number when viewing shows that entry in full.
+- **Server groups** (beta):
+  - When two servers in a group have the same name (or long names that look the same once cut short), asking for "#大厅（「X」服务器）" (X's #lobby) read this server's channel of the same name. The exact label from the list is now matched first, so it reads the channel from the list, also when the trailing "…" of a shortened name was dropped. When that server has two channels with the same name, the first one is used, as for this server's own channels.
+  - After a group broke up and servers were linked again, all long-term memory counted as written by the server linked *to*. The joining server's own entries became read-only for its memory reviews. A leaving server's copy now keeps who wrote each entry. When servers are linked again, an entry still belongs to its writer if the writer is in the new group; otherwise it counts as written by the server whose copy brought it in, and stays that way if the writer joins later. An entry a server edited while it was on its own counts as that server's. This also holds when a link was interrupted and run again.
+  - When linking or leaving failed, the message said the rest would be finished next time. A new group that only one server had joined is undone instead, so the message now says to link again.
+  - When long-term memory was exactly full (50 entries) and some entries were written by other servers in the group:
+    - asked in chat to remember something new, the bot could delete another server's entry to make room;
+    - its memory review was told "nearly full, merge and delete old ones", but it can't delete other servers' entries, so it never recorded anything new, with no warning.
+
+    Now chat doesn't delete entries to make room (it says memory is full), and reviews only merge or delete this server's own entries. `/ds 长期记忆` warns that memory is full, and the link preview says when the merge reaches the limit exactly.
+- **One profile card per person across all servers**: if finishing (or checking for) unfinished group operations failed at startup (for example because another program had the database locked), 2.7.0 switched the card mode anyway. If something was unfinished, a card not yet merged into its group then went straight into the shared card, and a card deleted in the group could come back. The bot now keeps the current mode and switches on the next start.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.7.1 启动中`. The databases don't change.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `mentions.link` takes `other_server` instead of `here`: it decides whether a named "「X」服务器" can be taken for this server. `Engine._other_server_named` links when X is this server (`_here_named`: full, neutralized, or cut to 60 characters; a name the model shortened itself, ending in "…", or cut to 40 characters, counts too, except that in a group, with cross-server on or with shared cards it doesn't when another server the bot knows also matches, nor when it is exactly another known server's full name), unless X is also the name of another server shown to the model. It doesn't link when X is another server the bot knows (the transport's `guild_ids()`, the group, `interactions`, matched through `_guilds_named`). When X is neither, it doesn't link when the model can see other servers' names (`_sees_other_servers`: in a group, with cross-server on, or with shared cards).
+- `Engine._find_source`: a channel named with its server is first matched exactly against `_source_name` labels (the first of same-named channels in one server). Otherwise, this server is matched only through `_here_named`.
+- `MemoryStore.copy_scope` keeps `origin`. In `MemoryStore.merge_scope(src, dst, members)`, an entry keeps its origin if it is in `members` (the group's servers after the link); unknown origins and servers outside the group become `src`. `groups._merge` and `_sweep` pass the members after the link; `_sweep` keeps who wrote each entry for a one-server group (a half-done link that is undone right after; unknown writers become that server). `MemoryStore.edit` sets `origin` to the server when it edits the server's own (ungrouped) memory.
+- `prompts.MEMORY_FULL`, `REVIEW_MEMORY_FULL` and `build_system_prompt(memory_foreign=…)`. These are only used in a group at exactly the limit, so prompts outside groups are unchanged.
+- `commands.fit_listing`, shared by `/ds 长期记忆` and `/ds-dm 记忆` (numbers that don't fit go on lines of at most `NUMBERS_LINE` characters, built by `numbers_lines`; how many entries keep their text is found by a binary search, then up to 120 more are tried). `memory_entry_text` and `dm_memory_entry_text` show one entry when a number is picked. `commands.start_groups` runs `recover_groups` at startup and calls `apply_card_mode` only if it succeeded.
+- Tests now catch these behaviours being broken; before, none failed:
+  - with shared cards, a card's name doesn't follow nicknames;
+  - `/ds-rp` records which server the person was seen in;
+  - when more people talk in one round than cards can be attached, everyone still counts as seen;
+  - a joining server's forgotten card keeps its old versions behind the group's own;
+  - a half-made copy of a leaving server isn't swept back into the group;
+  - another server linking doesn't interrupt this server's memory edits and reviews;
+  - an unfinished leave doesn't take a card rewritten elsewhere;
+  - this server can still edit its memory while a third server joins the group;
+  - a real `DSBot` finishes unfinished group operations before switching the card mode at startup.
+- There are now 1042 tests.
+
 ## [2.7.0] - 2026-11-08
 
 > 英文版这次没有更新，还是 2.0.0。
