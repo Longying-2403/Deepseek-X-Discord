@@ -2,6 +2,61 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.8.1] - 2026-11-18
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**改进**
+
+- **读文件更快**：群友发来的每个文件都要另开一个子进程来解析，以前这个子进程光启动就要 0.8～1 秒（NAS 上实测）。现在：
+  - 构建镜像时就把 Python 标准库和 bot 的代码编译好。官方的 Python 镜像为了省地方把标准库编译好的文件删了，镜像里又关掉了运行时写这些文件，以前每次启动、每读一个文件都要从头编译一遍；
+  - 子进程只先导入这种文件用得到的库（文本只要猜编码的那个，PDF 要 pypdf 和 Pillow，Word、Excel、PPT 一个都不用），以前不管什么文件三个都导入。
+
+  NAS 上实测：读一个文本、Word 文件从 0.8 秒左右降到 0.2 秒左右，扫描版 PDF 从 1.1 秒降到 0.4 秒。
+- **启动更快**：同一个原因，bot 启动时导入自己的代码从 1.4 秒降到 0.6 秒（NAS 上实测）。
+- **打开很大的网页更快**：清掉网页里直接嵌的图（一大串 base64）那一步换了个写法，清掉的内容和原来一样，10 MB 的网页快几倍。
+
+**升级须知**
+
+- 这次除了 `dsbot` 文件夹，`Dockerfile` 也变了：两个都换掉，再 `sudo docker compose up -d --build`（镜像会大 14 MB 左右）。确认新版生效：日志里有 `dsbot 2.8.1 启动中`。`Dockerfile` 没换也照样能跑，只是读文件、启动没那么快。数据库不变。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `Dockerfile`：装完依赖后用 `python -m compileall` 编译标准库（不含 `site-packages`：pip 安装时已经编译过；编译不成不拦着构建），拷进代码后再编译 `dsbot`。
+- `files.py`：`_PRELOAD_FOR`（`classify` 的类型 → 先导入哪几个库）、`_preload_libraries(kind)`、`_child_args(kind, …)`；`_probe` 不带类型，照旧全部导入。读某种文件要用到新的库时，记得加进 `_PRELOAD_FOR`（`test_preload_table_covers_what_the_readers_import` 会查）。
+- `links.py` 的 `_DATA_URI`：开头的 `\b` 换成 `data:(?<!\wdata:)`（意思一样，开头是固定的几个字，正则能直接跳着找）。
+- `__main__.py` 的 `check_files`：读完测试用的 Word 文件后再 `_probe` 一次（读 Word 文件不再导入 pypdf、charset_normalizer、Pillow，另外查它们在子进程里导入得了没有）。
+- 测试增加到 1368 个（`test_files.py` 的 `ChildStartup`、`test_links_images.py` 的 `PagesAndImages`）。
+
+### English
+
+**Improved**
+
+- **Faster file reading**: every file a member sends is parsed in a separate child process, and just starting that process used to take 0.8–1 second (measured on a NAS). Now:
+  - the image build compiles the Python standard library and the bot's code ahead of time. The official Python image deletes the standard library's compiled files to save space, and the image also turns off writing them at run time, so every start and every file read used to compile everything from scratch;
+  - the child process only preloads the libraries this kind of file needs (the encoding detector for text, pypdf and Pillow for PDF, none for Word, Excel and PowerPoint); before, all three were loaded for every file.
+
+  Measured on a NAS: reading a text or Word file went from about 0.8 seconds to about 0.2, a scanned PDF from 1.1 seconds to 0.4.
+- **Faster startup**: for the same reason, importing the bot's own code at startup went from 1.4 seconds to 0.6 (measured on a NAS).
+- **Faster on very large web pages**: the step that strips images embedded in a page (long base64 strings) was rewritten; it removes exactly what it removed before and is several times faster on a 10 MB page.
+
+**Upgrading**
+
+- Besides the `dsbot` folder, the `Dockerfile` changed this time: replace both, then run `sudo docker compose up -d --build` (the image grows by about 14 MB). To check the new version took effect: the log shows `dsbot 2.8.1 启动中`. With the old `Dockerfile` everything still works, just without the faster file reading and startup. The database is unchanged.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `Dockerfile`: after installing the dependencies it runs `python -m compileall` on the standard library (without `site-packages`, which pip already compiled at install time; a failure here doesn't stop the build), and compiles `dsbot` after copying the code in.
+- `files.py`: `_PRELOAD_FOR` (the kind from `classify` → which libraries to preload), `_preload_libraries(kind)`, `_child_args(kind, …)`; `_probe` passes no kind and still preloads everything. When reading some kind of file starts needing a new library, add it to `_PRELOAD_FOR` (`test_preload_table_covers_what_the_readers_import` checks this).
+- `_DATA_URI` in `links.py`: the leading `\b` became `data:(?<!\wdata:)` (same meaning; with a fixed literal at the start the regex engine can skip ahead to it).
+- `check_files` in `__main__.py` runs `_probe` once more after reading its test Word file (reading a Word file no longer imports pypdf, charset_normalizer and Pillow, so their import in the child is checked separately).
+- There are now 1368 tests (`ChildStartup` in `test_files.py`, `PagesAndImages` in `test_links_images.py`).
+
 ## [2.8.0] - 2026-11-13
 
 > 英文版这次没有更新，还是 2.0.0。
