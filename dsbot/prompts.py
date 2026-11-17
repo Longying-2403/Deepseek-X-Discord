@@ -439,6 +439,8 @@ MEMORY_BLOCK_GROUP = """
 """
 # 长期记忆超过上限（连成一组时并进来的）：“这里能用的”那一行后面加上，盖过“记满了先合并或者删掉旧的”
 MEMORY_OVER = "。超过上限了，新的记不进：别为了腾地方删条目，有人叫你记就告诉他记满了，请管理员用 /ds 长期记忆 删几条"
+# 正好记满、里面又有组里别的服务器记的：一样别为了腾地方删（分不出哪条是哪边的，删的可能是那边的）
+MEMORY_FULL = "。记满了，里面有组里别的服务器记的：别为了腾地方删条目，有人叫你记就告诉他记满了，请管理员用 /ds 长期记忆 删几条"
 
 # 私信里“你是谁”：人设、长期记忆、人设卡是哪来的（所有服务器共用一张人设卡时，卡不是那个服务器自己的）
 IDENTITY_DM_WHOSE = "下面的人设、长期记忆、人设卡都是那个服务器的"
@@ -540,9 +542,11 @@ def build_system_prompt(
     dm_entry_max: int = 200,
     dm_memory_more: int = 0,
     group: Sequence[str] | None = None,
+    memory_foreign: int = 0,
 ) -> str:
     """固定的规则在前（同一个服务器的所有频道共用，缓存命中），会变的部分放在后面。
     group：和这个服务器连成一组的别的服务器的名字（None = 不在组里）。
+    memory_foreign：长期记忆里有几条是组里别的服务器记的（记满了时别为了腾地方删）。
 
     emojis / stickers / memes：这个服务器里能用的表情名、贴图名、表情包名（调用方已经排好序、截好数量）；
     more_* 是没列出来的个数。images：能不能上网找图。links：打开链接的能力（all / x / off）。
@@ -578,7 +582,13 @@ def build_system_prompt(
         memory="这里没开"
         if memories is None
         else f"能用，在最后面「长期记忆」里（现在 {len(memories)} 条，最多 {memory_max} 条，每条最多 {entry_max} 字）"
-        + (MEMORY_OVER if len(memories) > memory_max and group else ""),
+        + (
+            MEMORY_OVER
+            if len(memories) > memory_max and group
+            else MEMORY_FULL
+            if len(memories) >= memory_max and group and memory_foreign
+            else ""
+        ),
         music="能用（只能放 B站的视频，不放直播）" if music else "这里不能用",
     )
     if group:
@@ -660,6 +670,11 @@ REVIEW_MEMORY_OVER = (
     "现在 {count} 条，超过了上限 {max_entries} 条（连成一组时并进来的）：记不进新的，等管理员删。"
     "别为了腾地方删还有用的，只合并意思重复的、删掉确实过时或记错的。"
 )
+# 正好记满、里面又有组里别的服务器记的：那些这里删不了，只能动这里记的
+REVIEW_MEMORY_FULL = (
+    "现在 {count} 条，记满了（最多 {max_entries} 条）：组里别的服务器记的这里删不了。要腾地方，只能合并这里记的意思重复的、"
+    "删掉这里记的确实过时或记错的；别为了腾地方删还有用的，腾不出地方就先不记新的。"
+)
 # 连成一组的服务器：人设卡、长期记忆是组里几个服务器共用的
 REVIEW_GROUP = """
 这段聊天在服务器「{guild}」里。它和别的服务器连成了一组，人设卡和长期记忆是组里共用的：只跟「{guild}」有关的事（这里的约定、这里的剧情），写清楚是「{guild}」的。
@@ -738,9 +753,14 @@ def build_review_prompt(
         schema["cards"] = '[{"to": 他自己那条消息的编号, "name": "他的名字", "text": "改好之后完整的人设卡"}]'
     if memory:
         what.append("这个服务器现在的长期记忆" if group is None else "组里现在共用的长期记忆")
-        # 超过上限、里面又有别的服务器记的：它只能删自己的，别逼它为了腾地方删（没连组、全是自己记的，照常合并、删旧的）
-        over = count > max_entries and foreign
-        fullness = (REVIEW_MEMORY_OVER if over else REVIEW_MEMORY_ROOM).format(count=count, max_entries=max_entries)
+        # 记满了（或者超过上限）、里面又有别的服务器记的：它只能删自己的，别逼它为了腾地方删（没连组、全是自己记的，照常合并、删旧的）
+        if foreign and count > max_entries:
+            fullness = REVIEW_MEMORY_OVER
+        elif foreign and count >= max_entries:
+            fullness = REVIEW_MEMORY_FULL
+        else:
+            fullness = REVIEW_MEMORY_ROOM
+        fullness = fullness.format(count=count, max_entries=max_entries)
         parts.append(REVIEW_MEMORY.format(entry_max=entry_max, fullness=fullness))
         if foreign:
             parts.append(REVIEW_MEMORY_FOREIGN.format(n=foreign))

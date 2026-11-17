@@ -986,10 +986,13 @@ class MemoryStore:
         return no
 
     def edit(self, guild_id: int, no: int, text: str, *, via: str, now: float | None = None) -> bool:
+        """改一条。记着是哪个服务器记的：在组里（guild_id 是组的 ID，负数）照旧；记在服务器自己名下（正数：没连组，
+        改的就是这个服务器）就算它记的了——退出组时带走的、别的服务器记的条目，它改过以后再连组，归它整理。"""
         now = time.time() if now is None else now
         with self.db:
             cur = self.db.execute(
-                "UPDATE memories SET text = ?, updated_at = ?, via = ? WHERE guild_id = ? AND no = ?",
+                "UPDATE memories SET text = ?, updated_at = ?, via = ?, origin = CASE WHEN guild_id > 0 THEN guild_id ELSE origin END "
+                "WHERE guild_id = ? AND no = ?",
                 (clean_memory(text), now, via, guild_id, no),
             )
         return cur.rowcount > 0
@@ -1021,15 +1024,25 @@ class MemoryStore:
         new = {r["text"] for r in self.db.execute("SELECT text FROM memories WHERE guild_id = ?", (src,))} - have
         return len(new), len(have) + len(new)
 
-    def merge_scope(self, src: int, dst: int) -> int:
+    def merge_scope(self, src: int, dst: int, members: Collection[int] | None = None) -> int:
         """把 src（要加入组的服务器）的长期记忆并进 dst（组），返回并进去几条。组里还没有记忆：原样搬过去，编号不变；
         已经有了：一模一样的不重复记，别的接着组里的编号往下排（超过条数上限也先留着，整理记忆时它会合并）。
-        并进去的记下是 src 记的（原来记着是哪个服务器的不变）。并完 src 就空了；再并一次什么也不做（中途断了可以重来）。"""
+        记着是哪个服务器记的：members（连完以后组里的服务器）里的照旧（退过组又连回来，各是各的）；不知道是谁记的、
+        记的那个服务器不在组里的，算 src 记的（它带进来的）。没给 members：只有不知道是谁记的才算 src 的。
+        并完 src 就空了；再并一次什么也不做（中途断了可以重来）。"""
+        mine = None if members is None else set(members)
+
+        def origin(old: int | None) -> int:
+            return old if old is not None and (mine is None or old in mine) else src
+
         with self.db:
             if self.keeps_numbers(dst):
-                cur = self.db.execute(
-                    "UPDATE memories SET guild_id = ?, origin = COALESCE(origin, ?) WHERE guild_id = ?", (dst, src, src)
-                )
+                if mine is None:
+                    rule, args = "COALESCE(origin, ?)", [src]
+                else:
+                    rule = f"CASE WHEN origin IN ({','.join('?' * len(mine)) or 'NULL'}) THEN origin ELSE ? END"
+                    args = [*sorted(mine), src]
+                cur = self.db.execute(f"UPDATE memories SET guild_id = ?, origin = {rule} WHERE guild_id = ?", (dst, *args, src))
                 self.db.execute("UPDATE memory_seq SET guild_id = ? WHERE guild_id = ?", (dst, src))
                 self.db.execute(  # 有记忆却没有编号记录（不该有）：照最大的编号补上，免得新记的撞号；没有记忆就不补
                     "INSERT INTO memory_seq (guild_id, next_no) SELECT ?, MAX(no) + 1 FROM memories "
@@ -1052,7 +1065,7 @@ class MemoryStore:
                     continue
                 self.db.execute(
                     "INSERT INTO memories (guild_id, no, text, created_at, updated_at, via, origin) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (dst, no, r["text"], r["created_at"], r["updated_at"], r["via"], r["origin"] if r["origin"] is not None else src),
+                    (dst, no, r["text"], r["created_at"], r["updated_at"], r["via"], origin(r["origin"])),
                 )
                 have.add(r["text"])
                 no += 1
@@ -1066,12 +1079,13 @@ class MemoryStore:
 
     def copy_scope(self, src: int, dst: int) -> int:
         """dst 换成 src 的一份副本（编号不变）：退出组的服务器带走组里的长期记忆。返回复制了几条。
-        带走的从此就是它自己的（之后各记各的）：不再记是哪个服务器记的，以后它连进别的组，这些都算它记的。"""
+        带走的从此就是它自己的（之后各记各的，没在组里时整理都能改），照样记着是哪个服务器记的：以后连进别的组，
+        记的那个服务器也在组里的还算那边的（又连回原来的组时各是各的），不在的算它带进来的（见 merge_scope）。"""
         with self.db:
             self._drop(dst)
             cur = self.db.execute(
                 "INSERT INTO memories (guild_id, no, text, created_at, updated_at, via, origin) "
-                "SELECT ?, no, text, created_at, updated_at, via, NULL FROM memories WHERE guild_id = ?",
+                "SELECT ?, no, text, created_at, updated_at, via, origin FROM memories WHERE guild_id = ?",
                 (dst, src),
             )
             self.db.execute(

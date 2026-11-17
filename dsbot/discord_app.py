@@ -293,6 +293,10 @@ class DiscordTransport:
         guild = self.client.get_guild(guild_id)
         return guild.name if guild is not None else None
 
+    def guild_ids(self) -> list[int]:
+        """它现在在的服务器（Engine._other_server_named 用：写明了“「X」服务器”的频道名，X 是其中别的服务器就不换成这里的链接）。"""
+        return [guild.id for guild in self.client.guilds]
+
     def channel_names(self, guild_id: int) -> dict[str, set[int]]:
         """服务器里它看得到的频道和帖子：名字 -> 频道（它在话里写 #频道名 时换成真的频道链接）。"""
         guild = self.client.get_guild(guild_id)
@@ -540,13 +544,11 @@ class DSBot(discord.Client):
         self.music: MusicPlayer | None = None  # 点歌：登录时才启用（--check 不会去动下载目录）
         self.music_problem = "还没启动"  # 点歌用不了的原因
 
-        from .commands import apply_card_mode, recover_groups, register_commands
+        from .commands import register_commands, start_groups
 
-        try:
-            recover_groups(self)  # 上次连组、退组做到一半就停了（断电、重启）：接着做完（按卡文件里记的共用不共用）
-        except Exception:
-            log.exception("服务器组：接着做完上次没做完的连组、退组时出错")
-        apply_card_mode(self)  # 再照 config.toml 换成所有服务器共用一张人设卡，或者改回每个服务器一张（注册命令之前：说明文字跟着变）
+        # 上次连组、退组做到一半就停了（断电、重启）：接着做完（按卡文件里记的共用不共用）；做完了再照 config.toml 换成
+        # 所有服务器共用一张人设卡，或者改回每个服务器一张（注册命令之前：说明文字跟着变）
+        start_groups(self)
         register_commands(self)
 
     # ---------------------------------------------------------------- 生命周期

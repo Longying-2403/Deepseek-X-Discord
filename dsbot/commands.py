@@ -158,6 +158,61 @@ async def _reply_long(interaction: discord.Interaction, text: str) -> None:
         await _reply(interaction, part)
 
 
+NUMBERS_LINE = 1800  # 只列编号的那几行每行最多几个字（比一条消息短：分条时不会从一个编号中间切开）
+
+
+def numbers_lines(numbers: list[int], shown: int) -> list[str]:
+    """列表里前 shown 条照样列，后面放不下的只列编号：分成几行，每行最多 NUMBERS_LINE 字。"""
+    out = [f"……还有 {len(numbers) - shown} 条放不下，只列编号："]
+    for no in numbers[shown:]:
+        piece = str(no) if out[-1].endswith("：") else f"、{no}"
+        if len(out[-1]) + len(piece) > NUMBERS_LINE:
+            out.append(str(no))
+        else:
+            out[-1] += piece
+    return out
+
+
+def fit_listing(head: list[str], body: Callable[[int | None], list[str]], numbers: list[int], tail: list[str], hint: str) -> str:
+    """带编号的列表（长期记忆、私信记忆）：发得完（最多 REPLY_PARTS 条消息）就原样列；发不完就每条截短（body(cap)：
+    每条最多 cap 个字），再不行，前面的照样列，放不下的只列编号（分成几行，一个编号不会被切到两条消息里）。
+    编号全部列出来，照编号删、改都找得到（几千条、只列编号也发不完时，_reply_long 会说后面还有几段没发出来）。
+    hint：截短时告诉他怎么看全一条。"""
+
+    def fits(lines: list[str]) -> bool:
+        return len(split_message("\n".join(lines))) <= REPLY_PARTS
+
+    lines = body(None)
+    if fits(head + lines + tail):
+        return "\n".join(head + lines + tail)
+    for cap in (120, 80, 50, 30, 20):
+        note = [f"条目太多，每条只显示前 {cap} 个字（{hint}）。"]
+        lines = body(cap)
+        if fits(head + note + lines + tail):
+            return "\n".join(head + note + lines + tail)
+
+    def rest(shown: int) -> list[str]:
+        return numbers_lines(numbers, shown)
+
+    low, high = 0, len(lines)  # 前面列几条放得下（少列一条就短一截：二分着找）
+    while low < high:
+        mid = (low + high + 1) // 2
+        if fits(head + note + lines[:mid] + rest(mid) + tail):
+            low = mid
+        else:
+            high = mid - 1
+    # 多列一条、少一个编号，分条时末尾空出来的长短不一样：放不下以后再往后几条可能又放得下。往后再试一段（最多 120 条：
+    # 命令要在 3 秒内回；差的一般在 70 条以内），前面这些条目本身就放不下了就停
+    best = low
+    if low or fits(head + note + rest(0) + tail):
+        for k in range(low + 2, min(len(lines), low + 120) + 1):
+            if not fits(head + note + lines[:k]):
+                break
+            if fits(head + note + lines[:k] + rest(k) + tail):
+                best = k
+    return "\n".join(head + note + lines[:best] + rest(best) + tail)
+
+
 def _parent_id(interaction: discord.Interaction) -> int | None:
     channel = interaction.channel
     return channel.parent_id if isinstance(channel, discord.Thread) else None
@@ -408,9 +463,9 @@ class ConfirmClear(discord.ui.View):
         await interaction.response.edit_message(content=f"已清空{shared_where(self.bot, self.guild_id)}的长期记忆（{n} 条）。", view=None)
 
 
-def _memory_labels(bot: "DSBot", guild_id: int, entries: list[Any], *, raw: bool = False) -> dict[int, str]:
+def _memory_labels(bot: "DSBot", guild_id: int, entries: list[Any], *, raw: bool = False, short: bool = False) -> dict[int, str]:
     """连成一组时：组里别的服务器记的长期记忆 {编号: 「那个服务器」}（列表里标出来）。
-    raw：不转义 Discord 的格式符号（自动补全的选项不渲染格式，转义了反而多出反斜杠）。"""
+    raw：不转义 Discord 的格式符号（自动补全的选项不渲染格式，转义了反而多出反斜杠）。short：服务器名截短到 20 字。"""
     group = bot.store.group_of(guild_id)
     if group is None:
         return {}
@@ -419,7 +474,11 @@ def _memory_labels(bot: "DSBot", guild_id: int, entries: list[Any], *, raw: bool
     def name(g: int) -> str:
         guild = bot.get_guild(g)
         # 自动补全的选项最多 100 字：服务器名太长就截短，后面的内容才看得到
-        return f"「{one_line(guild.name, 20)}」" if raw and guild is not None else server_label(bot, g)
+        if raw and guild is not None:
+            return f"「{one_line(guild.name, 20)}」"
+        if short and guild is not None:
+            return f"「{discord_safe(one_line(guild.name, 20))}」"
+        return server_label(bot, g)
 
     return {m.no: name(m.origin) for m in entries if getattr(m, "origin", None) in others}
 
@@ -430,6 +489,8 @@ def memory_list_text(bot: "DSBot", guild_id: int) -> str:
     limit = bot.cfg.engine.memory_max_entries
     head = [f"**长期记忆**（{len(entries)} / {limit} 条）"]
     others = group_others(bot, guild_id)
+    labels = _memory_labels(bot, guild_id, entries)
+    short = _memory_labels(bot, guild_id, entries, short=True)
     if others:
         head.append(f"这个服务器和{'、'.join(others)}连成了一组，长期记忆是组里共用的：在这里改，那边也跟着变。")
     if len(entries) > limit:
@@ -438,36 +499,35 @@ def memory_list_text(bot: "DSBot", guild_id: int) -> str:
         else:
             tidy = "整理记忆时它会合并、删掉旧的，也可以在这里删几条"
         head.append(f"⚠️ 超过上限了：删到 {limit - 1} 条以内才能再记新的。{tidy}。")
+    elif len(entries) == limit and labels:
+        # 正好记满、里面有组里别的服务器记的：它整理时只合并、删这里记的，腾不出地方就记不进新的
+        head.append("⚠️ 记满了：整理记忆时它只合并、删掉这个服务器自己记的，腾不出地方就记不进新的，可以在这里删几条。")
     tail = []
     if not bot.settings.get("long_memory", guild_id=guild_id):
         tail.append("⚠️ 这个服务器关掉了长期记忆：`/ds 设置 参数:长期记忆 值:开 范围:全服务器` 打开")
     if not entries:
         return "\n".join(head + ["还没有。聊天时有人叫它记住群里的事，或者它整理聊天时觉得值得记，就会记在这里。"] + tail)
-    labels = _memory_labels(bot, guild_id, entries)
 
     def body(cap: int | None) -> list[str]:
         out = []
+        names = labels if cap is None else short  # 截短的时候服务器名也截短（名字很长时也放得下）
         for m in entries:
             text = m.text if cap is None or len(m.text) <= cap else m.text[: cap - 1] + "…"
-            out.append(f"({m.no}) {text}" + (f"（{labels[m.no]}记的）" if m.no in labels else ""))
+            out.append(f"({m.no}) {text}" + (f"（{names[m.no]}记的）" if m.no in names else ""))
         return out
 
-    def fits(lines: list[str]) -> bool:
-        return len(split_message("\n".join(lines))) <= REPLY_PARTS
-
-    lines = body(None)
-    if fits(head + lines + tail):
-        return "\n".join(head + lines + tail)
     # 发不完（连成一组时并进来很多条）：每条截短，编号都列出来，管理员照编号删
-    for cap in (120, 80, 50, 30, 20):
-        note = [f"条目太多，每条只显示前 {cap} 个字（删除时在「编号」一栏输入几个字能筛选）。"]
-        lines = body(cap)
-        if fits(head + note + lines + tail):
-            return "\n".join(head + note + lines + tail)
-    shown = len(lines)
-    while shown and not fits(head + note + lines[:shown] + [f"……还有 {len(lines) - shown} 条没列出。"] + tail):
-        shown -= 1
-    return "\n".join(head + note + lines[:shown] + [f"……还有 {len(lines) - shown} 条没列出。"] + tail)
+    return fit_listing(head, body, [m.no for m in entries], tail, "看全一条：查看时在「编号」一栏选它；删除时也在那里选，输入几个字能筛选")
+
+
+def memory_entry_text(bot: "DSBot", guild_id: int, no: int) -> str:
+    """长期记忆里的一条，全文（/ds 长期记忆 查看时选了编号）；连成一组时写上是哪个服务器记的。"""
+    assert bot.memory is not None
+    m = bot.memory.get(bot.store.memory_scope(guild_id), no)
+    if m is None:
+        return f"没有第 {no} 条（`/ds 长期记忆 操作:查看` 能看到编号）。"
+    whose = _memory_labels(bot, guild_id, [m]).get(no)
+    return f"({m.no}) {m.text}" + (f"（{whose}记的）" if whose else "")
 
 
 def memory_number_choices(bot: "DSBot", guild_id: int | None, current: str) -> list[Choice[int]]:
@@ -708,17 +768,32 @@ def dm_memory_text(bot: "DSBot", user_id: int) -> str:
     assert bot.memory is not None
     entries = bot.memory.dm_entries(user_id)
     cap = bot.cfg.engine.dm_memory_max_entries
-    lines = [f"**你的私信记忆**（{len(entries)} / {cap} 条）"]
-    lines += [f"({e.no}) {e.text}" + ("〔敏感〕" if e.sensitive else "") for e in entries] or [
-        "还没有。私信里叫它记住你们之间的事，或者私信安静下来后它整理时觉得值得记，就会记在这里。"
+    head = [f"**你的私信记忆**（{len(entries)} / {cap} 条）"]
+    if not entries:
+        return "\n".join(head + ["还没有。私信里叫它记住你们之间的事，或者私信安静下来后它整理时觉得值得记，就会记在这里。"])
+    tail = [
+        "标着〔敏感〕的只在私信里用；别的你在服务器里叫它时也会用上。",
+        "判错了就改：`/ds-dm 记忆 操作:设为不敏感 编号:3`（编号一栏输入几个字就能从你的记忆里选），"
+        "或者私信里直接跟它说“第 3 条不算敏感”。",
     ]
-    if entries:
-        lines.append("标着〔敏感〕的只在私信里用；别的你在服务器里叫它时也会用上。")
-        lines.append(
-            "判错了就改：`/ds-dm 记忆 操作:设为不敏感 编号:3`（编号一栏输入几个字就能从你的记忆里选），"
-            "或者私信里直接跟它说“第 3 条不算敏感”。"
-        )
-    return "\n".join(lines)
+
+    def body(limit: int | None) -> list[str]:
+        return [
+            f"({e.no}) {e.text if limit is None or len(e.text) <= limit else e.text[: limit - 1] + '…'}" + ("〔敏感〕" if e.sensitive else "")
+            for e in entries
+        ]
+
+    # 记得很多、一次发不完：每条截短，编号照样全部列出来（以前后面的会被截掉）
+    return fit_listing(head, body, [e.no for e in entries], tail, "看全一条：查看时在「编号」一栏选它，输入几个字能筛选")
+
+
+def dm_memory_entry_text(bot: "DSBot", user_id: int, no: int) -> str:
+    """私信记忆里的一条，全文（/ds-dm 记忆 查看时选了编号）。"""
+    assert bot.memory is not None
+    e = bot.memory.dm_get(user_id, no)
+    if e is None:
+        return f"没有第 {no} 条（用 `/ds-dm 记忆` 看看编号）。"
+    return f"({e.no}) {e.text}" + ("〔敏感〕" if e.sensitive else "")
 
 
 def withdraw_dm_memory(bot: "DSBot", user_id: int | None = None, *, guild_id: int | None = None) -> None:
@@ -838,7 +913,12 @@ def link_preview_text(bot: "DSBot", plan: LinkPlan) -> str:
             f"，超过上限 {limit} 条：删到 {limit - 1} 条以内之前不会记新的。整理记忆时每个服务器只合并、删改自己服务器记的，"
             "别的服务器记的不动，所以最好用 `/ds 长期记忆` 删几条（连之前、连之后都行）。"
         )
-    lines.append(memory_line + ("" if plan.memory_total > limit else "。"))
+    elif plan.memory_total == limit > 0:
+        memory_line += (
+            f"，正好到上限 {limit} 条：整理记忆时每个服务器只合并、删改自己服务器记的，腾不出地方就记不进新的，"
+            "可以用 `/ds 长期记忆` 删几条（连之前、连之后都行）。"
+        )
+    lines.append(memory_line + ("" if memory_line.endswith("。") else "。"))
     if plan.renumbered:
         lines.append(f"- {joining}原来的长期记忆会接在组里原来的后面、重新编号：要删哪条，先重新 `/ds 长期记忆 操作:查看`。")
     both = plan.cards_kept - plan.cards_deleted
@@ -934,6 +1014,25 @@ def recover_groups(bot: "DSBot") -> None:
         )
 
 
+def start_groups(bot: "DSBot") -> None:
+    """启动时：先把上次没做完的连组、退组接着做完，再照 config.toml 换人设卡的共用方式。接着做（或者检查有没有要接着做的）
+    时出错了就先不换（换的时候要按做完以后的样子并卡、分卡：没并进组的卡直接并成共用的，组里删掉的卡可能被顶回来），
+    下次启动再试。"""
+    try:
+        recover_groups(bot)
+    except Exception:
+        log.exception("服务器组：启动时接着做（检查）上次的连组、退组时出错")
+        cards = bot.cards
+        want = bool(bot.cfg.bot.shared_cards)
+        if cards is not None and want != bool(getattr(cards, "shared", False)):
+            log.warning(
+                "人设卡：启动时接着做（检查）上次的连组、退组出错了，这次先不换成%s，还按原来的方式用（下次启动再换）",
+                "所有服务器共用一张" if want else "每个服务器一张",
+            )
+        return
+    apply_card_mode(bot)
+
+
 def apply_card_mode(bot: "DSBot") -> None:
     """启动时照 config.toml 的 [bot] shared_cards 换成所有服务器共用一张人设卡，或者改回每个服务器一张（先接着做完上次
     没做完的连组、退组再调）。出错就还按卡文件里原来记的方式用（一次事务，没改成就像没改过），下次启动再试。"""
@@ -1017,7 +1116,10 @@ class ConfirmGroup(discord.ui.View):
             text = f"没办成：{exc}"
         except Exception as exc:  # 数据库出错之类：做到一半的，下次执行组命令时会接着做完
             log.exception("服务器组：连组、退组出错")
-            text = f"出错了：{exc}\n做到一半的部分，下次执行 `/dsowner 服务器组`（随便哪个操作）时会接着做完。"
+            text = (
+                f"出错了：{exc}\n做到一半的部分，下次执行 `/dsowner 服务器组`（随便哪个操作）时会接着做完"
+                "（新建的组只连上了一个服务器的，会先散掉：要连的话再连一次）。"
+            )
         await interaction.response.edit_message(content=text, view=None)
 
 
@@ -1204,7 +1306,7 @@ def register_dm_commands(bot: "DSBot") -> None:
 
     @dm.command(name="记忆", description="你的私信记忆（它和你之间记下的事）：查看、删掉某条、改成敏感，或者全部清空")
     @app_commands.rename(op="操作", no="编号")
-    @app_commands.describe(op="不选 = 查看", no="删除、改敏感标记时选第几条（输入几个字可以筛选）")
+    @app_commands.describe(op="不选 = 查看", no="选第几条（输入几个字可以筛选）：查看时只看这一条的全文；删除、改敏感标记时必填")
     @app_commands.choices(
         op=[
             Choice(name="查看", value="view"),
@@ -1222,7 +1324,10 @@ def register_dm_commands(bot: "DSBot") -> None:
         user_id = interaction.user.id
         what = op.value if op is not None else "view"
         if what == "view":
-            await _reply_long(interaction, dm_memory_text(bot, user_id))
+            if no is not None:  # 只看这一条的全文（记得多时列表里每条截短了）
+                await _reply(interaction, dm_memory_entry_text(bot, user_id, no))
+            else:
+                await _reply_long(interaction, dm_memory_text(bot, user_id))
             return
         if what == "clear":
             n = bot.memory.dm_clear(user_id)
@@ -1472,7 +1577,7 @@ def register_commands(bot: "DSBot") -> None:
     @app_commands.describe(
         action="查看 / 添加 / 删除 / 清空",
         text="添加时填要记的事（一条只记一件事）",
-        number="删除时选第几条（列表里有内容；输入几个字可以筛选）",
+        number="选第几条（列表里有内容；输入几个字可以筛选）：查看时只看这一条的全文；删除时必填",
     )
     @app_commands.choices(action=MEMORY_ACTIONS)
     @app_commands.autocomplete(number=memory_entry_numbers)
@@ -1489,7 +1594,9 @@ def register_commands(bot: "DSBot") -> None:
             return
         ec = bot.cfg.engine
         scope = bot.store.memory_scope(guild_id)  # 连成一组的服务器：组里共用的那份
-        if action.value == "list":
+        if action.value == "list" and number is not None:  # 只看这一条的全文（条目多时列表里每条截短了）
+            await _reply(interaction, memory_entry_text(bot, guild_id, number))
+        elif action.value == "list":
             await _reply_long(interaction, memory_list_text(bot, guild_id))
         elif action.value == "add":
             entry = " ".join((text or "").split())

@@ -158,30 +158,38 @@ def link(store: Any, cards: Any, memory: Any, guild_id: int, other_id: int, *, n
         if plan.group_id is None:
             group = store.new_group_id(lowest=_lowest_scope(cards, memory))
             store.join_group(plan.base, group, now)  # 先记进组：之后它的人设卡、长期记忆都记在组里
-            _merge(cards, memory, plan.base, group, now)  # 组里原来的那个：原样搬过去，编号不变
+            _merge(cards, memory, plan.base, group, now, [plan.base, plan.joining])  # 组里原来的那个：原样搬过去，编号不变
         else:
             group = plan.group_id
-        _sweep(store, cards, memory, group, now)
+        _sweep(store, cards, memory, group, now, coming=plan.joining)
         renumbered = memory is not None and not memory.keeps_numbers(group)
         store.join_group(plan.joining, group, now)  # 先记进组，再把它原来的并进来（中途断了，下次连、退时会扫进来）
-        moved, kept, added = _merge(cards, memory, plan.joining, group, now)
+        moved, kept, added = _merge(cards, memory, plan.joining, group, now, store.group_members(group))
         total = memory.count(group) if memory is not None else 0
         return Linked(group, plan.joining, store.group_members(group), created, moved, kept, added, total, renumbered and added > 0)
 
 
-def _merge(cards: Any, memory: Any, guild_id: int, group_id: int, now: float) -> tuple[int, int, int]:
+def _merge(
+    cards: Any, memory: Any, guild_id: int, group_id: int, now: float, members: list[int] | None
+) -> tuple[int, int, int]:
+    """guild_id 的人设卡、长期记忆并进组里。members：并完以后组里的服务器（长期记忆记着是它们记的，照旧算它们的）；
+    None：记着是谁记的都原样留着（见 _sweep）。"""
     moved, kept = cards.merge_scope(guild_id, group_id, now=now) if cards is not None else (0, 0)
-    added = memory.merge_scope(guild_id, group_id) if memory is not None else 0
+    added = memory.merge_scope(guild_id, group_id, members=members) if memory is not None else 0
     return moved, kept, added
 
 
-def _sweep(store: Any, cards: Any, memory: Any, group_id: int, now: float) -> None:
+def _sweep(store: Any, cards: Any, memory: Any, group_id: int, now: float, coming: int | None = None) -> None:
     """组里的服务器自己名下不该有人设卡、长期记忆（都记在组里）：有的话（中途断了）并进组里。
-    正在退出的不扫：它名下的是复制到一半的副本，复制时整个换掉。"""
+    正在退出的不扫：它名下的是复制到一半的副本，复制时整个换掉。coming：马上要加进来的服务器（也算组里的）。
+    组里只有一个服务器（连到一半就断了，recover 接着就把它散掉）：长期记忆记着是谁记的原样留着，下次再连时照常算
+    （不然另一个服务器记的都算成它的，连好以后那边整理时改不了自己记的）。"""
     leaving = {g for g, _ in store.leaving()}
+    members = store.group_members(group_id) + ([coming] if coming is not None else [])
+    keep = coming is None and len(members) == 1
     for guild_id in store.group_members(group_id):
         if guild_id not in leaving:
-            _merge(cards, memory, guild_id, group_id, now)
+            _merge(cards, memory, guild_id, group_id, now, None if keep else members)
 
 
 def _leaver_cards(cards: Any, group_id: int, guild_id: int, rest: list[int]) -> tuple[set[int], set[int]]:

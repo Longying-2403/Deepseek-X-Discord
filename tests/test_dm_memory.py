@@ -782,6 +782,10 @@ class Commands(BotCase):
         self.assertTrue(ephemeral)  # 只有自己看得到
         self.assertIn("（2 / 30 条）\n(1) 最近在学吉他\n(2) 住在台北〔敏感〕", text)
         self.assertNotIn("别人的", text)
+        await command(self.interaction(), None, 2)  # 选了编号：只看这一条的全文（记得多时列表里每条截短了）
+        self.assertEqual(self.sent[-1][0], "(2) 住在台北〔敏感〕")
+        await command(self.interaction(), NS(value="view"), 9)
+        self.assertIn("没有第 9 条", self.sent[-1][0])
         await command(self.interaction(), NS(value="private"), 1)
         self.assertTrue(bot.memory.dm_get(11, 1).sensitive)
         await command(self.interaction(), NS(value="public"), 2)

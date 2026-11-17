@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections import deque
 from types import SimpleNamespace as NS
 
 from helpers import CHANNEL, GUILD, OWNER, make_engine, msg
@@ -203,6 +204,18 @@ class CardMerge(unittest.TestCase):
         self.assertEqual(cards.get(g, 11).text, "组里第6版")
         self.assertEqual(cards.restore_previous(g, 11, now=31), "组里第5版")  # 组里自己的旧版本一个没少
         self.assertNotIn("这边第6版", cards.own_texts(g, 11))  # 放不下：那边忘掉的不搬
+
+    def test_forgotten_card_moving_in_stays_behind_the_groups_own_history(self):
+        # 加入方叫它忘掉了的卡（只剩旧版本，比组里的还新）搬进来：改回上一版先回到组里自己的，搬来的排在后面
+        cards, g = CardStore(":memory:"), -1
+        for i in range(1, 4):
+            cards.put(g, 11, "阿明", f"组里第{i}版", via="command", now=i)
+        cards.put(OTHER, 11, "阿明", "这边第1版", via="command", now=10)
+        cards.put(OTHER, 11, "阿明", "这边第2版", via="command", now=11)
+        cards.put(OTHER, 11, "阿明", "", via="chat", now=12)
+        cards.merge_scope(OTHER, g, now=20)
+        self.assertEqual(cards.get(g, 11).text, "组里第3版")
+        self.assertEqual(cards.restore_previous(g, 11, now=21), "组里第2版")
 
     def test_copy_replaces_everything(self):
         cards, g = CardStore(":memory:"), -1
@@ -534,11 +547,149 @@ class LinkUnlink(unittest.TestCase):
         memory.add(GUILD, "A服的事", via="command", origin=GUILD)
         g = link(store, cards, memory, GUILD, OTHER, now=1).group_id
         self.assertEqual([(m.text, m.origin) for m in memory.entries(g)], [("B服的事", OTHER), ("A服的事", GUILD)])
-        unlink(store, cards, memory, GUILD, now=2)  # 组散了：两边各带走一份，从此都是自己的
-        self.assertEqual({m.origin for m in memory.entries(GUILD)}, {None})
-        self.assertEqual({m.origin for m in memory.entries(OTHER)}, {None})
-        g2 = link(store, cards, memory, GUILD, THIRD, now=3).group_id  # 带走的再连进别的组：都算 GUILD 记的
+        unlink(store, cards, memory, GUILD, now=2)  # 组散了：两边各带走一份（没在组里时整理都能改），照样记着是谁记的
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(GUILD)], [("B服的事", OTHER), ("A服的事", GUILD)])
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(OTHER)], [("B服的事", OTHER), ("A服的事", GUILD)])
+        g2 = link(store, cards, memory, GUILD, THIRD, now=3).group_id  # 带走的再连进别的组：记的那个服务器不在组里，算 GUILD 记的
         self.assertEqual({m.origin for m in memory.entries(g2)}, {GUILD})
+
+    def test_linking_again_keeps_who_wrote_what(self):
+        # 组散了又连回来：各是各的（不会全算成“连到”那边记的，这边自己记的整理时照样改得了）
+        store, cards, memory = world()
+        memory.add(OTHER, "别的服的约定", via="command", origin=OTHER)
+        memory.add(GUILD, "测试服过时的梗", via="command", origin=GUILD)
+        link(store, cards, memory, GUILD, OTHER, now=1)
+        unlink(store, cards, memory, GUILD, now=2)
+        g = link(store, cards, memory, GUILD, OTHER, now=3).group_id
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(g)], [("别的服的约定", OTHER), ("测试服过时的梗", GUILD)])
+        # 三个服务器的组里有两个退出、再连成一组：第三个服务器记的算带进来的那个服务器的，这两个各是各的
+        memory.add(THIRD, "第三服的事", via="command", origin=THIRD)
+        link(store, cards, memory, THIRD, OTHER, now=4)
+        self.assertEqual(memory.get(g, 3).origin, THIRD)
+        unlink(store, cards, memory, GUILD, now=5)
+        unlink(store, cards, memory, OTHER, now=6)  # 组散了：OTHER、THIRD 各拿一份
+        g2 = link(store, cards, memory, GUILD, OTHER, now=7).group_id
+        self.assertEqual(
+            [(m.text, m.origin) for m in memory.entries(g2)], [("别的服的约定", OTHER), ("测试服过时的梗", GUILD), ("第三服的事", OTHER)]
+        )
+
+    def test_relinking_after_an_interrupted_link_keeps_who_wrote_what(self):
+        # 组散了以后再连，连到一半断了（比如数据库被别的程序占着）：接着做完时把半截的组散掉，谁记的照样记着，
+        # 再连一次和没断过一样
+        import sqlite3
+
+        store, cards, memory = world()
+        memory.add(OTHER, "别的服的约定", via="command", origin=OTHER)
+        memory.add(GUILD, "测试服过时的梗", via="command", origin=GUILD)
+        link(store, cards, memory, GUILD, OTHER, now=1)
+        unlink(store, cards, memory, GUILD, now=2)  # 组散了：OTHER 那份里也有 GUILD 记的
+        real = memory.merge_scope
+
+        def locked(*args, **kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        memory.merge_scope = locked
+        with self.assertRaises(sqlite3.OperationalError):
+            link(store, cards, memory, GUILD, OTHER, now=3)  # OTHER 记进了新组，它的记忆还没搬进去就断了
+        memory.merge_scope = real
+        recover(store, cards, memory, now=4)  # 下次执行组命令、重启时：只有一个服务器的组散掉
+        self.assertEqual(store.groups(), {})
+        mine = [("别的服的约定", OTHER), ("测试服过时的梗", GUILD)]
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(OTHER)], mine)
+        g = link(store, cards, memory, GUILD, OTHER, now=5).group_id
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(g)], mine)
+
+    def test_a_new_group_cut_off_at_the_joiner_keeps_the_bringer_rule(self):
+        # 新建组连到一半（两个服务器都记进了组，加入方的记忆还没并进去）就断了：接着做完时组照常留着，加入方带进来的、
+        # 组外的服务器记的条目算加入方的（只有它整理时改得了）
+        import sqlite3
+
+        store, cards, memory = world()
+        memory.add(THIRD, "第三服的约定", via="command", origin=THIRD)
+        link(store, cards, memory, GUILD, THIRD, now=1)
+        unlink(store, cards, memory, GUILD, now=2)  # GUILD 带走的那份里有 THIRD 记的
+        memory.add(OTHER, "别的服的约定", via="command", origin=OTHER)
+        real = memory.merge_scope
+
+        def locked(src, dst, **kw):
+            if src == GUILD:  # “连到”的那个（OTHER）已经并进去了
+                raise sqlite3.OperationalError("database is locked")
+            return real(src, dst, **kw)
+
+        memory.merge_scope = locked
+        with self.assertRaises(sqlite3.OperationalError):
+            link(store, cards, memory, GUILD, OTHER, now=3)
+        memory.merge_scope = real
+        g = store.group_of(GUILD)
+        self.assertEqual(store.group_members(g), [OTHER, GUILD])
+        recover(store, cards, memory, now=4)
+        self.assertEqual(store.group_members(g), [OTHER, GUILD])  # 两个服务器：组照常留着
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(g)], [("别的服的约定", OTHER), ("第三服的约定", GUILD)])
+        self.assertEqual(memory.count(GUILD), 0)
+
+    def test_entries_from_servers_outside_the_group_count_as_the_bringers(self):
+        # 带进组的条目，记的那个服务器不在组里：算带进来的那个服务器的（只有它整理时改得了）。组里已经有记忆、
+        # 重新编号并进去时也一样；中途断了、接着做完时扫进来的也一样
+        store, cards, memory = world()
+        memory.add(OTHER, "B的约定", via="command", origin=OTHER)
+        g = link(store, cards, memory, GUILD, OTHER, now=1).group_id
+        memory.add(THIRD, "第四个服务器记的", via="command", origin=4)  # THIRD 从别的组带出来的
+        link(store, cards, memory, THIRD, OTHER, now=2)
+        self.assertEqual((memory.get(g, 2).text, memory.get(g, 2).origin), ("第四个服务器记的", THIRD))
+        memory.add(5, "第六个服务器记的", via="command", origin=6)
+        store.join_group(5, g, now=3)  # 第四个加进来：先记进组，还没把它原来的并进来就断了
+        recover(store, cards, memory, now=4)
+        self.assertEqual((memory.get(g, 3).text, memory.get(g, 3).origin), ("第六个服务器记的", 5))
+        memory.add(GUILD, "要加进来的那个记的", via="command", origin=7)  # 组里服务器自己名下剩下的（中途断了）
+        memory.add(GUILD, "不相干的服务器记的", via="command", origin=8)
+        link(store, cards, memory, 7, OTHER, now=5)  # 连组时先扫一遍：马上要加进来的那个也算组里的
+        self.assertEqual([(m.text, m.origin) for m in memory.entries(g)][3:], [("要加进来的那个记的", 7), ("不相干的服务器记的", GUILD)])
+
+    def test_edits_made_apart_belong_to_the_server_that_made_them(self):
+        # 组散了以后自己整理时改了别的服务器记的条目：再连回来，改过的那条算这边的；那边改了自己记的，这边没改的
+        # 旧版本还算那边的
+        store, cards, memory = world()
+        memory.add(OTHER, "周五晚上开黑", via="command", origin=OTHER)
+        memory.add(OTHER, "B的约定", via="command", origin=OTHER)
+        link(store, cards, memory, GUILD, OTHER, now=1)
+        unlink(store, cards, memory, GUILD, now=2)
+        memory.edit(GUILD, 1, "周五晚上开黑，测试服这边改到周六晚上", via="review")
+        memory.edit(OTHER, 2, "B的约定（改过）", via="review")
+        g = link(store, cards, memory, GUILD, OTHER, now=3).group_id
+        self.assertEqual(
+            [(m.text, m.origin) for m in memory.entries(g)],
+            [("周五晚上开黑", OTHER), ("B的约定（改过）", OTHER), ("周五晚上开黑，测试服这边改到周六晚上", GUILD), ("B的约定", OTHER)],
+        )
+        memory.edit(g, 4, "B的约定（又改了）", via="chat")  # 在组里改：照旧算原来记的那个服务器的
+        self.assertEqual(memory.get(g, 4).origin, OTHER)
+
+    def test_pending_leaver_memory_copy_is_not_swept_back(self):
+        # 退出复制到一半断了：它名下那份半截的副本不会被扫回组里（组里在这期间删掉的那条就不会回来）
+        store, cards, memory = world()
+        memory.add(OTHER, "留着的", via="command")
+        memory.add(OTHER, "要删的", via="command")
+        g = link(store, cards, memory, GUILD, OTHER, now=2).group_id
+        link(store, cards, memory, THIRD, OTHER, now=3)
+        store.start_leaving(THIRD, now=4)  # 复制到一半就断了（还算组里的）
+        memory.copy_scope(g, THIRD)
+        memory.delete(g, 2)  # 这期间管理员在组里删了第 2 条
+        link(store, cards, memory, 4, OTHER, now=5)  # 又有服务器连进来：先扫一遍组里服务器自己名下的
+        self.assertEqual(texts(memory, g), [(1, "留着的")])
+
+    def test_interrupted_leave_does_not_take_a_card_rewritten_elsewhere(self):
+        # 退出没做完时，他清空了卡、又只在别的服务器重写了一张：不再算在退出的那个服务器出现过，它不带走新卡
+        store, cards, memory = world()
+        cards.put(OTHER, 11, "阿明", "阿明的卡", via="command", now=1)
+        g = link(store, cards, memory, GUILD, OTHER, now=2).group_id
+        link(store, cards, memory, THIRD, OTHER, now=3)
+        cards.note_seen(g, 11, THIRD, "阿明")
+        store.start_leaving(THIRD, now=4)  # 复制到一半就断了（还算组里的）
+        cards.copy_scope(g, THIRD, users={11})
+        cards.delete(g, 11, now=5)  # 清空了卡（在哪儿出现过的记录也一起去掉）
+        cards.put(g, 11, "阿明", "在别的服重写的卡", via="command", now=6)
+        cards.note_seen(g, 11, OTHER, "阿明")
+        recover(store, cards, memory, now=7)
+        self.assertIsNone(cards.get(THIRD, 11))
 
     def test_old_memory_files_get_the_origin_column(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
@@ -684,6 +835,51 @@ class InRounds(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(texts(memory, g), [(1, "周六晚上开黑")])  # 组里的编号没变：照样记下
         self.assertIn("📝", [r[2] for r in transport.reactions])
 
+    async def test_others_joining_the_group_do_not_block_an_edit(self):
+        # 第三个服务器加进同一个组：组里原来的编号不变（并进来的接在后面），这边正在改的照样改
+        engine, llm, transport, clock, memory, g = grouped(chat([ACTIONS({"type": "memory", "edit": 1, "text": "周六晚上开黑"}, REPLY(1, "改好了"))]))
+        memory.add(g, "周五晚上开黑", via="command")
+        memory.add(THIRD, "第三服的事", via="command")
+
+        async def hook(call):
+            if call["json_mode"] and not is_review(call) and engine.store.group_of(THIRD) is None:
+                link(engine.store, engine.cards, memory, THIRD, GUILD, now=clock())
+
+        llm.hook = hook
+        await talk(engine, clock, 1, "@小D 把第 1 条改成周六")
+        self.assertEqual(texts(memory, g), [(1, "周六晚上开黑"), (2, "第三服的事")])
+
+    async def test_other_servers_linking_does_not_block_this_ones_edit(self):
+        engine, llm, transport, clock, memory = setup(chat([ACTIONS({"type": "memory", "edit": 1, "text": "周六晚上开黑"}, REPLY(1, "改好了"))]))
+        memory.add(GUILD, "周五晚上开黑", via="command")
+
+        async def hook(call):
+            if call["json_mode"] and not is_review(call):
+                link(engine.store, engine.cards, memory, THIRD, 4, now=clock())  # 不相干的两个服务器连成一组
+
+        llm.hook = hook
+        await talk(engine, clock, 1, "@小D 把第 1 条改成周六")
+        self.assertEqual(texts(memory, GUILD), [(1, "周六晚上开黑")])
+
+    async def test_other_servers_linking_does_not_redo_this_ones_review(self):
+        review = json.dumps({"cards": [], "memory": [{"add": "整理出来的"}]}, ensure_ascii=False)
+        engine, llm, transport, clock, memory = setup(chat([ACTIONS(REPLY(1, "在"))], review=review))
+        state = {"linked": False}
+
+        async def hook(call):
+            if is_review(call) and not state["linked"]:
+                state["linked"] = True
+                link(engine.store, engine.cards, memory, THIRD, 4, now=clock())  # 整理的时候不相干的服务器连成一组
+
+        llm.hook = hook
+        await three_rounds(engine, clock)
+        clock.advance(600)
+        await engine.tick()
+        await engine.drain()
+        self.assertTrue(state["linked"])
+        self.assertEqual(len([c for c in llm.calls if is_review(c)]), 1)  # 不用重问
+        self.assertEqual(texts(memory, GUILD), [(1, "整理出来的")])
+
     async def test_a_new_memory_follows_this_server_into_the_group(self):
         engine, llm, transport, clock, memory = setup(chat([ACTIONS({"type": "memory", "add": "周五开黑"}, REPLY(1, "记下了"))]))
         state = {}
@@ -743,6 +939,36 @@ class InRounds(unittest.IsolatedAsyncioTestCase):
         alone = build_review_prompt(name="小D", cards=False, memory=True, card_max=1, entry_max=200, count=4, max_entries=2)
         self.assertIn("快满了就合并、删掉旧的", alone)
         self.assertNotIn("超过了上限", alone)
+
+    async def test_exactly_full_it_does_not_delete_other_servers_entries(self):
+        # 正好记满、里面有别的服务器记的：聊天时别为了腾地方删（分不出是哪边的），整理时只动这里记的
+        review = json.dumps({"cards": [], "memory": []}, ensure_ascii=False)
+        engine, llm, transport, clock, memory = setup(chat([ACTIONS(REPLY(1, "在"))], review=review))
+        engine.ec.memory_max_entries = 2
+        memory.add(OTHER, "别的服的约定", via="command")
+        memory.add(GUILD, "测试服的约定", via="command")
+        link(engine.store, engine.cards, memory, GUILD, OTHER, now=clock())  # 并完正好 2 条
+        await talk(engine, clock, 1)
+        prompt = system_text(chats(llm)[-1])
+        self.assertIn("记满了，里面有组里别的服务器记的：别为了腾地方删条目", prompt)
+        self.assertNotIn("超过上限了", prompt)
+        await three_rounds(engine, clock)
+        clock.advance(600)
+        await engine.tick()
+        await engine.drain()
+        review_prompt = system_text([c for c in llm.calls if is_review(c)][-1])
+        self.assertIn("记满了（最多 2 条）：组里别的服务器记的这里删不了", review_prompt)
+        self.assertNotIn("快满了就合并、删掉旧的", review_prompt)
+        from dsbot.prompts import build_review_prompt, build_system_prompt
+
+        # 没连组（全是自己记的）、还没满：照原来那样
+        args = dict(name="小D", cards=False, memory=True, card_max=1, entry_max=200, max_entries=2)
+        self.assertIn("快满了就合并、删掉旧的", build_review_prompt(count=2, **args))
+        self.assertIn("快满了就合并、删掉旧的", build_review_prompt(count=1, foreign=1, **args))
+        full = [(1, "a"), (2, "b")]
+        self.assertNotIn("记满了，里面有", build_system_prompt(guild="g", channel="c", name="n", persona="", summary=None, memories=full, memory_max=2))
+        alone = build_system_prompt(guild="g", channel="c", name="n", persona="", summary=None, memories=full, memory_max=2, group=["别的服"])
+        self.assertNotIn("记满了，里面有", alone)  # 组里别的服务器没记过：全是自己的，照常合并、删旧的
 
     async def test_chat_edits_only_numbers_it_was_shown(self):
         engine, llm, transport, clock, memory, g = grouped(chat([ACTIONS({"type": "memory", "delete": 2}, REPLY(1, "删了"))]))
@@ -930,6 +1156,7 @@ class Sharing(unittest.IsolatedAsyncioTestCase):
         from dsbot.mentions import link as link_names
 
         channels = {"大厅": frozenset({LOBBY})}
+        others = lambda server: server == "别的服"  # noqa: E731  bot 知道的别的服务器
         for text in (
             "#大厅（「别的服」服务器）那边在聊原神",
             "在「别的服」服务器的 #大厅 阿明也说了",
@@ -937,10 +1164,201 @@ class Sharing(unittest.IsolatedAsyncioTestCase):
             "帖子「攻略」（在 #大厅）（「别的服」服务器）",  # 别的服务器的帖子
             "「别的服」服务器的 帖子「攻略」（在 #大厅） 跟你聊过",  # 近况里别的服务器的帖子
         ):
-            self.assertNotIn(f"<#{LOBBY}>", link_names(text, {}, channels, here="测试服")[0], text)
-        self.assertEqual(link_names("去 #大厅 看看", {}, channels, here="测试服")[0], f"去 <#{LOBBY}> 看看")  # 这里的频道照常换
-        for text in ("「测试服」服务器的 #大厅", "#大厅（「测试服」服务器维护通知）", "#大厅（「测试服」服务器）"):
-            self.assertIn(f"<#{LOBBY}>", link_names(text, {}, channels, here="测试服")[0], text)  # 写的是这里、或者不是在说服务器
+            self.assertNotIn(f"<#{LOBBY}>", link_names(text, {}, channels, other_server=others)[0], text)
+        self.assertEqual(link_names("去 #大厅 看看", {}, channels, other_server=others)[0], f"去 <#{LOBBY}> 看看")  # 这里的频道照常换
+        for text in ("「测试服」服务器的 #大厅", "#大厅（「测试服」服务器维护通知）", "#大厅（「测试服」服务器）", "去「生存」服务器的 #大厅 看看"):
+            self.assertIn(f"<#{LOBBY}>", link_names(text, {}, channels, other_server=others)[0], text)  # 写的是这里、不是哪个服务器
+
+    async def test_this_servers_own_channels_stay_linked(self):
+        # 写的是这个服务器（给它看的名字中和、截短过）：照常换成这里的链接。写的是 bot 知道的别的服务器（它在的、组里的、
+        # 最近跟它聊过的）：不换。认不出是哪个服务器的（游戏里的“生存服务器”）：没连组、没开跨服务器、不共用人设卡时（它没见过
+        # 别的服务器）照常换，连成组以后不换。这里和组里别的服务器同名（分不出是哪个）：不换
+        from dsbot.mentions import link as link_names
+
+        replies = [ACTIONS(REPLY(1, "群规在「[原神]提瓦特冒险团」服务器的 #大厅 置顶了")), ACTIONS(REPLY(1, "#大厅（「别的服」服务器）那边在聊原神"))]
+        engine, llm, transport, clock, memory = setup(chat(replies))
+        channels = {"大厅": frozenset({LOBBY})}
+
+        def linked(text):
+            return f"<#{LOBBY}>" in link_names(text, {}, channels, other_server=engine._other_server_named(GUILD))[0]
+
+        transport.guild_names[GUILD] = "【原神】提瓦特冒险团"  # 给它看的是“[原神]提瓦特冒险团”
+        transport.channel_map = {"大厅": {LOBBY}}
+        await talk(engine, clock, 1, "@小D 群规在哪")
+        self.assertIn(f"<#{LOBBY}>", transport.sent[-1][1])
+        self.assertTrue(linked("#大厅（「【原神】提瓦特冒险团」服务器）"))
+        self.assertTrue(linked("去「生存」服务器的 #大厅 看看"))  # 游戏里的服务器
+        long_name = "超长的服务器名字" * 9
+        transport.guild_names[GUILD] = long_name  # 提示词里截到 60 字
+        self.assertTrue(linked(f"「{long_name[:59]}…」服务器的 #大厅"))
+        self.assertTrue(linked(f"「{long_name[:59]}」服务器的 #大厅"))  # 抄的时候丢了“…”
+        engine.interactions[(THIRD, 11)] = deque()  # 他在第三服跟它聊过（没开跨服务器，这里看不到）
+        transport.guild_names[THIRD] = "第三服"
+        self.assertFalse(linked("「第三服」服务器的 #大厅"))
+        self.assertTrue(linked("去「生存」服务器的 #大厅 看看"))  # 知道别的服务器了，认不出的照样换
+        self.assertTrue(linked(f"「{long_name[:59]}…」服务器的 #大厅"))
+        engine.interactions.clear()  # 重启了，或者几个小时没人在那边跟它聊：bot 还在那个服务器，照样认得
+        transport.joined.append(THIRD)
+        self.assertFalse(linked("「第三服」服务器的 #大厅"))
+        for third in (long_name, long_name + "（管理）"):  # 和这里同名、开头一样（比如专门放管理命令的服务器）
+            transport.guild_names[THIRD] = third  # 可这里从来看不到那个服务器（没连组、没开跨服务器）：写的就是这里
+            for cut in (f"{long_name[:59]}…", f"{long_name[:39]}…", f"{long_name[:20]}…"):
+                self.assertTrue(linked(f"「{cut}」服务器的 #大厅"), (third, cut))
+        self.assertFalse(linked(f"「{long_name}（管理）」服务器的 #大厅"))  # 写的是那个服务器的全名：不换
+        transport.guild_names[THIRD] = long_name[:39]  # 那个服务器的全名正好是这里截到 40 字、丢了“…”的样子：算那边的
+        lobby = [(LOBBY, ChannelPlace(guild_id=GUILD, name="大厅", public=True))]
+        self.assertFalse(linked(f"「{long_name[:39]}」服务器的 #大厅"))
+        self.assertIsNone(engine._find_source(lobby, f"「{long_name[:39]}」服务器的 #大厅", GUILD))
+        self.assertTrue(linked(f"「{long_name[:39]}…」服务器的 #大厅"))
+        transport.guild_names[THIRD] = long_name + "（管理）"
+        self.assertTrue(linked(f"「{long_name[:39]}」服务器的 #大厅"))
+        self.assertEqual(engine._find_source(lobby, f"「{long_name[:39]}」服务器的 #大厅", GUILD), lobby[0])
+        engine.cards.set_shared(True, scope_of=engine.store.memory_scope, alive=set())  # 共用人设卡：卡上会写着别的服务器
+        self.assertFalse(linked(f"「{long_name[:20]}…」服务器的 #大厅"))
+        self.assertFalse(linked("去「生存」服务器的 #大厅 看看"))  # 认不出是哪个的：和连了组一样不换
+        self.assertTrue(linked(f"「{long_name}」服务器的 #大厅"))
+        engine.cards.set_shared(False, scope_of=engine.store.memory_scope, alive=set())
+        transport.guild_names[GUILD], transport.guild_names[THIRD] = "【原神】提瓦特冒险团", "第三服"
+        link(engine.store, engine.cards, memory, GUILD, OTHER, now=clock())
+        self.assertFalse(linked("#大厅（「别的服」服务器）"))
+        self.assertFalse(linked("#大厅（「别的服🌸」服务器）"))  # 写得和给它看的不一样：认不出是哪个，就不换
+        self.assertFalse(linked("去「生存」服务器的 #大厅 看看"))
+        self.assertTrue(linked("#大厅（「[原神]提瓦特冒险团」服务器）"))  # 认得出是这里：照常换
+        self.assertTrue(linked("群规在「【原神】提瓦特冒险团」服务器的 #大厅 置顶了"))
+        for cut in ("【原神】提瓦…", "[原神]提瓦…"):  # 它自己截短的这里的名字：照原样写【】的、中和过的都认得出
+            self.assertTrue(linked(f"群规在「{cut}」服务器的 #大厅 置顶了"), cut)
+        await talk(engine, clock, 2, "@小D 别的服在聊什么")
+        self.assertEqual(transport.sent[-1][1], "#大厅（「别的服」服务器）那边在聊原神")  # 组里别的服务器的频道：不链到这里的 #大厅
+        transport.guild_names[GUILD] = "别的服"  # 和组里别的服务器同名
+        self.assertFalse(linked("「别的服」服务器的 #大厅"))
+        self.assertTrue(linked("去 #大厅 看看"))
+        transport.guild_names[GUILD] = long_name
+        self.assertTrue(linked(f"「{long_name[:59]}」服务器的 #大厅"))  # 提示词里截到 60 字的这里的名字，丢了“…”
+        self.assertTrue(linked(f"「{long_name[:20]}…」服务器的 #大厅"))  # 它自己截短的这里的名字：认得出
+        label = engine._server_label(GUILD)  # 整理记忆时给它看的（截到 40 字），记进组里的长期记忆
+        self.assertTrue(linked(f"群规在「{label}」服务器的 #大厅 置顶了"))
+        self.assertTrue(linked(f"「{label.rstrip('…')}」服务器的 #大厅"))
+        transport.guild_names[OTHER] = long_name[:30] + "二群"
+        self.assertFalse(linked(f"「{long_name[:20]}…」服务器的 #大厅"))  # 组里别的服务器开头也一样：分不出是哪个
+        self.assertTrue(linked(f"群规在「{label}」服务器的 #大厅 置顶了"))
+        transport.guild_names[OTHER] = long_name[:50] + "二群"  # 截到 40 字以后一模一样
+        self.assertFalse(linked(f"群规在「{label}」服务器的 #大厅 置顶了"))
+
+    def test_the_cut_shown_in_chat_stays_linked_when_a_known_server_starts_alike(self):
+        # 它看得到别的服务器的名字时（连了组、开了跨服务器、共用人设卡），bot 知道的别的服务器开头也一样：聊天里给它看的
+        # （截到 60 字的）这里的名字照常换，它自己截短的、截到 40 字的就分不出是哪个，不换
+        from dsbot.mentions import link as link_names
+
+        long_name = "超长的服务器名字" * 9
+        for mode in ("group", "cross", "shared"):
+            engine, llm, transport, clock, memory = setup()
+            channels = {"大厅": frozenset({LOBBY})}
+            transport.guild_names[GUILD] = long_name
+            transport.guild_names[THIRD] = long_name[:59] + "二群"
+            transport.joined.append(THIRD)
+            if mode == "group":
+                link(engine.store, engine.cards, memory, GUILD, OTHER, now=clock())
+            elif mode == "cross":
+                engine.settings.set("guild", GUILD, "cross_server", True)
+            else:
+                engine.cards.set_shared(True, scope_of=engine.store.memory_scope, alive=set())
+
+            def linked(text):
+                return f"<#{LOBBY}>" in link_names(text, {}, channels, other_server=engine._other_server_named(GUILD))[0]
+
+            self.assertTrue(linked(f"「{long_name[:59]}…」服务器的 #大厅"), mode)
+            self.assertFalse(linked(f"「{long_name[:58]}…」服务器的 #大厅"), mode)
+            self.assertFalse(linked(f"「{engine._server_label(GUILD)}」服务器的 #大厅"), mode)
+
+    def test_cross_server_names_are_not_taken_for_this_one(self):
+        # 开了跨服务器（近况里会有别的服务器的名字）：认不出是这里的就不换；和开了跨服务器的那边同名也不换
+        from dsbot.mentions import link as link_names
+
+        engine, llm, transport, clock, memory = setup()
+        channels = {"大厅": frozenset({LOBBY})}
+
+        def linked(text):
+            return f"<#{LOBBY}>" in link_names(text, {}, channels, other_server=engine._other_server_named(GUILD))[0]
+
+        engine.settings.set("guild", GUILD, "cross_server", True)
+        self.assertFalse(linked("去「生存」服务器的 #大厅 看看"))
+        self.assertTrue(linked("「测试服」服务器的 #大厅"))  # 这里
+        transport.guild_names[THIRD] = "测试服"
+        transport.joined.append(THIRD)
+        self.assertTrue(linked("「测试服」服务器的 #大厅"))  # 同名的那边没开跨服务器：这里看不到它
+        engine.settings.set("guild", THIRD, "cross_server", True)
+        self.assertFalse(linked("「测试服」服务器的 #大厅"))  # 都开了：那边的近况会带到这里，分不出是哪个
+
+    def test_servers_with_the_same_name_are_told_apart(self):
+        # 组里两个服务器同名（或者截短以后一样）：照名单里的写法翻，翻的是名单里那个，不会落到这里同名的频道上
+        engine, llm, transport, clock, memory = setup()
+        link(engine.store, engine.cards, memory, GUILD, OTHER, now=clock())
+        link(engine.store, engine.cards, memory, THIRD, OTHER, now=clock())
+        transport.places[LOBBY] = ChannelPlace(guild_id=GUILD, name="大厅", public=True)
+        transport.guild_names[GUILD] = transport.guild_names[OTHER] = "猫猫俱乐部"
+        hall, lobby = (HALL, transport.places[HALL]), (LOBBY, transport.places[LOBBY])
+        self.assertEqual(engine._find_source([lobby, hall], "#大厅（「猫猫俱乐部」服务器）", GUILD), hall)
+        self.assertEqual(engine._find_source([lobby, hall], "「猫猫俱乐部」服务器的 #大厅", GUILD), hall)
+        self.assertEqual(engine._find_source([lobby, hall], "#大厅", GUILD), lobby)  # 没写是哪个服务器：先认这里的
+        for wanted in ("大厅（「猫猫俱乐部」服务器）", "＃大厅（「猫猫俱乐部」服务器）"):  # 没写“#”、写成全角的
+            self.assertEqual(engine._find_source([lobby, hall], wanted, GUILD), hall, wanted)
+        transport.places[902] = ChannelPlace(guild_id=OTHER, name="大厅", public=True)
+        second = (902, transport.places[902])  # 那边有两个叫“大厅”的频道：和这里的一样，认第一个
+        self.assertEqual(engine._find_source([lobby, hall, second], "#大厅（「猫猫俱乐部」服务器）", GUILD), hall)
+        transport.places[903] = ChannelPlace(guild_id=OTHER, name="攻略", parent_id=HALL, public=True)
+        t1 = (903, transport.places[903])
+        thread_label = "帖子「攻略」（在 #大厅）（「猫猫俱乐部」服务器）"
+        self.assertEqual(engine._source_name(*t1, GUILD), thread_label)
+        self.assertEqual(engine._find_source([lobby, hall, t1], thread_label, GUILD), t1)  # 那边只有这一个帖子：照名单翻它
+        transport.places[904] = ChannelPlace(guild_id=OTHER, name="攻略", parent_id=HALL, public=True)
+        t2 = (904, transport.places[904])  # 群友又起了个同名的帖子：分不出是哪个，不猜
+        self.assertEqual(engine._find_source([lobby, hall, t1, t2], thread_label, GUILD), [t1, t2])
+        transport.guild_names[THIRD] = "猫猫俱乐部"
+        transport.places[ARENA] = ChannelPlace(guild_id=THIRD, name="大厅", public=True)
+        arena = (ARENA, transport.places[ARENA])  # 组里另外两个服务器同名、都有 #大厅：不猜
+        self.assertEqual(engine._find_source([lobby, hall, arena], "#大厅（「猫猫俱乐部」服务器）", GUILD), [hall, arena])
+        transport.guild_names[GUILD] = "测试服"
+        transport.places[901] = ChannelPlace(guild_id=GUILD, name="大厅（「猫猫俱乐部」服务器）", public=True)
+        odd = (901, transport.places[901])  # 这里有个频道就叫这个名字：写的是组里的服务器，就认那边的
+        self.assertEqual(engine._find_source([odd, hall], "#大厅（「猫猫俱乐部」服务器）", GUILD), hall)
+        long_name = "The Official XYZ Community Server For Everyone"
+        transport.guild_names[GUILD], transport.guild_names[OTHER] = long_name + " A", long_name + " B"
+        label = engine._source_name(HALL, transport.places[HALL], GUILD)
+        self.assertTrue(label.endswith("…」服务器）"))  # 名单里截短了，两个服务器看起来一样
+        self.assertEqual(engine._find_source([lobby, hall], label, GUILD), hall)
+        cut = engine._server_label(OTHER).rstrip("…")
+        for wanted in (f"#大厅（「{cut}」服务器）", f"「{cut}」服务器的 #大厅"):  # 抄的时候丢了“…”：也不会落到这里
+            self.assertEqual(engine._find_source([lobby, hall], wanted, GUILD), hall, wanted)
+        self.assertIsNone(engine._find_source([lobby], label, GUILD))  # 那边的 #大厅 没开共享：找不到，也不当成这里的
+        self.assertEqual(engine._find_source([lobby, hall], f"#大厅（「{long_name} A」服务器）", GUILD), lobby)  # 写的是这里
+
+    def test_this_servers_name_cut_its_own_way_still_finds_its_channels(self):
+        # 服务器名字很长：写的这里的名字截得和提示词里不一样（截到 40 字、自己截短了），bot 不知道别的服务器也叫这个开头，
+        # 还是这里
+        engine, llm, transport, clock, memory = setup()
+        transport.places[LOBBY] = ChannelPlace(guild_id=GUILD, name="大厅", public=True)
+        lobby = (LOBBY, transport.places[LOBBY])
+        long_name = "超长的服务器名字" * 9
+        transport.guild_names[GUILD] = long_name
+        label = engine._server_label(GUILD)
+        for wanted in (f"#大厅（「{label}」服务器）", f"「{label.rstrip('…')}」服务器的 #大厅", f"「{long_name[:20]}…」服务器的 #大厅"):
+            self.assertEqual(engine._find_source([lobby], wanted, GUILD), lobby, wanted)
+        self.assertIsNone(engine._find_source([lobby], f"「{long_name[:20]}」服务器的 #大厅", GUILD))  # 没带“…”的半截名字：不认
+        transport.guild_names[GUILD] = "【原神】提瓦特冒险团"  # 给它看的是“[原神]提瓦特冒险团”；它自己截短时可能照原样写【】
+        for wanted in ("「【原神】提瓦…」服务器的 #大厅", "#大厅（「【原神】提瓦…」服务器）", "「[原神]提瓦…」服务器的 #大厅"):
+            self.assertEqual(engine._find_source([lobby], wanted, GUILD), lobby, wanted)
+        transport.guild_names[GUILD] = long_name
+        transport.joined.append(OTHER)
+        transport.guild_names[OTHER] = long_name[:30] + "二群"  # bot 在的别的服务器开头也一样，可这里看不到它：还是这里
+        self.assertEqual(engine._find_source([lobby], f"「{long_name[:20]}…」服务器的 #大厅", GUILD), lobby)
+        engine.settings.set("guild", GUILD, "cross_server", True)  # 开了跨服务器：那边的名字可能带到这里，分不出是哪个，不翻这里的
+        self.assertIsNone(engine._find_source([lobby], f"「{long_name[:20]}…」服务器的 #大厅", GUILD))
+        engine.settings.set("guild", GUILD, "cross_server", False)
+        transport.guild_names[OTHER] = "别的服"
+        link(engine.store, engine.cards, memory, GUILD, OTHER, now=clock())  # 连成组：整理记忆时写进组里的是截到 40 字的名字
+        hall = (HALL, transport.places[HALL])
+        for wanted in (f"「{label}」服务器的 #大厅", f"#大厅（「{label.rstrip('…')}」服务器）"):
+            self.assertEqual(engine._find_source([lobby, hall], wanted, GUILD), lobby, wanted)
 
     async def test_cross_server_still_follows_inside_a_group(self):
         engine, llm, transport, clock, memory = setup(chat([ACTIONS(REPLY(1, "加油"))]))
@@ -1130,6 +1548,150 @@ class OwnerCommand(unittest.IsolatedAsyncioTestCase):
         choices = memory_number_choices(bot, GUILD, "主服07")
         self.assertEqual([c.value for c in choices], [m.no for m in bot.memory.entries(g) if m.text.startswith("主服07")])
         self.assertTrue(all(len(c.name) <= 100 for c in memory_number_choices(bot, GUILD, "")))
+
+    async def test_exactly_full_lists_and_previews_say_so(self):
+        from dsbot.commands import do_link, link_preview_text, memory_list_text
+
+        bot = self.bot
+        bot.cfg.engine.memory_max_entries = 2
+        bot.memory.add(OTHER, "游戏服的事", via="command")
+        bot.memory.add(OTHER, "游戏服的事2", via="command")
+        self.assertNotIn("⚠️", memory_list_text(bot, OTHER))  # 没连组、正好满了：它整理时自己会合并、删旧的
+        bot.memory.delete(OTHER, 2)
+        bot.memory.add(GUILD, "主服的事", via="command")
+        self.assertIn("正好到上限 2 条", link_preview_text(bot, plan_link(bot.store, bot.cards, bot.memory, GUILD, OTHER)))
+        do_link(bot, GUILD, OTHER)
+        self.assertIn("⚠️ 记满了：整理记忆时它只合并、删掉这个服务器自己记的", memory_list_text(bot, GUILD))
+        g = bot.store.group_of(GUILD)
+        bot.memory.delete(g, next(m.no for m in bot.memory.entries(g) if m.text == "主服的事"))
+        bot.memory.add(g, "游戏服的事3", via="command", origin=OTHER)
+        self.assertNotIn("记满了", memory_list_text(bot, OTHER))  # 都是这里记的：它整理时自己腾得出地方
+        self.assertIn("记满了", memory_list_text(bot, GUILD))
+
+    def numbers_listed(self, text, entries):
+        """列表里列出来的编号：前面带着内容的、只列编号的分开算；分条发时没有哪一行被从中间切开。"""
+        import re
+
+        from dsbot.commands import REPLY_PARTS, split_message
+
+        parts = split_message(text)
+        self.assertLessEqual(len(parts), REPLY_PARTS)
+        self.assertEqual("\n".join(parts), text)  # 只在行和行之间分开：编号不会被切到两条消息里
+        shown = [int(n) for n in re.findall(r"^\((\d+)\) ", text, re.M)]
+        rest = text.partition("条放不下，只列编号：")[2]
+        only = [int(n) for n in re.findall(r"\d+", rest.split("\n标着〔敏感〕")[0])]
+        self.assertEqual(sorted(shown + only), sorted(e.no for e in entries))  # 编号全部列出来了，每个只列一次
+        return shown, only
+
+    async def test_every_number_is_listed_even_when_entries_do_not_fit(self):
+        from dsbot.commands import dm_memory_text, memory_list_text
+
+        bot = self.bot
+        bot.cfg.engine.memory_max_entries = 2000  # 上限调得很大：截到 20 个字也放不下
+        for i in range(900):
+            bot.memory.add(GUILD, f"第{i}条" + "很长的约定" * 38, via="command")
+        text = memory_list_text(bot, GUILD)
+        shown, only = self.numbers_listed(text, bot.memory.entries(GUILD))
+        self.assertIn("\n(1) 第0条", text)
+        self.assertGreater(len(shown), 600)  # 放得下的照样列内容，放不下的才只列编号
+        self.assertTrue(only)
+        for i in range(900, 1300):  # 更多：只列编号的也超过一条消息
+            bot.memory.add(GUILD, f"第{i}条" + "很长的约定" * 38, via="command")
+        text = memory_list_text(bot, GUILD)
+        shown, only = self.numbers_listed(text, bot.memory.entries(GUILD))
+        self.assertGreater(len(", ".join(map(str, only))), 2000)
+        # 私信记忆也一样：记得多、一次发不完时每条截短，编号照样全部列出来
+        bot.cfg.engine.dm_memory_max_entries = 150
+        for i in range(100):
+            bot.memory.dm_add(11, f"第{i}条" + "很长的私信记忆" * 28, sensitive=i % 2 == 0, via="chat")
+        text = dm_memory_text(bot, 11)
+        self.assertIn("每条只显示前 120 个字", text)  # 截得越少越好：120 字放得下就不截到 80
+        for i in range(100, 150):
+            bot.memory.dm_add(11, f"第{i}条" + "很长的私信记忆" * 28, sensitive=i % 2 == 0, via="chat")
+        text = dm_memory_text(bot, 11)
+        self.numbers_listed(text, bot.memory.dm_entries(11))
+        self.assertIn("每条只显示前", text)
+        self.assertIn("查看时在「编号」一栏选它", text)  # 怎么看全一条
+        self.assertIn("〔敏感〕", text)
+        self.assertIn("判错了就改", text)
+
+    async def test_lists_as_many_entries_with_text_as_fit(self):
+        # 只列编号时：前面带着内容的条目，能放几条就放几条（多列一条、少一个编号，分条时末尾空出来的长短不一样，
+        # 放不下以后再往后几条可能又放得下）
+        import re
+
+        from dsbot.commands import REPLY_PARTS, dm_memory_text, memory_list_text, numbers_lines, split_message
+
+        def most(text, entries, line, tail=()):
+            cap = int(re.search(r"每条只显示前 (\d+) 个字", text).group(1))
+            body = [line(e, e.text if len(e.text) <= cap else e.text[: cap - 1] + "…") for e in entries]
+            lines = text.split("\n")
+            head = lines[: lines.index(body[0])]
+            numbers = [e.no for e in entries]
+
+            def fits(k):
+                return len(split_message("\n".join(head + body[:k] + numbers_lines(numbers, k) + list(tail)))) <= REPLY_PARTS
+
+            return max(k for k in range(len(body) + 1) if fits(k))
+
+        bot = self.bot
+        bot.cfg.engine.memory_max_entries = bot.cfg.engine.dm_memory_max_entries = 5000
+        for i in range(1371):
+            bot.memory.add(GUILD, f"第{i}条" + "很长的约定" * 38, via="command")
+        text = memory_list_text(bot, GUILD)
+        shown, _ = self.numbers_listed(text, bot.memory.entries(GUILD))
+        self.assertEqual(len(shown), most(text, bot.memory.entries(GUILD), lambda e, t: f"({e.no}) {t}"))
+        for i in range(1310):
+            bot.memory.dm_add(11, f"第{i}条" + "很长的私信记忆" * 28, sensitive=i % 2 == 0, via="chat")
+        text = dm_memory_text(bot, 11)
+        shown, _ = self.numbers_listed(text, bot.memory.dm_entries(11))
+        tail = text.split("\n")[-2:]
+        self.assertTrue(tail[0].startswith("标着〔敏感〕"))
+        self.assertEqual(len(shown), most(text, bot.memory.dm_entries(11), lambda e, t: f"({e.no}) {t}" + ("〔敏感〕" if e.sensitive else ""), tail))
+
+    async def test_capped_lists_shorten_server_names_too(self):
+        import re
+
+        from dsbot.commands import do_link, memory_list_text
+
+        long_name = "名字很长的游戏服" * 8
+        bot = owner_bot([NS(id=GUILD, name="主服"), NS(id=OTHER, name=long_name)])
+        bot.cfg.engine.memory_max_entries = 1000
+        for i in range(300):
+            bot.memory.add(OTHER, f"游戏服{i:03d}" + "很长的约定" * 38, via="command", origin=OTHER)
+        bot.memory.add(GUILD, "主服的事", via="command", origin=GUILD)
+        do_link(bot, GUILD, OTHER)
+        text = memory_list_text(bot, GUILD)
+        self.assertIn("每条只显示前", text)
+        labels = re.findall(r"（(「[^」]*」)记的）", text)
+        self.assertTrue(labels)
+        self.assertTrue(all(len(label) <= 22 for label in labels), labels[:3])  # 截短时服务器名也截到 20 字
+        from dsbot.commands import memory_entry_text
+
+        self.assertTrue(memory_entry_text(bot, GUILD, 1).endswith(f"（「{long_name}」记的）"))  # 只看一条：服务器名写全
+
+    async def test_one_entry_in_full(self):
+        from dsbot.commands import do_link, memory_entry_text
+
+        bot = self.bot
+        bot.memory.add(OTHER, "游戏服的事" + "很长的约定" * 38, via="command", origin=OTHER)
+        bot.memory.add(GUILD, "主服的事", via="command", origin=GUILD)
+        self.assertEqual(memory_entry_text(bot, OTHER, 1), "(1) 游戏服的事" + "很长的约定" * 38)
+        self.assertIn("没有第 9 条", memory_entry_text(bot, OTHER, 9))
+        do_link(bot, GUILD, OTHER)
+        self.assertEqual(memory_entry_text(bot, GUILD, 1), "(1) 游戏服的事" + "很长的约定" * 38 + "（「游戏服」记的）")
+        self.assertEqual(memory_entry_text(bot, GUILD, 2), "(2) 主服的事")
+        # /ds 长期记忆 操作:查看 选了编号：只看这一条
+        from dsbot.commands import register_commands
+
+        added = []
+        bot.tree = NS(add_command=lambda c, **kw: added.append(c), command=lambda **kw: (lambda f: f), error=lambda f: f)
+        bot.secrets = NS(owner_id=OWNER, control_guild_ids=())
+        register_commands(bot)
+        command = next(c for c in added if c.name == "ds").get_command("长期记忆").callback
+        ask = NS(guild_id=GUILD, user=NS(id=OWNER), response=FakeResponse(), followup=NS(send=None))
+        await command(ask, NS(value="list", name="查看"), None, 2)
+        self.assertEqual(ask.response.sent[-1][0], "(2) 主服的事")
 
     async def test_asks_before_doing_anything(self):
         from dsbot.commands import group_command

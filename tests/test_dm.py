@@ -758,10 +758,12 @@ class TransportDM(unittest.IsolatedAsyncioTestCase):
             return Partial(cid)
 
         guild = NS(id=GUILD, name="测试服", me=NS(display_name="小D"), emojis=[], stickers=[], get_member=lambda uid: None)
+        other = NS(id=OTHER, name="别的服", me=NS(display_name="小D"), emojis=[], stickers=[], get_member=lambda uid: None)
         client = NS(
             get_channel=lambda cid: None,  # 私信频道不在缓存里
             get_partial_messageable=partial,
-            get_guild=lambda gid: guild if gid == GUILD else None,
+            get_guild={GUILD: guild, OTHER: other}.get,
+            guilds=[guild, other],
             user=NS(display_name="小D"),
             dm_channels={DM: (11, GUILD)},
             dm_names={DM: "阿明"},
@@ -784,6 +786,18 @@ class TransportDM(unittest.IsolatedAsyncioTestCase):
         transport, *_ = self.make()
         info = transport.channel_info(DM)
         self.assertEqual((info.dm_with, info.guild_name, info.channel_name), ("阿明", "测试服", "私信"))
+
+    async def test_other_servers_it_is_in_are_known_without_recent_talk(self):
+        # 写明了“「别的服」服务器的 #频道”：bot 在那个服务器，就不换成这里的频道链接（重启以后、几个小时没人在那边聊也认得）
+        transport, *_ = self.make()
+        self.assertEqual(transport.guild_ids(), [GUILD, OTHER])
+        engine, *_ = make_engine()
+        engine.transport = transport
+        self.assertEqual(engine._guild_ids(), [GUILD, OTHER])  # 经过 engine 再看一遍：名字对不上时 getattr 会悄悄变成空的
+        other = engine._other_server_named(GUILD)
+        self.assertTrue(other("别的服"))
+        self.assertFalse(other("测试服"))
+        self.assertFalse(other("生存"))  # 没连组、没开跨服务器：认不出的照常换
 
 
 if __name__ == "__main__":

@@ -460,6 +460,28 @@ class InChat(unittest.IsolatedAsyncioTestCase):
         self.assertIn("人设卡：能用（每张最多 1600 字），有卡的人：阿明", system)
         self.assertNotIn("所有服务器共用", system)
 
+    async def test_nicknames_never_rename_the_shared_card(self):
+        # 共用的卡在哪个服务器都用：卡上的名字不跟着哪个服务器的昵称变（各服务器的昵称记在 card_seen 里）
+        engine, llm, transport, clock, memory = shared_setup(chat([ACTIONS(REPLY(1, "在"))]))
+        engine.cards.put(SHARED, 11, "阿明", "自称猫娘", via="command")
+        await talk(engine, clock, 1)
+        await talk(engine, clock, 2, name="Ming", guild_id=OTHER, channel_id=HALL)
+        await talk(engine, clock, 3, name="大明")
+        self.assertEqual(engine.cards.get(SHARED, 11).name, "阿明")
+        self.assertEqual((names(engine.cards, SHARED)[(11, OTHER)], names(engine.cards, SHARED)[(11, GUILD)]), ("Ming", "大明"))
+
+    async def test_everyone_who_talks_counts_as_seen_here(self):
+        # 一轮里说话的人多、卡附不完时：没附上卡的也记成在这里出现过（这里查得到他，改回每个服务器一张时卡回到这里）
+        engine, llm, transport, clock, memory = shared_setup(chat([ACTIONS(REPLY(2, "在"))]))
+        engine.ec.cards_per_round = 1
+        engine.cards.put(SHARED, 11, "阿明", "阿明的卡", via="command")
+        engine.cards.put(SHARED, 12, "小雨", "小雨的卡", via="command")
+        await engine.handle_message(msg(1, "大家好", author=12, name="小雨", guild_id=OTHER, channel_id=HALL))
+        await talk(engine, clock, 2, guild_id=OTHER, channel_id=HALL)
+        seen = engine.cards.seen_in(SHARED)
+        self.assertIn(OTHER, seen[11])
+        self.assertIn(OTHER, seen[12])
+
 
 class Prompts(unittest.TestCase):
     def test_group_and_shared_wording(self):
@@ -588,6 +610,68 @@ class Owner(unittest.IsolatedAsyncioTestCase):
             apply_card_mode(bot)
         self.assertTrue(bot.cards.shared)  # 没改成：还按原来的方式用
         self.assertEqual(bot.cards.get(SHARED, 11).text, "主服的卡")
+
+    async def test_startup_waits_for_unfinished_group_work_before_switching(self):
+        # 上次没做完的连组、退组这次也没能接着做完：先不换（没并进组的卡会直接并成共用的，组里删掉的卡可能被顶回来）
+        import sqlite3
+        from unittest import mock
+
+        from dsbot import commands
+
+        bot = self.bot
+        bot.cfg = NS(engine=NS(memory_max_entries=50), bot=NS(shared_cards=True))
+        bot.cards.put(GUILD, 11, "阿明", "主服的卡", via="command", now=1)
+        with mock.patch.object(commands, "recover_groups", side_effect=sqlite3.OperationalError("database is locked")):
+            with self.assertLogs("dsbot.commands", level="WARNING") as logs:
+                commands.start_groups(bot)
+        self.assertFalse(bot.cards.shared)
+        self.assertIn("这次先不换成所有服务器共用一张", "\n".join(logs.output))
+        commands.start_groups(bot)  # 下次启动：接着做完了，照常换
+        self.assertTrue(bot.cards.shared)
+        self.assertEqual(bot.cards.get(SHARED, 11).text, "主服的卡")
+
+    async def test_the_bot_does_this_when_it_starts(self):
+        # 真的建一个 DSBot（不连 Discord，和 python -m dsbot --check 一样）：启动时也是先接着做完，做完了才换
+        import sqlite3
+        from unittest import mock
+
+        from dsbot import commands
+        from dsbot.config import Secrets
+        from dsbot.discord_app import DSBot
+        from dsbot.ledger import Ledger
+        from dsbot.llm import DeepSeekClient
+        from dsbot.settings import Settings
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = os.path.join(tmp, "config.toml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("[bot]\nshared_cards = true\n")
+            cfg = load_config(path)
+
+        def start(cards):
+            store = Store(":memory:")
+            llm = DeepSeekClient(api_key="x", base_url=cfg.deepseek.base_url, model=cfg.deepseek.model)
+            secrets = Secrets("x", "x", 0, control_guild_ids=(1,))
+            ledger = Ledger(store, cfg.bot.timezone)
+            return DSBot(cfg, secrets, store, Settings(cfg.defaults, store), ledger, llm, cards=cards, memory=MemoryStore(":memory:"))
+
+        cards = CardStore(":memory:")
+        cards.put(GUILD, 11, "阿明", "主服的卡", via="command", now=1)
+        with mock.patch.object(commands, "recover_groups", side_effect=sqlite3.OperationalError("database is locked")):
+            with self.assertLogs("dsbot.commands", level="WARNING"):
+                start(cards)
+        self.assertFalse(cards.shared)
+        start(cards)
+        self.assertTrue(cards.shared)
+
+    async def test_editing_with_ds_rp_counts_as_being_seen_there(self):
+        from dsbot.commands import card_written
+
+        bot = self.bot
+        share(bot.cards, bot.store)
+        bot.cards.put(SHARED, 11, "阿明", "卡", via="command", now=1)
+        self.assertEqual(card_written(bot, OTHER, 11, "Ming", in_dm=False), "阿明")  # 共用的卡：名字不跟着这里的昵称改
+        self.assertEqual(names(bot.cards, SHARED)[(11, OTHER)], "Ming")  # 记下他在这里出现过（这里查得到他）
 
 
 if __name__ == "__main__":

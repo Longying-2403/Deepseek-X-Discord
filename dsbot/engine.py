@@ -3603,7 +3603,22 @@ class Engine:
         raw = " ".join(wanted.split()).strip()
         named = _SERVER_PREFIX.match(raw) or _SERVER_SUFFIX.match(raw)
         if named:
-            servers = self._guilds_named(named["server"], {p.guild_id for _, p in sources} | {guild_id})
+            # 先照名单里的写法原样对（“#大厅（「某某」服务器）”：只有别的服务器的频道才这样列）：组里几个服务器同名、
+            # 或者名字截短后一样时，也认得出是名单里的哪一个（不然会落到这里同名的频道上）
+            def bare(text: str) -> str:
+                return " ".join(text.split()).lstrip("#＃")
+
+            label = bare(f"{named['name'].strip()}（「{named['server'].strip()}」服务器）")
+            exact = [s for s in sources if s[1].guild_id != guild_id and bare(self._source_name(s[0], s[1], guild_id)) == label]
+            chans = [s for s in exact if s[1].parent_id is None]
+            if len(exact) == 1 or (chans and len({s[1].guild_id for s in chans}) == 1):
+                return (chans or exact)[0]  # 同一个服务器里同名的频道：和下面一样认第一个
+            if exact:
+                return chans or exact  # 几个服务器都有，或者是同名的帖子：不猜
+            # 这里只认给它看的写法（见 _here_named）：别的服务器截短的名字丢了“…”，碰巧和这里前面一样，也不当成这里
+            servers = self._guilds_named(named["server"], {p.guild_id for _, p in sources} - {guild_id})
+            if self._here_named(named["server"], guild_id):
+                servers.add(guild_id)
             if not servers:
                 # 不是组里哪个服务器的名字：可能频道、帖子自己就叫这个（名字里正好带着“（「X」服务器）”），先认频道。
                 # 写的是组里的服务器时不走这里：免得群友起个“大厅（「别的服」服务器）”的帖子就冒充了那边的频道
@@ -3645,6 +3660,62 @@ class Engine:
             if found:
                 return found  # 好几个帖子都对得上：不猜，免得被群友起的同名帖子冒充
         return None
+
+    def _other_server_named(self, guild_id: int) -> Callable[[str], bool]:
+        """发出去的话里写明“「X」服务器”的频道名，要不要别换成这里的频道链接（会指到这里同名的频道；不链总比链错好）：
+        - X 是这里（见 _here_named：全名、中和过、截到 60 字的；它自己截短、带着“…”的，或者截到 40 字的也算，只是它看得到
+          别的服务器的名字时，bot 知道的别的服务器也对得上就不算）：换。和给它看过的别的服务器同名（组里的；这里开了跨服务器
+          时，开了跨服务器的）就不换：分不出是哪个。
+        - X 是 bot 知道的别的服务器（它在的、组里的、最近有人跟它聊过的）：不换。
+        - 认不出是哪个服务器（游戏里的“生存服务器”，或者名字写错了、自己截短又没带“…”）：它看得到别的服务器的名字时（见
+          _sees_other_servers）就不换；不然照常换（它没见过别的服务器，写的多半就是这里）。"""
+
+        def other(server: str) -> bool:
+            group = self._group_guilds(guild_id)
+            cross = bool(self.settings.view(guild_id).cross_server)
+            known = self._known_others(guild_id)
+            if self._here_named(server, guild_id):
+                shown = set(group[1:]) | ({g for g in known if self.settings.view(g).cross_server} if cross else set())
+                return bool(self._guilds_named(server, shown))
+            return bool(self._guilds_named(server, known)) or self._sees_other_servers(guild_id)
+
+        return other
+
+    def _sees_other_servers(self, guild_id: int) -> bool:
+        """这里的提示词里会不会有别的服务器的名字：连成了组（组里的名单、能翻的频道）、开了跨服务器（近况），或者共用人设卡
+        （卡上会写着在别的服务器的事）。以前的聊天记录里也会留着。"""
+        return len(self._group_guilds(guild_id)) > 1 or bool(self.settings.view(guild_id).cross_server) or self._cards_shared()
+
+    def _guild_ids(self) -> list[int]:
+        """bot 现在在的服务器。"""
+        ids = getattr(self.transport, "guild_ids", None)
+        return list(ids()) if ids is not None else []
+
+    def _known_others(self, guild_id: int) -> set[int]:
+        """bot 知道的别的服务器：它在的、组里的、最近有人跟它聊过的。"""
+        return (set(self._group_guilds(guild_id)[1:]) | {g for g, _ in self.interactions} | set(self._guild_ids())) - {guild_id}
+
+    def _here_named(self, server: str, guild_id: int) -> bool:
+        """模型写的服务器名是不是这个服务器：全名，或者提示词里给它看的（中和过、截到 60 字的；带不带结尾的“…”都认）。
+        别的截法（它自己截的、带着“…”，或者整理记忆时看到的 40 字）也认；只是它看得到别的服务器的名字时（见
+        _sees_other_servers），bot 知道的别的服务器也对得上就不算：组里别的服务器给它看的名字截到 40 字，前面一样长的两个
+        服务器截完是一样的，不能当成这里。正好是 bot 知道的别的服务器的全名的，也不算。"""
+        full = self._guild_name(guild_id)
+        want = _norm_channel(server)
+        cut = want.endswith("…")
+        want = want.rstrip("…")
+        if not want:
+            return False
+        shown = (full, neutralize(full), one_line(full, 60), neutralize(one_line(full, 60)))
+        if want in {_norm_channel(name).rstrip("…") for name in shown}:
+            return True
+        forms = {_norm_channel(full), _norm_channel(neutralize(full))}
+        if want == _norm_channel(self._server_label(guild_id)).rstrip("…") or (cut and any(f.startswith(want) for f in forms)):
+            known = self._known_others(guild_id)
+            if not cut and any(want in {_norm_channel(n), _norm_channel(neutralize(n))} for n in map(self._guild_name, known)):
+                return False  # 这里截到 40 字、丢了“…”，正好是别的服务器的全名：算那边的
+            return not (self._sees_other_servers(guild_id) and self._guilds_named(server, known))
+        return False
 
     def _guilds_named(self, server: str, guilds: Iterable[int]) -> set[int]:
         """模型写的服务器名对得上哪几个服务器：全名，或者给它看的截短的名字（带不带结尾的“…”都认）。"""
@@ -3702,11 +3773,12 @@ class Engine:
             card_names = [_sticker_label(n) for n in all_names[: max(0, self.ec.card_list_limit)]]
             more_cards = len(all_names) - len(card_names)
         memories: list[tuple[int, str]] | None = None
+        foreign = 0  # 组里别的服务器记的几条（记满了时别为了腾地方删它们）
         if self._memory_on(view):
             assert self.memory is not None
-            memories = [
-                (m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in self.memory.entries(scope)
-            ]
+            entries = self.memory.entries(scope)
+            memories = [(m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in entries]
+            foreign = len(self._foreign_memories(scope, st.guild_id, entries))
         st.memory_shown = frozenset(no for no, _ in memories or [])
         group = [self._server_label(g) for g in self._group_guilds(st.guild_id)[1:]] or None
         dm_memories, dm_more = self._dm_memory_entries(st, view, info)
@@ -3742,6 +3814,7 @@ class Engine:
             dm_entry_max=self.ec.dm_memory_entry_chars,
             dm_memory_more=dm_more,
             group=group,
+            memory_foreign=foreign,
         )
 
     def _dm_memory_entries(
@@ -4488,7 +4561,7 @@ class Engine:
         """把一段话里的 @名字、#频道名 换成真的。返回 (换好的话, 要提醒的人)。只有有人叫它的时候才提醒：
         这一轮最多 MAX_PINGS_PER_ROUND 个人，同一个人 PING_COOLDOWN 之内只提醒一次，每个服务器 10 分钟内最多
         GUILD_PINGS 次；其他的只显示成 @，不发通知。"""
-        linked, users, _ = link(chunk, people, channels, here=self._guild_name(st.guild_id))
+        linked, users, _ = link(chunk, people, channels, other_server=self._other_server_named(st.guild_id))
         if len(linked) > DISCORD_LIMIT:
             return chunk, []  # 换完太长了：原样发
         if kind != "mention" or not users:

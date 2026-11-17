@@ -96,6 +96,7 @@ class FakeTransport:
         self.dm_with: dict[int, str] = {}  # 私信频道 -> 对方的名字（还要在 places 里登记成 dm=True）
         self.dm_users: dict[int, int] = {}  # 私信频道 -> 对方的用户 ID
         self.guild_names: dict[int, str] = {}  # 服务器 -> 名字（没登记的叫“测试服”）
+        self.joined: list[int] = []  # bot 还在的别的服务器（guild_ids 用：除了 GUILD 还在哪几个）
 
     def channel_info(self, channel_id: int) -> ChannelInfo:
         place = self.places.get(channel_id)
@@ -127,6 +128,9 @@ class FakeTransport:
 
     def guild_name(self, guild_id):
         return self.guild_names.get(guild_id, "测试服")
+
+    def guild_ids(self):
+        return [GUILD, *self.joined]
 
     async def find_members(self, guild_id, starts):
         self.member_searches.append(list(starts))
