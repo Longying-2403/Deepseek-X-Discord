@@ -255,7 +255,9 @@ _MD_LINK = re.compile(r"\[([^\]\n]{0,300})\]\((?:[^()\n]|\([^()\n]{0,300}\)){0,2
 _HTML_TAG = re.compile(r"<[^>\n]{1,200}>")
 # 网址里会出现的 ASCII 字符（不含括号、引号）：中文网页的句子之间没有空格，用 \S 的话会把网址后面整段正文一起删掉
 _URL_CHARS = r"[A-Za-z0-9\-._~:/?#@!$&*+,;=%]"
-_DATA_URI = re.compile(rf"\bdata:[A-Za-z0-9.+/;=_-]{{0,100}},{_URL_CHARS}{{100,}}")  # 网页里直接嵌的图（一大串 base64）
+# 网页里直接嵌的图（一大串 base64）。“data:” 前面不能紧挨着字母、数字（Metadata: 不算）：写成先找到 “data:” 再回头看前一个字，
+# 和开头写 \b 是一个意思，但开头是固定的几个字时正则能直接跳着找；开头写 \b 就得每个字都试一次，整篇 10 MB 的网页要慢好几倍
+_DATA_URI = re.compile(rf"data:(?<!\wdata:)[A-Za-z0-9.+/;=_-]{{0,100}},{_URL_CHARS}{{100,}}")
 _LONG_URL = re.compile(rf"https?://{_URL_CHARS}{{300,}}")  # 跟踪参数之类的超长网址：对内容没用，只占字数
 _BLANKS = re.compile(r"\n{3,}")
 _HEADING = re.compile(r"^#{1,3}\s+(.+)$", re.M)

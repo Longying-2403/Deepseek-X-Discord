@@ -33,7 +33,7 @@ def check_files() -> None:
     except ImportError:
         print("✗ 没装 pypdf，读不了 PDF（pip install -r requirements.txt）")
 
-    from .files import read_file
+    from .files import _child_user, _probe, read_file
 
     xml = (
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
@@ -45,11 +45,13 @@ def check_files() -> None:
     result = asyncio.run(read_file(buf.getvalue(), "check.docx", None, 100))
     if result.text == "自检":
         print("✓ 文件解析子进程正常")
+        # 读文件时子进程只先导入那种文件用得到的库（读上面那个 Word 文件一个都不用）：读 PDF、猜文本编码、缩页面图要用的
+        # 那几个它导入得了没有，另外开一个不带文件的子进程（全部导入）看一下
+        if asyncio.run(_probe(_child_user())) != "ok":
+            print("✗ 文件解析子进程导入不了要用的库（pypdf、charset_normalizer、Pillow）：PDF、不是 UTF-8 的文本可能读不了")
     else:
         print(f"✗ 文件解析子进程出问题：{result.error or result}")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        from .files import _child_user
-
         if _child_user():
             print("✓ 解析子进程以 nobody 用户运行，读不到 token 和 API key")
         else:

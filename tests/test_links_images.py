@@ -351,6 +351,31 @@ class PagesAndImages(unittest.TestCase):
             clean_markdown(raw[:64_000])
             self.assertLess(time.monotonic() - started, 2.0, pattern)
 
+    def test_data_uri_pattern_still_means_a_word_boundary(self):
+        """2.8.1：嵌在网页里的图那条正则换了个写法（先找到 “data:” 再回头看前一个字，整篇网页扫得快好几倍）：
+        删掉的东西要和原来开头写 \\b 时一模一样。"""
+        import random
+        import re
+
+        from dsbot import links
+
+        self.assertTrue(links._DATA_URI.pattern.startswith("data:"))  # 开头是固定的字，正则才能跳着找（别改回 \b 开头）
+        old = re.compile(rf"\bdata:[A-Za-z0-9.+/;=_-]{{0,100}},{links._URL_CHARS}{{100,}}")
+        blob = "QUJD" * 40
+        for before in ("", " ", "(", "\n", "a", "Z", "9", "_", "文", "é", "１", "-", "。", "meta", "x:", "data:"):
+            for mid in ("", "image/png;base64", "text/plain;charset=utf-8", "a" * 100, "a" * 101, "image/png base64", "图"):
+                for tail in (blob, blob[:99], blob[:100], blob + " 后文", blob + ")后文 data:," + blob, blob + "后文data:," + blob):
+                    for raw in (f"{before}data:{mid},{tail}", f"前文 {before}data:{mid},{tail}"):
+                        self.assertEqual(links._DATA_URI.sub("", raw), old.sub("", raw), raw[:60])
+        rng = random.Random(281)
+        letters = "data:,;/+=._- aZ9_文é(\n"
+        for _ in range(3000):
+            raw = "".join(rng.choice(letters) for _ in range(rng.randint(0, 12)))
+            raw += "data:" + "".join(rng.choice("ab;/=+._-9 ") for _ in range(rng.randint(0, 104)))
+            raw += "," + "".join(rng.choice("Aa0+/=%&?") for _ in range(rng.randint(95, 110)))
+            raw += rng.choice(["", " 后文", ")", "文data:," + "x" * 120, " data:," + "x" * 120])
+            self.assertEqual(links._DATA_URI.sub("", raw), old.sub("", raw), raw[:60])
+
     def test_parse_extract(self):
         self.assertEqual(parse_extract({"results": [{"url": PAGE, "raw_content": "正文"}]}, PAGE), "正文")
         with self.assertRaisesRegex(TavilyError, "打不开（403 Forbidden）"):

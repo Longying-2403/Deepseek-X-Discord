@@ -1051,11 +1051,16 @@ def _child_user() -> dict[str, Any]:
 
 CHILD_READY = "dsbot-child-ready\n"  # 子进程把要用的库都导入好、开始读文件之前先打印这一行
 _PRELOAD = ("pypdf", "charset_normalizer", "PIL.Image")  # 子进程启动时就导入（装了的话），导入不了算启动失败
+# 读文件时只先导入这种文件用得到的那几个（classify 的类型 -> 库；没列的类型一个都不用）：文本不是 UTF-8 时要猜编码；
+# PDF 要 pypdf，扫描件还要 Pillow 缩页面图；Office 文件只用标准库。全都导入的话，读一个文本、Word 文件也要多等一百多毫秒
+# （NAS 上实测）。不带文件、只看子进程能不能启动时（_probe）还是全部导入
+_PRELOAD_FOR = {"text": ("charset_normalizer",), "sniff": ("charset_normalizer",), "pdf": ("pypdf", "PIL.Image")}
 _preload: list[str] | None = None
 _checking_drop = False
 
 
-def _preload_libraries() -> list[str]:
+def _preload_libraries(kind: str | None = None) -> list[str]:
+    """子进程启动时先导入的库（装了的）。kind：要读的文件是哪种（classify 的类型）；不填就是全部。"""
     global _preload
     if _preload is None:
         import importlib.util
@@ -1068,7 +1073,10 @@ def _preload_libraries() -> list[str]:
             except (ImportError, ValueError):
                 pass
         _preload = found
-    return _preload
+    if kind is None:
+        return _preload
+    wanted = _PRELOAD_FOR.get(kind, ())
+    return [name for name in _preload if name in wanted]
 
 
 def _looks_like_permission_problem(stderr: bytes) -> bool:
@@ -1077,8 +1085,9 @@ def _looks_like_permission_problem(stderr: bytes) -> bool:
     return any(s in text for s in ("PermissionError", "Permission denied", "ModuleNotFoundError", "ImportError"))
 
 
-def _child_args(**extra: Any) -> str:
-    return json.dumps({**extra, "libs": _preload_libraries()})  # 纯 ASCII
+def _child_args(kind: str | None = None, **extra: Any) -> str:
+    """给子进程的参数。kind：要读的文件是哪种（只先导入它用得到的库）；不填（只看能不能启动）就全部导入。"""
+    return json.dumps({**extra, "libs": _preload_libraries(kind)})  # 纯 ASCII
 
 
 async def _spawn(args: str, user: dict[str, Any], *, stdin: int) -> Any:
@@ -1135,7 +1144,8 @@ async def _check_dropping(failure: str, detail: str) -> None:
 
 async def _run_child(raw: bytes, filename: str, content_type: str | None, max_chars: int, timeout: float) -> dict[str, Any]:
     user = _child_user()
-    args = _child_args(filename=filename, content_type=content_type, max_chars=max_chars)
+    # 子进程里 extract_bytes 也是照文件名和类型分的：这里按同一种先导入它用得到的库
+    args = _child_args(classify(filename, content_type)[0], filename=filename, content_type=content_type, max_chars=max_chars)
     unavailable = {"error": "bot 这边解析文件的进程启动不了，暂时读不了文件", "transient": True}
     try:
         proc = await _spawn(args, user, stdin=asyncio.subprocess.PIPE)

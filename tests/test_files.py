@@ -658,6 +658,104 @@ class ChildStartup(unittest.IsolatedAsyncioTestCase):
     async def test_real_probe(self):
         self.assertEqual(await files._probe({}), "ok")
 
+    async def _libs_for(self, name=None, content_type=None):
+        """读这个文件时（不给文件名就是只看能不能启动）子进程先导入哪几个库。假装三个库都装了。"""
+        from unittest import mock
+
+        seen = []
+
+        async def fake_exec(*args, **kwargs):
+            seen.append(json.loads(args[3]))
+            return _FakeProcess(0, stdout=files.CHILD_READY.encode() + b'{"kind": "x", "text": "y"}')
+
+        with mock.patch.object(files, "_preload", list(files._PRELOAD)):
+            with mock.patch.object(files.asyncio, "create_subprocess_exec", fake_exec):
+                if name is None:
+                    self.assertEqual(await files._probe({}), "ok")
+                else:
+                    self.assertEqual((await read_file(b"x", name, content_type, 100)).text, "y")
+        self.assertEqual(len(seen), 1)
+        return seen[0]["libs"]
+
+    async def test_child_preloads_only_what_the_file_needs(self):
+        # 2.8.1：以前读什么文件都先导入全部三个库（NAS 上每读一个文件多等一百多毫秒）
+        self.assertEqual(await self._libs_for("a.txt"), ["charset_normalizer"])  # 不是 UTF-8 时猜编码
+        self.assertEqual(await self._libs_for("没见过的后缀.xyz"), ["charset_normalizer"])  # 下载下来当文本看看
+        self.assertEqual(await self._libs_for("a.pdf"), ["pypdf", "PIL.Image"])  # 扫描件要缩页面图
+        self.assertEqual(await self._libs_for("没有后缀", "application/pdf"), ["pypdf", "PIL.Image"])
+        for name in ("a.docx", "a.xlsx", "a.pptx"):
+            self.assertEqual(await self._libs_for(name), [], name)  # 只用标准库
+        # 不带文件、只看子进程能不能启动（降成 nobody 以后库读不读得到）：还是全部导入
+        self.assertEqual(await self._libs_for(), list(files._PRELOAD))
+
+    async def test_only_installed_libraries_are_preloaded(self):
+        from unittest import mock
+
+        seen = []
+
+        async def fake_exec(*args, **kwargs):
+            seen.append(json.loads(args[3])["libs"])
+            return _FakeProcess(0, stdout=files.CHILD_READY.encode() + b"{}")
+
+        with mock.patch.object(files, "_preload", ["charset_normalizer"]):  # 比如没装 pypdf、Pillow
+            with mock.patch.object(files.asyncio, "create_subprocess_exec", fake_exec):
+                await read_file(b"x", "a.pdf", None, 100)
+                await read_file(b"x", "a.txt", None, 100)
+        self.assertEqual(seen, [[], ["charset_normalizer"]])
+
+    def test_preload_table_covers_what_the_readers_import(self):
+        """每种文件的读法真的会导入的第三方库，都在这种文件先导入的名单里：不然“库导入不了”要等读了文件才发现
+        （那时候的报错不能信，见 test_file_content_cannot_fake_a_startup_failure）。在另一个进程里看，免得别的测试已经导入过。"""
+        import subprocess
+        import sys
+
+        kinds = {"text", "sniff", "pdf", "docx", "xlsx", "pptx"}
+        self.assertLessEqual(set(files._PRELOAD_FOR), kinds)
+        for libs in files._PRELOAD_FOR.values():
+            self.assertLessEqual(set(libs), set(files._PRELOAD))
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(
+                "word/document.xml",
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body><w:p><w:r><w:t>内容</w:t></w:r></w:p></w:body></w:document>",
+            )
+        samples = [
+            ("a.docx", buf.getvalue()),
+            ("a.xlsx", ReviewFixes()._xlsx('<row r="1"><c r="A1" t="inlineStr"><is><t>内容</t></is></c></row>')),
+            ("a.pptx", buf.getvalue()),  # 不是真的 PPT：读法走一遍就行
+            ("a.txt", "名称,数量,单价\n苹果,3,5.5\n香蕉,12,2.8\n".encode("gbk")),  # 不是 UTF-8：要猜编码
+            ("a.bin", "名称,数量,单价\n苹果,3,5.5\n香蕉,12,2.8\n".encode("gbk")),
+            ("a.pdf", b"%PDF-1.4 junk" * 20),
+        ]
+        code = (
+            "import json, sys\n"
+            "from dsbot import files\n"
+            "watched = ('pypdf', 'charset_normalizer', 'PIL', 'cryptography')\n"
+            "def loaded():\n"
+            "    return {m.split('.')[0] for m in sys.modules} & set(watched)\n"
+            "out = []\n"
+            "for name, raw in json.loads(sys.stdin.read()):\n"
+            "    before = loaded()\n"
+            "    files.extract_bytes(bytes.fromhex(raw), name, None, 1000)\n"
+            "    out.append([name, files.classify(name, None)[0], sorted(loaded() - before)])\n"
+            "print(json.dumps(out))\n"
+        )
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p), "PYTHONIOENCODING": "utf-8"}
+        done = subprocess.run(
+            [sys.executable, "-c", code],
+            input=json.dumps([(name, raw.hex()) for name, raw in samples]).encode(),
+            capture_output=True,
+            env=env,
+            timeout=120,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace")[-500:])
+        for name, kind, imported in json.loads(done.stdout.decode()):
+            allowed = {lib.split(".")[0] for lib in files._PRELOAD_FOR.get(kind, ())}
+            if kind == "pdf":
+                allowed.add("cryptography")  # 加密的 PDF 才用到，pypdf 自己导入（没装就说少了解密组件）
+            self.assertLessEqual(set(imported), allowed, (name, kind))
+
     def test_privilege_drop_decision(self):
         import os
         from unittest import mock
