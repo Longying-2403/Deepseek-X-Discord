@@ -298,16 +298,26 @@ def rewrite_message(
 
 
 def _stamp(messages: list[tuple[int, IncomingMessage]], now: float, tz: str, where: str | None = None) -> str:
-    """每轮开头的时间。where：连通的几个频道共用的记录里，这一段是哪个频道的（「服务器」#频道，写在时间后面）。"""
+    """每轮开头的时间（config.toml 里 timezone 那个时区的）：【2026-11-18 周三 13:07】；这批消息前后隔了 5 分钟以上就写起止。where：连通的几个频道共用的记录里，这一段是哪个频道的（「服务器」#频道，写在时间后面）。"""
     zone = ZoneInfo(tz)
     end = datetime.fromtimestamp(now, zone)
     starts = [m.received_at for _, m in messages if m.received_at]
     place = f" · {where}" if where else ""
     if not starts or now - min(starts) < 300:
-        return f"【{end:%m-%d %H:%M}{place}】"
+        return f"【{_moment(end)}{place}】"
     start = datetime.fromtimestamp(min(starts), zone)
-    tail = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%m-%d %H:%M}"
-    return f"【{start:%m-%d %H:%M} ~ {tail}{place}】"
+    tail = f"{end:%H:%M}" if start.date() == end.date() else _moment(end)
+    return f"【{_moment(start)} ~ {tail}{place}】"
+
+
+def _moment(when: datetime) -> str:
+    """年月日、星期、几点几分。年份、星期都写上：不写的话模型会照它训练时的年份猜（把今年的日期当成很久以后的）。"""
+    return f"{when:%Y-%m-%d} 周{'一二三四五六日'[when.weekday()]} {when:%H:%M}"
+
+
+def now_text(now: float, tz: str) -> str:
+    """现在的时间（给人看的：状态、启动日志里核对时区对不对）。"""
+    return _moment(datetime.fromtimestamp(now, ZoneInfo(tz)))
 
 
 def render_doc(block: DocBlock) -> tuple[list[str], list[str]]:
@@ -871,7 +881,8 @@ def public_lines(content: Any) -> list[str]:
 
 
 _MSG_LINE = re.compile(r"^#\d+ ")
-_STAMP_LINE = re.compile(r"^【\d{2}-\d{2} \d{2}:\d{2}[^】]*】")
+# 2.9.1 起带年份、星期（【2026-11-18 周三 13:07】）；更早存下的记录是【11-18 13:07】，两种都认
+_STAMP_LINE = re.compile(r"^【(?:\d{4}-)?\d{2}-\d{2}(?: 周[一二三四五六日])? \d{2}:\d{2}[^】]*】")
 _REPLY_REF = re.compile(r" ↪(#\d+|\(更早的消息\))")
 
 

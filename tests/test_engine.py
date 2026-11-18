@@ -512,7 +512,7 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
         clock.advance(600)
         await engine.handle_message(msg(502, "@小D", mentions_bot=True))
         await engine.drain()
-        self.assertTrue(llm.calls[0]["messages"][-1]["content"].startswith("【10-07 20:00 ~ 20:10】"))
+        self.assertTrue(llm.calls[0]["messages"][-1]["content"].startswith("【2026-10-07 周三 20:00 ~ 20:10】"))
 
     async def test_paused_mentions_get_warning(self):
         engine, llm, transport, clock = make_engine()

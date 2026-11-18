@@ -268,7 +268,7 @@ class Render(unittest.TestCase):
         self.assertEqual(
             out.split("\n"),
             [
-                "【10-07 20:00】",
+                "【2026-10-07 周三 20:00】",
                 "（前面还有 3 条消息没显示）",
                 "#8 小 雨：第一行",
                 "  第二行",

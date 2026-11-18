@@ -185,9 +185,9 @@ class Recall(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(602, "@小D 阿明上次说买了啥", author=12, name="小雨", mentions_bot=True))
         await engine.drain()
         self.assertIn("开了记忆共享，能翻记录的频道写在聊天记录里", system_text(llm.calls[1]))
-        self.assertTrue(user_text(llm.calls[1]).startswith("【10-08 04:00】\n（能翻记录的别的频道：\n  #游戏\n）\n#1 小雨："))
+        self.assertTrue(user_text(llm.calls[1]).startswith("【2026-10-08 周四 04:00】\n（能翻记录的别的频道：\n  #游戏\n）\n#1 小雨："))
         text = user_text(llm.calls[2])
-        self.assertIn("（你翻了 #游戏 的记录：）\n<<<\n[10-07 20:00]\n阿明：我新买了 Switch 2，周末一起玩马车\n小D：好啊\n>>>", text)
+        self.assertIn("（你翻了 #游戏 的记录：）\n<<<\n[2026-10-07 周三 20:00]\n阿明：我新买了 Switch 2，周末一起玩马车\n小D：好啊\n>>>", text)
         self.assertEqual(transport.sent[-1][1], "他买了 Switch 2")
         # 第二次请求 = 第一次 + recall + 记录（只追加）
         first, second = llm.calls[1]["messages"], llm.calls[2]["messages"]
@@ -612,7 +612,7 @@ class Pieces(unittest.TestCase):
         out = render_round(
             [(1, msg(501, "在吗"))], sid_by_msg={}, kind="proactive", targets=[], now=1_791_374_400.0, tz="Asia/Taipei", context=["（背景）"]
         )
-        self.assertTrue(out.startswith("【10-07 20:00】\n（背景）\n#1 阿明：在吗"))
+        self.assertTrue(out.startswith("【2026-10-07 周三 20:00】\n（背景）\n#1 阿明：在吗"))
 
 
 class ReviewFixes(unittest.IsolatedAsyncioTestCase):

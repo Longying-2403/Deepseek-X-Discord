@@ -46,6 +46,7 @@ from .groups import (
 from .memory import SHARED
 from .store import SyncError
 from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
+from .render import now_text
 from .textutil import one_line
 
 if TYPE_CHECKING:
@@ -599,6 +600,7 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         "自定义",
     )
     lines = [f"**<#{channel_id}> 的状态**"]
+    lines.append(f"现在：{now_text(bot.engine.clock(), bot.engine.tz)}（时区 {bot.engine.tz}，在 config.toml 的 timezone 改；它看到的时间就是这个）")
     if not view.enabled:
         lines.append(f"🚫 这里不在允许的区域（来自{view.source('enabled')}），它不会看也不会回这里的消息")
     lines += [

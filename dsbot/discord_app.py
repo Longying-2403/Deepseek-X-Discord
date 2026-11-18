@@ -45,6 +45,7 @@ from .search import WebSearch
 from .settings import Settings
 from .store import Store
 from .tavily import Tavily
+from .render import now_text
 from .textutil import DISCORD_LIMIT, render_custom_emoji
 
 log = logging.getLogger(__name__)
@@ -617,6 +618,8 @@ class DSBot(discord.Client):
         assert self.user is not None
         url = discord.utils.oauth_url(self.user.id, permissions=BOT_PERMISSIONS, scopes=("bot", "applications.commands"))
         log.info("已登录：%s（ID %s），在 %d 个服务器里（dsbot %s）", self.user, self.user.id, len(self.guilds), __version__)
+        # 日志自己的时间是容器的（多半是 UTC）；它聊天时看到的是下面这个：不对就改 config.toml 的 timezone
+        log.info("时区：%s，它看到的现在是 %s", self.engine.tz, now_text(self.engine.clock(), self.engine.tz))
         log.info("邀请链接：%s", url)
 
     async def _tick_loop(self) -> None:
