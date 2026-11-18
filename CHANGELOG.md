@@ -2,6 +2,67 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.10.0] - 2026-11-19
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**改动（升级前先看）**
+
+- **主动发言换了一套机制，更像人**。以前按“额度”算：别人每说十几轮恢复 1 次，额度一恢复就把攒下的十几条消息一次看完，聊得慢时它会去接十几二十分钟前的话。现在是：
+  - **平时隔几分钟看一眼**（普通档每 5～8 分钟，每次随机）。看的时候最近 5 分钟没人说话，就什么都不做（不问模型、不花钱）；有人在聊，就等聊天停一下再判断要不要说话。更早攒下的消息只当背景，会写明“以上是 N 分钟以前说的”。
+  - **聊起来了就跟着**：它开了口，或者有人叫了它、它回了之后，接着留意这场聊天。有人说话、停 5 秒，它就看要不要接；两次判断之间隔 30～45 秒（随机），不是每句话都问模型。
+  - **没它的事就退回去**：5 分钟没人说话，或者连着 3 次判断都没话说，就回到“隔几分钟看一眼”。
+- **三个档位的意思变了**（`/dsadmin 档位`）：安静 = 每 10～15 分钟看一眼，说完不跟着聊；普通 = 每 5～8 分钟，聊起来就跟着；话痨 = 每 3～5 分钟，聊起来就跟着。
+- **参数换了**：没有了“额度恢复轮数”“额度上限”“最短发言间隔秒”和主人的“最短判断间隔秒”；多了“几分钟看一眼”（默认 5）和“聊起来就跟着”（默认开）。“冷场秒数”“最长等待秒”还在，管的是平时看一眼时等多久。
+- 叫它的消息（@、回复它、别名）照旧马上回，不受这些影响；每日预算照旧是硬上限。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.10.0 启动中`。数据库不变。
+- **以前调过的档位、额度参数不再起作用**（留在数据库里不碍事）：开了主动发言的频道先按“普通”的节奏走，想改就重新选一次 `/dsadmin 档位`。旧的 `config.toml` 里的 `refill_turns`、`quota_capacity`、`min_speak_gap`、`min_eval_interval`、`react_cost` 留着不报错，也可以删掉。
+- 花费：平时看一眼只在最近有人说话时才问一次模型；跟着的时候最多每 30 秒问一次，没话说 3 次就停。热闹的频道会比以前多问几次（一次通常不到 0.1 美分），可以在 `/dsadmin 状态` 里看今天的花费。
+- `/dsadmin 状态` 里“主动额度”那一行换成了“主动的节奏”：平时多久看一眼、下一眼还有多久，或者现在正跟着聊。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `engine.py`：`ChannelState` 多了 `following`、`passes`、`next_check_at`、`gap_until`、`waiting_since`；`_proactive_ready` 分“跟着 / 平时”两种；`_after_round` 在模型答完以后定下一次什么时候判断、跟不跟着（按模型的决定算，不按发没发成功算）；常量 `FRESH_SECONDS`、`FOLLOW_IDLE`、`FOLLOW_PASSES`、`FOLLOW_SETTLE`、`FOLLOW_MAX_WAIT`、`SPEAK_GAP`。
+- `render_round` 多了 `fresh_since`（这之前到的消息后面写一句 `STALE_NOTE`）和 `following`（提示语用 `HINT_FOLLOW`）。
+- `config.py`：`check_minutes`、`follow`，`check_range`；`RETIRED` 里记着不用了的配置项。`quota.py` 只剩按人限速的 `SlidingWindow`。
+- 贡献指南第 2 条跟着改了：平时看一眼时最近没人说话，要跳过整次模型调用。
+- 测试共 1425 个（新增 `tests/test_proactive.py`，去掉了额度的测试）。
+
+### English
+
+**Changed (read before upgrading)**
+
+- **Speaking up on its own works differently now, more like a person.** It used to run on a quota: one "credit" came back after a dozen or so turns by others, and the moment it did, the bot read the whole pile of messages it had been holding, so in a slow chat it would pick up something said ten or twenty minutes earlier. Now:
+  - **Normally it glances at the channel every few minutes** (every 5–8 minutes on the 普通 preset, random each time). If nobody has spoken in the last 5 minutes it does nothing (no model call, no cost); if people are chatting it waits for a lull and then decides whether to say something. Older messages it was holding are background only and are marked "said N minutes ago".
+  - **Once a conversation gets going it follows along**: after it has spoken, or after someone called it and it answered, it keeps an eye on the chat. When someone speaks and pauses for 5 seconds it decides whether to reply; decisions are 30–45 seconds apart (random), so not every sentence is sent to the model.
+  - **It steps back when it isn't needed**: after 5 minutes without messages, or after deciding to stay quiet 3 times in a row, it goes back to glancing every few minutes.
+- **The three presets mean something new** (`/dsadmin 档位`): 安静 = a glance every 10–15 minutes and no following; 普通 = every 5–8 minutes, follows along; 话痨 = every 3–5 minutes, follows along.
+- **Parameters changed**: "额度恢复轮数", "额度上限", "最短发言间隔秒" and the owner's "最短判断间隔秒" are gone; "几分钟看一眼" (default 5) and "聊起来就跟着" (default on) are new. "冷场秒数" and "最长等待秒" remain and control how long a glance waits for a lull.
+- Messages that call it (@mention, reply, alias) are still answered right away and are not affected; the daily budget is still the hard limit.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.10.0 启动中`. The database is unchanged.
+- **Presets and quota parameters set earlier no longer have any effect** (they stay in the database harmlessly): channels with speaking-up enabled start on the 普通 rhythm; pick `/dsadmin 档位` again to change it. `refill_turns`, `quota_capacity`, `min_speak_gap`, `min_eval_interval` and `react_cost` in an old `config.toml` are ignored without an error and can be deleted.
+- Cost: a glance only calls the model when someone spoke recently; while following it calls at most once every 30 seconds and stops after 3 silent decisions. A busy channel will see a few more calls than before (each usually under 0.1 cent); today's spend is in `/dsadmin 状态`.
+- In `/dsadmin 状态` the quota line was replaced by the rhythm: how often it glances, how long until the next glance, or that it is following the chat right now.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `engine.py`: `ChannelState` gained `following`, `passes`, `next_check_at`, `gap_until` and `waiting_since`; `_proactive_ready` has a following branch and a normal branch; `_after_round` decides, once the model has answered, when to judge next and whether to follow (based on what the model decided, not on whether sending worked); constants `FRESH_SECONDS`, `FOLLOW_IDLE`, `FOLLOW_PASSES`, `FOLLOW_SETTLE`, `FOLLOW_MAX_WAIT`, `SPEAK_GAP`.
+- `render_round` gained `fresh_since` (a `STALE_NOTE` line after messages that arrived before it) and `following` (uses `HINT_FOLLOW`).
+- `config.py`: `check_minutes`, `follow`, `check_range`; `RETIRED` lists settings that are no longer used. `quota.py` only keeps the per-person rate limiter `SlidingWindow`.
+- Rule 2 of the contributing guide was updated: when a glance finds nobody spoke recently, skip the model call entirely.
+- There are now 1425 tests (new `tests/test_proactive.py`; the quota tests were removed).
+
 ## [2.9.1] - 2026-11-19
 
 > 英文版这次没有更新，还是 2.0.0。
