@@ -2,6 +2,53 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.9.1] - 2026-11-19
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**修复**
+
+- **它对“现在是哪年”没概念**：每段聊天开头给它看的时间以前只有月、日、时、分（`【11-18 13:07】`），没有年份，它只能照训练时的年份猜，于是看到“2026/11”会以为是很久以后的事。现在写成 `【2026-11-18 周三 13:07】`，带年份和星期。
+- 规则里写明：最后一段开头的时间就是现在；今年是哪年、今天几号、星期几、现在几点都照它，看到一个日期先和现在比一比；问候要和现在几点对得上。
+
+**改进**
+
+- `/dsadmin 状态` 第一行、启动日志里会写现在用的时区和“它看到的现在”，时区不对一眼看得出来（在 `config.toml` 的 `timezone` 改；日志自己的时间是容器的，多半是 UTC）。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.9.1 启动中`，登录后多一行 `时区：…，它看到的现在是 …`。数据库不变；以前存下的聊天记录（没有年份的写法）照样能读。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `render.py`：`_moment`（年月日、星期、时分）、`now_text`；`_STAMP_LINE` 新旧两种写法都认。`SYSTEM_RULES` 的“聊天记录的格式”多了两条。
+- 测试增加到 1415 个（新增 `tests/test_time.py`）。
+
+### English
+
+**Fixed**
+
+- **It had no idea what year it is**: the time shown at the start of each chunk of chat used to be month, day, hour and minute only (`【11-18 13:07】`), so the model fell back on the year it was trained in and treated "2026/11" as far in the future. It is now `【2026-11-18 周三 13:07】`, with the year and the weekday.
+- The rules now say: the time at the start of the last chunk is now; take the year, date, weekday and time of day from it, compare any date you see against it, and make greetings fit the time of day.
+
+**Improved**
+
+- The first line of `/dsadmin 状态` and the startup log show the time zone in use and "now as the bot sees it", so a wrong time zone is easy to spot (change `timezone` in `config.toml`; the log's own timestamps are the container's, usually UTC).
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.9.1 启动中`, and after login a line `时区：…，它看到的现在是 …`. The database is unchanged; chat records stored earlier (without the year) are still read.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `render.py`: `_moment` (date, weekday, time) and `now_text`; `_STAMP_LINE` accepts both the old and the new form. Two lines were added to the chat-format part of `SYSTEM_RULES`.
+- There are now 1415 tests (new `tests/test_time.py`).
+
 ## [2.9.0] - 2026-11-18
 
 > 英文版这次没有更新，还是 2.0.0。
