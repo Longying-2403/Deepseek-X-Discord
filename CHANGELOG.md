@@ -2,6 +2,53 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.8.2] - 2026-11-18
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**改进**
+
+- **一条消息带好几张图时更快**：以前一张下载、缩小完才轮到下一张，现在同时下载（同时缩小的还是最多两张，免得太占内存）。看哪几张、先后顺序和以前一样，也不会多下载。NAS 上实测（假设每张下载要 0.3 秒）：3 张图从 1.4 秒降到 0.65 秒，4 张从 1.9 秒降到 0.66 秒。
+- **又有图、又有文件或链接时更快**：看图和读文件、打开链接同时进行，不用等图都下完了才去读。
+- **要上网搜的那一轮更快**：上网搜、找图不再等读完文件、打开完链接才开始，要搜两样东西时也同时搜（搜到的还是照原来的顺序给它看）。实测一条消息里搜两样东西：以前第二次搜索比第一次晚 0.4 秒回来，现在同时回来；又搜又打开链接时，大约省下搜索的那段时间。
+- 每天的搜索、找图、打开链接的次数和预算照旧。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.8.2 启动中`。数据库不变。从 2.8.0 或更早的版本升上来，`Dockerfile` 也要换（见 2.8.1）。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `engine.py`：`_together`（同时办几件互不相干的事，结果照传进去的顺序；有一件出错，别的停下、收拾完，抛出去的还是它本来的错）、`_settle`（提前开始办的事用不着了：停下、收拾完）。
+- `Engine._images` 一批一批同时下载：每批只拿“一张一张来也一定会下载”的那几张（还剩几个名额就拿几张），有没下成的再拿后面的补，所以选中的图和原来一模一样。`_round` 里 `_images` 和 `_round_content` 同时。
+- `Engine._tool_step`：排在点歌前面的 `search`、`image` 一开始就各建一个任务（各自先记一笔占住每天的名额，顺序照旧），结果在原来的位置取；排在点歌后面的不提前（按歌名找歌和搜索共用每天的搜索次数）。`_read_links(pay=…)`：打开链接用不用要花钱的读法在这之前定好，和原来一样；搜不搜、找不找图则是在这一轮打开链接的钱记上之前定的（预算正好卡在这中间时，最多多搜这一轮的这几次）。
+- 测试增加到 1385 个（新增 `tests/test_parallel.py`）。
+
+### English
+
+**Improved**
+
+- **Faster when a message has several images**: images used to be downloaded and resized one after another; they are now downloaded at the same time (still at most two being resized at once, to keep memory in check). Which images it looks at and their order are the same as before, and nothing extra is downloaded. Measured on a NAS (assuming 0.3 seconds per download): 3 images went from 1.4 seconds to 0.65, 4 images from 1.9 seconds to 0.66.
+- **Faster when there are images plus files or links**: looking at images and reading files / opening links now happen at the same time.
+- **Faster in rounds that search the web**: web searches and picture searches no longer wait until files are read and links are opened, and two searches run at the same time (the results are still shown to the model in the original order). Measured with two searches in one message: the second result used to arrive 0.4 seconds after the first, now both arrive together; searching while opening a link saves about the time the search takes.
+- The daily limits for searches, picture searches and opened links, and the budget rules, are unchanged.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.8.2 启动中`. The database is unchanged. Coming from 2.8.0 or earlier, replace the `Dockerfile` too (see 2.8.1).
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `engine.py`: `_together` (runs independent jobs at the same time and returns results in the order given; if one fails the others are stopped and awaited, and the original exception is raised, not a wrapped one) and `_settle` (stops jobs that were started early and are no longer needed).
+- `Engine._images` downloads in waves: each wave only takes the images that the one-by-one version would certainly have downloaded (as many as there are slots left), and failures are made up from the next ones, so the chosen images are exactly the same. In `_round`, `_images` and `_round_content` run together.
+- `Engine._tool_step`: `search` and `image` actions that come before any music action each get a task right away (each reserves its daily slot first, in the same order as before) and their results are collected at their original position; ones after a music action are not started early (finding a song by name shares the daily search limit). `_read_links(pay=…)`: whether opening links may use the paid reader is decided before those tasks start, as before; whether to search / find pictures is decided before this round's link costs are booked (if the budget runs out exactly in between, at most this round's searches go over).
+- There are now 1385 tests (new `tests/test_parallel.py`).
+
 ## [2.8.1] - 2026-11-18
 
 > 英文版这次没有更新，还是 2.0.0。
