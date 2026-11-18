@@ -102,7 +102,8 @@ from .prompts import (
 )
 from .mentions import link, merge_tiers, name_forms
 from .music import pick_link
-from .quota import QuotaBucket, SlidingWindow, TurnTracker
+from .config import check_range
+from .quota import SlidingWindow
 from .render import (
     Gallery,
     assistant_text,
@@ -147,6 +148,14 @@ MAX_MESSAGES_PER_ROUND = 4  # 一轮最多发几条消息
 SID_MAP_LIMIT = 4000
 BAD_REQUEST = {400, 413, 422}  # 重试也没用的错误：这批消息本身有问题
 ERROR_BACKOFF = 60.0  # 普通错误后，这个频道多久内不主动判断
+# 主动发言（2.10.0 起）：平时隔几分钟看一眼（check_minutes），只接最近 FRESH_SECONDS 里说的；它开了口、或者被叫过之后
+# “跟着”这场聊天：有人说话就看要不要接，直到 FOLLOW_IDLE 这么久没人说话，或者连着 FOLLOW_PASSES 次都没话说
+FRESH_SECONDS = 300.0  # 平时看一眼：这么久以内说的才算“正在聊的”，更早的只当背景
+FOLLOW_IDLE = 300.0  # 跟着的时候：这么久没人说话、也没人打字，就回到平时
+FOLLOW_PASSES = 3  # 跟着的时候：连着这么多次判断都决定不说，就回到平时
+FOLLOW_SETTLE = 5.0  # 跟着的时候：有人说完话，停这么久（没人接着说、打字）再判断
+FOLLOW_MAX_WAIT = 30.0  # 跟着的时候：一直有人在说，最多等这么久也判断一次
+SPEAK_GAP = (30.0, 45.0)  # 它说过话（跟着的时候：判断过一次）之后，隔这么久（随机）才再主动判断；叫它的不受这个限制
 SEND_FAIL_LIMIT = 3  # 连续几轮发不出去（比如没权限）就暂停这个频道
 SEND_FAIL_BACKOFF = 1800.0
 HOUSEKEEP_EVERY = 600.0
@@ -681,7 +690,6 @@ class ChannelState:
     channel_id: int
     guild_id: int
     parent_id: int | None
-    bucket: QuotaBucket
     category_id: int | None = None
     pending: list[IncomingMessage] = field(default_factory=list)
     inflight: list[IncomingMessage] = field(default_factory=list)  # 正在处理的这一批
@@ -694,11 +702,15 @@ class ChannelState:
     last_activity_at: float = 0.0  # 最近一次有人说话或打字
     last_eval_at: float = 0.0
     last_speak_at: float = 0.0
+    following: bool = False  # 正跟着这里的聊天（它开了口、或者被叫过）
+    passes: int = 0  # 跟着的时候连着几次决定不说
+    next_check_at: float = 0.0  # 平时：下一次什么时候看一眼（0 = 还没看过，有人说话就看）
+    gap_until: float = 0.0  # 这之前不主动判断（刚说过话、刚判断过）
+    waiting_since: float | None = None  # 平时这一眼从什么时候开始等冷场的
     mention_due: bool = False
     scheduled: bool = False
     error_until: float = 0.0
     send_failures: int = 0
-    turns: TurnTracker = field(default_factory=TurnTracker)
     last_image_at: float = 0.0  # 上次上网找图的时间（同一个频道隔一会儿才能再找）
     media_failures: int = 0  # 连着几次图发不出去（多半是缺“附加文件”权限）
     media_blocked_until: float = 0.0  # 发图连着失败：这之前先不发图（文字照常）
@@ -823,7 +835,7 @@ class Engine:
         st = self.states.get(channel_id)
         if st is None:
             view = self.settings.view(guild_id, channel_id, parent_id, category_id)
-            st = ChannelState(channel_id, guild_id, parent_id, QuotaBucket(view.quota_capacity), category_id)
+            st = ChannelState(channel_id, guild_id, parent_id, category_id)
             st.private = private
             key = self.store.conversation_key(channel_id)
             st.conv = self._conv_state(key, guild_id if key == channel_id else 0)
@@ -908,8 +920,6 @@ class Engine:
         st.last_activity_at = now
         if st.first_human_at is None:
             st.first_human_at = now
-        if st.turns.is_new_turn(msg.author_id, now, self.ec.turn_merge_seconds):
-            st.bucket.on_turn(view.refill_turns, view.quota_capacity)
 
         if st.private:
             # 私信：每句都在跟它说话。等他说完（停下几秒、不在打字）再一起回，连着发的几条只问一次；
@@ -1497,17 +1507,63 @@ class Engine:
             return False
         if now < self.paused_until or now < st.error_until:
             return False
-        if not st.bucket.ready(view.quota_capacity):
-            return False  # 没额度时连判断都不做，省 token
-        if now - st.last_speak_at < view.min_speak_gap:
+        if now < st.gap_until or self._over_budget(st, view, now)[0]:
             return False
-        if now - st.last_eval_at < view.min_eval_interval:
+        if st.following and (not view.follow or now - st.last_activity_at >= FOLLOW_IDLE):
+            self._stop_following(st, view, now)  # 没人说话了（或者管理员刚关掉了“跟着”）：回到平时
+        if st.following:
+            # 跟着：有人说了话（缓冲区里有真人的消息），等他说完就看要不要接
+            return now - st.last_activity_at >= FOLLOW_SETTLE or now - st.first_human_at >= FOLLOW_MAX_WAIT
+        if now < st.next_check_at:
             return False
-        if self._over_budget(st, view, now)[0]:
+        # 平时看一眼：最近没人说话就算了（不问模型），过几分钟再看；攒着的旧消息留着当背景
+        newest = max((m.received_at for m in st.pending if not m.is_bot), default=0.0)
+        if now - newest > FRESH_SECONDS:
+            st.waiting_since = None
+            st.next_check_at = now + self._check_interval(view)
             return False
-        quiet = now - st.last_activity_at >= view.quiet_seconds
-        waited = now - st.first_human_at >= view.max_wait_seconds
-        return quiet or waited
+        if st.waiting_since is None:
+            fresh = [m.received_at for m in st.pending if not m.is_bot and now - m.received_at <= FRESH_SECONDS]
+            st.waiting_since = max(st.next_check_at, min(fresh))
+        # 正聊着：等停一下再开口（别人正说着不插话）；一直不停，等够了也看一次
+        return now - st.last_activity_at >= view.quiet_seconds or now - st.waiting_since >= view.max_wait_seconds
+
+    def _check_interval(self, view: View) -> float:
+        """平时隔多久看一眼（秒）：check_minutes 到它的 1.5 倍之间，每次随机。"""
+        low, high = check_range(view.check_minutes)
+        return self.rng.uniform(low * 60.0, high * 60.0)
+
+    def _stop_following(self, st: ChannelState, view: View, now: float) -> None:
+        st.following = False
+        st.passes = 0
+        st.waiting_since = None
+        st.next_check_at = now + self._check_interval(view)
+
+    def _after_round(self, st: ChannelState, view: View, kind: str, spoke: bool, reacted: bool) -> None:
+        """一轮问完模型以后：定下一次什么时候再主动判断、要不要（接着）跟着这场聊天。按模型的决定算，不按发没发成功算
+        （没权限发言的频道也不会一直判断）。"""
+        now = self.clock()
+        if spoke:
+            st.last_speak_at = now
+        can_follow = not st.private and bool(view.proactive) and bool(view.follow)
+        if kind == "mention":
+            if spoke:
+                st.gap_until = now + self.rng.uniform(*SPEAK_GAP)
+                if can_follow:  # 有人叫了它、它也回了：接下来留意这场聊天
+                    st.following, st.passes = True, 0
+            return
+        st.waiting_since = None
+        if st.following:
+            st.gap_until = now + self.rng.uniform(*SPEAK_GAP)  # 跟着的时候不是每句话都判断：隔一阵看一次
+            st.passes = 0 if spoke or reacted else st.passes + 1
+            if st.passes >= FOLLOW_PASSES:
+                self._stop_following(st, view, now)  # 连着几次都没话说：这场聊天用不着它，回到平时
+            return
+        st.next_check_at = now + self._check_interval(view)
+        if spoke:
+            st.gap_until = now + self.rng.uniform(*SPEAK_GAP)
+            if can_follow:
+                st.following, st.passes = True, 0
 
     async def _run(self, st: ChannelState) -> None:
         while True:
@@ -1537,6 +1593,9 @@ class Engine:
                     finally:
                         st.inflight = []
                         st.withdrawn.clear()
+                        # 这一眼没问成模型（出错、超了预算提前回来）：也过几分钟再看，别每次 tick 都来
+                        if not st.following and st.next_check_at <= self.clock() and not any(m.trigger for m in batch):
+                            st.next_check_at = self.clock() + self._check_interval(self.view(st))
                         st.gallery = []  # 找到的候选图只在这一轮里能挑
                         if cs.scrub_due:
                             self._scrub_now(cs)
@@ -1906,6 +1965,8 @@ class Engine:
                 max_chars=self.ec.max_chars_per_message,
                 context=context,
                 cards=card_lines,
+                fresh_since=now - FRESH_SECONDS if kind == "proactive" and not st.following else None,
+                following=kind == "proactive" and st.following,
                 where=where,
             )
             return content, self._messages(system, conv, content)
@@ -2029,14 +2090,7 @@ class Engine:
         try:
             spoke, reacted, failed_media = await self._execute(st, actions, kind, targets, elapsed=self.clock() - started)
         finally:
-            # 额度按模型的决定扣，不按发没发成功扣：没权限的频道也不会无限判断
-            if decided_reply:
-                st.last_speak_at = self.clock()
-            if kind == "proactive":
-                if decided_reply:
-                    st.bucket.spend(1.0)
-                elif decided_react:
-                    st.bucket.spend(self.ec.react_cost)
+            self._after_round(st, view, kind, decided_reply, decided_react)
             self.store.set_outcome(row, "recited" if row in self._recited_rows else outcome)
             self._recited_rows.discard(row)
             # 对话里附着人设卡时不给管理员看模型的“想法”（里面可能引用了别人的卡）
@@ -6535,11 +6589,9 @@ class Engine:
         now = self.clock()
         st = self.states.get(channel_id)
         view = self.settings.view(guild_id, channel_id, parent_id, category_id)
-        if st is not None:
-            st.bucket.ready(view.quota_capacity)  # 先按当前上限截一下
         return {
-            "tokens": st.bucket.tokens if st else float(view.quota_capacity),
-            "turns_since_refill": st.bucket.turns_since_refill if st else 0,
+            "following": bool(st and st.following and view.proactive and view.follow and now - st.last_activity_at < FOLLOW_IDLE),
+            "next_check_in": max(0.0, st.next_check_at - now) if st and st.next_check_at else None,
             "pending": len(st.pending) if st else 0,
             "last_speak_ago": (now - st.last_speak_at) if st and st.last_speak_at else None,
             "last_decision": st.last_decision if st else "",

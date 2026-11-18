@@ -129,7 +129,7 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
         self.assertIn("（没人叫你，想说再说，拿不准就不说。）", llm.calls[0]["messages"][-1]["content"])
         self.assertEqual(transport.sent, [])  # 模型选择不说话
         st = engine.states[CHANNEL]
-        self.assertEqual(st.bucket.tokens, 3.0)  # 沉默不扣额度
+        self.assertFalse(st.following)  # 没开口：不跟着
         self.assertEqual(len(st.conversation.turns), 2)  # 沉默也记成一轮
 
     async def test_typing_postpones_judgement(self):
@@ -157,69 +157,6 @@ class ProactivePath(unittest.IsolatedAsyncioTestCase):
             clock.advance(10)
         self.assertEqual(len(llm.calls), 1)
         self.assertGreaterEqual(i * 10, engine.cfg.defaults["max_wait_seconds"])
-
-    async def test_quota_spent_and_refilled_by_turns(self):
-        engine, llm, transport, clock = make_engine(
-            lambda call: REPLY(None, "插一句"),
-            defaults={"proactive": True, "quota_capacity": 1, "refill_turns": 3, "min_speak_gap": 0, "min_eval_interval": 10},
-        )
-        await engine.handle_message(msg(501, "A", author=11))
-        clock.advance(31)
-        await engine.tick()
-        await engine.drain()
-        self.assertEqual(len(llm.calls), 1)
-        self.assertEqual(engine.states[CHANNEL].bucket.tokens, 0.0)
-
-        await engine.handle_message(msg(502, "B", author=12))
-        clock.advance(31)
-        await engine.tick()
-        await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 没额度：连判断都不做
-
-        await engine.handle_message(msg(503, "C", author=13))  # 第 3 轮 → 恢复 1 次
-        clock.advance(31)
-        await engine.tick()
-        await engine.drain()
-        self.assertEqual(len(llm.calls), 2)
-        self.assertIn("#2 阿明：B", llm.calls[1]["messages"][-1]["content"])  # 攒着的消息也带上了
-
-    async def test_same_author_burst_is_one_turn(self):
-        engine, llm, transport, clock = make_engine(defaults={"refill_turns": 3})
-        st = engine.state(CHANNEL, GUILD)
-        st.bucket.tokens = 0
-        for i in range(5):
-            await engine.handle_message(msg(501 + i, f"分行打字{i}"))
-            clock.advance(2)
-        self.assertEqual(st.bucket.tokens, 0)
-        self.assertEqual(st.bucket.turns_since_refill, 1)
-
-    async def test_react_costs_partial_quota(self):
-        engine, llm, transport, clock = make_engine(
-            lambda call: json.dumps({"actions": [{"type": "react", "to": 1, "emoji": "🎉"}]}),
-            defaults={"proactive": True},
-        )
-        await engine.handle_message(msg(501, "终于下班了"))
-        clock.advance(31)
-        await engine.tick()
-        await engine.drain()
-        self.assertEqual(transport.reactions, [(CHANNEL, 501, "🎉")])
-        self.assertAlmostEqual(engine.states[CHANNEL].bucket.tokens, 3 - engine.ec.react_cost)
-
-    async def test_min_speak_gap_after_mention_reply(self):
-        engine, llm, transport, clock = make_engine(
-            lambda call: REPLY(1, "嗯"), defaults={"proactive": True, "min_speak_gap": 120}
-        )
-        await engine.handle_message(msg(501, "@小D", mentions_bot=True))
-        await engine.drain()
-        await engine.handle_message(msg(502, "然后呢", author=12))
-        clock.advance(40)
-        await engine.tick()
-        await engine.drain()
-        self.assertEqual(len(llm.calls), 1)  # 刚说过话，主动发言要等够间隔
-        clock.advance(90)
-        await engine.tick()
-        await engine.drain()
-        self.assertEqual(len(llm.calls), 2)
 
 
 class Budget(unittest.IsolatedAsyncioTestCase):
@@ -471,12 +408,12 @@ class Robustness(unittest.IsolatedAsyncioTestCase):
     async def test_unsendable_channel_spends_quota_and_backs_off(self):
         engine, llm, transport, clock = make_engine(
             lambda call: REPLY(None, "说点啥"),
-            defaults={"proactive": True, "quota_capacity": 5, "refill_turns": 1, "min_speak_gap": 0, "min_eval_interval": 10},
+            defaults={"proactive": True},
         )
         transport.can_send = False
         for i in range(5):
             await engine.handle_message(msg(600 + i, f"消息{i}", author=20 + i))
-            clock.advance(31)
+            clock.advance(50)  # 它“说”过话以后跟着聊：隔 30～45 秒才再判断
             await engine.tick()
             await engine.drain()
         st = engine.states[CHANNEL]

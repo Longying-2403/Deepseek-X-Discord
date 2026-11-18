@@ -26,7 +26,7 @@ import discord
 from discord import app_commands
 from discord.app_commands import Choice
 
-from .config import ADMIN_KEYS, OWNER_KEYS, PRESETS, RESET_WORDS, SPECS, format_value
+from .config import ADMIN_KEYS, OWNER_KEYS, PRESETS, RESET_WORDS, SPECS, check_range, format_value
 from .convert import safe_category_id
 from .groups import (
     GroupError,
@@ -245,10 +245,27 @@ def _target(
     return "channel", interaction.channel_id, f"<#{interaction.channel_id}>"
 
 
-def _preset_text(values: dict[str, int]) -> str:
-    gap = values["min_speak_gap"]
-    gap_text = f"{gap // 60} 分钟" if gap >= 60 else f"{gap} 秒"
-    return f"每 {values['refill_turns']} 轮恢复 1 次，最多攒 {values['quota_capacity']} 次，间隔 {gap_text}"
+def _check_text(minutes: int) -> str:
+    low, high = check_range(minutes)
+    return f"每 {low}～{high} 分钟看一眼"
+
+
+def _preset_text(values: dict[str, Any]) -> str:
+    follow = "聊起来就跟着" if values["follow"] else "说完就回到平时，不跟着聊"
+    return f"平时{_check_text(values['check_minutes'])}，{follow}"
+
+
+def _proactive_line(view: Any, st: dict[str, Any]) -> str:
+    """状态里主动发言现在怎么样：平时多久看一眼、下一眼还有多久，或者正跟着聊。"""
+    text = f"主动的节奏：平时{_check_text(view.check_minutes)}，{'聊起来就跟着' if view.follow else '不跟着聊'}"
+    if not view.proactive:
+        return text + "（主动发言没开，现在用不上）"
+    if st.get("following"):
+        return text + " · 现在：正跟着这里的聊天（5 分钟没人说话、或者连着 3 次没话说就回到平时）"
+    wait = st.get("next_check_in")
+    if wait is None:
+        return text + " · 现在：有人说话就看一眼"
+    return text + (f" · 现在：约 {max(1, round(wait / 60))} 分钟后看下一眼" if wait > 0 else " · 现在：该看一眼了（有人说话就看）")
 
 
 def _ago(seconds: float | None) -> str:
@@ -605,10 +622,8 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append(f"🚫 这里不在允许的区域（来自{view.source('enabled')}），它不会看也不会回这里的消息")
     lines += [
         f"主动发言：{'开' if view.proactive else '关'}（来自{view.source('proactive')}）· 档位：{preset}",
-        f"主动额度：{st['tokens']:.1f} / {view.quota_capacity}（每 {view.refill_turns} 轮恢复 1 次，"
-        f"已攒 {st['turns_since_refill']} 轮）",
-        f"发言间隔 ≥ {view.min_speak_gap}s · 冷场 {view.quiet_seconds}s · 最长等待 {view.max_wait_seconds}s"
-        f" · 每人每分钟点名 ≤ {view.mention_rate_limit} 次",
+        _proactive_line(view, st),
+        f"平时看一眼时：冷场 {view.quiet_seconds}s · 最长等待 {view.max_wait_seconds}s · 每人每分钟点名 ≤ {view.mention_rate_limit} 次",
         f"别名：{view.aliases or '（无）'} · 人设：{format_value(SPECS['persona'], view.persona)}",
         f"待处理消息 {st['pending']} 条 · 上次发言：{_ago(st['last_speak_ago'])}",
     ]
@@ -2043,7 +2058,7 @@ def register_commands(bot: "DSBot") -> None:
             lines = [f"{where}：「{spec.label}」= {format_value(spec, parsed)}", f"（{spec.help}）"]
         await _reply(interaction, "\n".join(lines + setting_notes(bot, interaction, key.value, parsed, scope_name)))
 
-    @admin.command(name="档位", description="一键套用发言频率：安静 / 普通 / 话痨")
+    @admin.command(name="档位", description="一键套用主动发言的节奏：安静 / 普通 / 话痨")
     @app_commands.rename(preset="档位", scope="范围")
     @app_commands.describe(preset="选一个档位", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）")
     @app_commands.choices(
@@ -2230,7 +2245,7 @@ def register_commands(bot: "DSBot") -> None:
         )
 
     # ------------------------------------------------------------ 状态、清空记忆
-    @admin.command(name="状态", description="查看本频道的设置、额度和今天的花费")
+    @admin.command(name="状态", description="查看本频道的设置、主动发言的节奏和今天的花费")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, status_text(bot, interaction))
 

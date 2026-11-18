@@ -39,11 +39,10 @@ fetch_per_1000 = 0.75             # DeepSeek 的 Fetch 接口：美元 / 千次�
 # —— 管理员可以在 Discord 里用 /dsadmin 改的 ——
 enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /dsadmin 区域 允许 的地方回（白名单）
 proactive = false                 # 主动发言默认关，在需要的频道里用 /dsadmin 设置 参数:主动发言 值:开 打开
-refill_turns = 15                 # 别人每说 15 轮，恢复 1 次主动发言额度
-quota_capacity = 3                # 额度最多攒 3 次（热聊时最多连插 3 句）
-min_speak_gap = 120               # 两次发言至少隔 120 秒
-quiet_seconds = 30                # 30 秒没人说话、也没人在打字，算冷场
-max_wait_seconds = 180            # 一直没冷场的话，最多等 180 秒也判断一次
+check_minutes = 5                 # 开了主动发言时，平时每 5～8 分钟（随机）看一眼有没有新的聊天；只接最近 5 分钟里说的
+follow = true                     # 它开口了、或者有人叫了它之后跟着这场聊天：有人说话就看要不要接；5 分钟没人说话、连着 3 次没话说就回到平时
+quiet_seconds = 30                # 平时看一眼时：等 30 秒没人说话、也没人在打字才判断（别人正说着不插话）
+max_wait_seconds = 180            # 平时看一眼时一直有人在说：最多等 180 秒也判断一次
 mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
 aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
 persona = ""                      # 留空 = 默认人设；建议用 /dsadmin 人设 在 Discord 里改
@@ -56,7 +55,6 @@ dm_memory = true                  # 私信记忆：私信里聊的、他和它�
 cross_server = false              # 跨服务器：和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的跟着他走
 
 # —— 只有你能改的（这里，或 CONTROL_GUILD_ID 里那几个服务器的 /dsowner）——
-min_eval_interval = 60            # 两次主动判断至少隔 60 秒
 proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
 mention_thinking = "off"          # 被叫到时思考强度：off 最快
 daily_budget_usd = 1.0            # 单个服务器每天最多花多少美元，超了只回点名；超过 2 倍连点名也不回
@@ -86,7 +84,6 @@ file_round_max_chars = 40000      # 一轮里所有文件加起来最多 4 万�
 max_files_per_round = 3
 file_timeout_seconds = 30         # 解析一个文件最多等 30 秒
 turn_merge_seconds = 20           # 同一个人 20 秒内连发算一轮
-react_cost = 0.3                  # 只加表情消耗多少额度
 typing_chars_per_second = 3.0     # “打字”速度
 typing_min_seconds = 2.0
 typing_max_seconds = 10.0

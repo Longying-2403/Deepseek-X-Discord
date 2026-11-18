@@ -1366,8 +1366,8 @@ class EngineImages(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.calls[1]["thinking"], "low")  # 主动判断的思考强度
         self.assertEqual(transport.files_sent, [(CHANNEL, pictures.pictures[0].data, "image.png", 501, False)])
         st = engine.states[CHANNEL]
-        self.assertAlmostEqual(st.bucket.tokens, 2.0)  # 和说话一样扣 1 次额度
-        self.assertEqual(st.last_speak_at, clock())
+        self.assertEqual(st.last_speak_at, clock())  # 和说话一样算开了口
+        self.assertTrue(st.following)
         self.assertEqual(transport.typing_calls, 1)  # 只有发图前那一下
 
     async def test_proactive_image_not_available(self):
@@ -1495,7 +1495,7 @@ class EngineMemes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("- 表情包库：[新]撒花、熊猫头-无语", system_text(llm.calls[0]))  # 排好序，标记符号也中和
         self.assertEqual([(f[2], f[3], f[4]) for f in transport.files_sent], [("meme.png", 501, False)])
         st = engine.states[CHANNEL]
-        self.assertAlmostEqual(st.bucket.tokens, 2.0)
+        self.assertTrue(st.following)  # 发表情包也算开了口
         self.assertIn("发了表情包：熊猫头-无语", st.last_decision)
 
     async def test_label_written_back(self):

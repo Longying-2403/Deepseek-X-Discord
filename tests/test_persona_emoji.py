@@ -618,7 +618,7 @@ class StickersAndEmojis(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.stickers_sent, [(CHANNEL, "【新】撒花", 501, False)])  # 按真实名字发
         st = engine.states[CHANNEL]
         self.assertEqual(st.last_speak_at, clock())
-        self.assertAlmostEqual(st.bucket.tokens, 2.0)  # 和说话一样扣 1 次额度
+        self.assertTrue(st.following)  # 和说话一样算开了口
         self.assertIn("发了贴图", st.last_decision)
 
     async def test_sticker_reply_defaults_to_trigger_and_pings_once(self):
@@ -642,7 +642,7 @@ class StickersAndEmojis(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.stickers_sent, [])
         self.assertEqual(transport.reactions, [])
         self.assertEqual(st.send_failures, 0)  # 不当成“发不出消息”
-        self.assertAlmostEqual(st.bucket.tokens, 3.0)
+        self.assertFalse(st.following)  # 没发出东西：不算开了口
 
     async def test_unknown_sticker_still_answers_a_mention(self):
         engine, llm, transport, clock = make_engine(lambda call: ACTIONS({"type": "sticker", "name": "撒花"}))

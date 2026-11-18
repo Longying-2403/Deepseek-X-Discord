@@ -37,11 +37,10 @@ _SPEC_LIST = [
     # —— 管理员 ——
     Spec("enabled", "允许回应", bool, "admin", "关掉后这里的消息它完全不看：不回 @、不主动说话，也不会发给 DeepSeek"),
     Spec("proactive", "主动发言", bool, "admin", "没被点名时，是否自己判断要不要说话"),
-    Spec("refill_turns", "额度恢复轮数", int, "admin", "别人每说这么多轮，恢复 1 次主动发言额度", 1, 500),
-    Spec("quota_capacity", "额度上限", int, "admin", "主动发言额度最多攒几次", 1, 20),
-    Spec("min_speak_gap", "最短发言间隔秒", int, "admin", "两次发言之间至少隔多少秒", 0, 86400),
-    Spec("quiet_seconds", "冷场秒数", int, "admin", "多久没人说话、也没人在打字，算冷场", 5, 3600),
-    Spec("max_wait_seconds", "最长等待秒", int, "admin", "有新消息后最多等多久就判断一次（即使没冷场）", 30, 86400),
+    Spec("check_minutes", "几分钟看一眼", int, "admin", "开了主动发言时，平时隔多久看一眼这个频道有没有新的聊天（填 5 就是每 5～8 分钟，随机）", 1, 720),
+    Spec("follow", "聊起来就跟着", bool, "admin", "它开口了、或者有人叫了它之后，接着留意这里的聊天，有人说话就看要不要接；5 分钟没人说话、或者连着几次都没话说就回到平时"),
+    Spec("quiet_seconds", "冷场秒数", int, "admin", "平时看一眼时，等多久没人说话、也没人在打字才判断（别人正说着不插话）", 5, 3600),
+    Spec("max_wait_seconds", "最长等待秒", int, "admin", "平时看一眼时一直有人在说话：最多等多久也判断一次", 30, 86400),
     Spec("mention_rate_limit", "每人每分钟点名", int, "admin", "每个人每分钟最多能叫它几次", 1, 60),
     Spec("aliases", "别名", str, "admin", "消息里出现这些名字也算叫它，用逗号分隔，例如：DS,小D"),
     Spec("persona", "人设", str, "admin", "人设描述，留空用默认人设"),
@@ -53,7 +52,6 @@ _SPEC_LIST = [
     Spec("dm_memory", "私信记忆", bool, "admin", "私信挂在这个服务器的人：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时，带上不敏感的那些（只看全服务器这一级）"),
     Spec("cross_server", "跨服务器", bool, "admin", "和别的也开了这项的服务器之间，同一个人跟它聊过的会跟着他走：他最近几小时在那边跟它的对话、私信记忆里不敏感的那些（只看全服务器这一级）"),
     # —— 主人 ——
-    Spec("min_eval_interval", "最短判断间隔秒", int, "owner", "两次主动判断之间至少隔多少秒（主要管成本）", 10, 86400),
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
     Spec("mention_thinking", "点名回复思考", str, "owner", "被叫到时的思考强度", choices=("off", "low", "high")),
     Spec("daily_budget_usd", "每日预算美元", float, "owner", "单个服务器每天最多花多少美元，超了只回点名", 0, 1000),
@@ -76,9 +74,8 @@ OWNER_KEYS = [s.key for s in _SPEC_LIST if s.level == "owner"]
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "proactive": False,
-    "refill_turns": 15,
-    "quota_capacity": 3,
-    "min_speak_gap": 120,
+    "check_minutes": 5,
+    "follow": True,
     "quiet_seconds": 30,
     "max_wait_seconds": 180,
     "mention_rate_limit": 3,
@@ -91,7 +88,6 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "dm": True,
     "dm_memory": True,
     "cross_server": False,
-    "min_eval_interval": 60,
     "proactive_thinking": "low",
     "mention_thinking": "off",
     "daily_budget_usd": 1.0,
@@ -107,12 +103,17 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "desktop": True,
 }
 
-# 一键档位：只动“话量”相关的三个参数
-PRESETS: dict[str, dict[str, int]] = {
-    "安静": {"refill_turns": 30, "quota_capacity": 1, "min_speak_gap": 600},
-    "普通": {"refill_turns": 15, "quota_capacity": 3, "min_speak_gap": 120},
-    "话痨": {"refill_turns": 6, "quota_capacity": 4, "min_speak_gap": 30},
+# 一键档位：平时隔多久看一眼（下面的数到它的 1.5 倍之间，随机）、聊起来以后跟不跟着
+PRESETS: dict[str, dict[str, Any]] = {
+    "安静": {"check_minutes": 10, "follow": False},
+    "普通": {"check_minutes": 5, "follow": True},
+    "话痨": {"check_minutes": 3, "follow": True},
 }
+
+
+def check_range(minutes: int) -> tuple[int, int]:
+    """平时看一眼的间隔：最短、最长几分钟（10 → 10～15，5 → 5～8，3 → 3～5）。"""
+    return minutes, max(minutes + 1, math.ceil(minutes * 1.5))
 
 _TRUE = {"on", "true", "1", "yes", "y", "开", "是", "启用", "打开"}
 _FALSE = {"off", "false", "0", "no", "n", "关", "否", "停用", "关闭"}
@@ -218,7 +219,6 @@ class EngineConfig:
     max_files_per_round: int = 3
     file_timeout_seconds: float = 30.0  # 解析一个文件最多等多久
     turn_merge_seconds: float = 20.0  # 同一个人这么多秒内连发算一轮
-    react_cost: float = 0.3  # 只加表情时消耗多少额度
     typing_chars_per_second: float = 3.0
     typing_min_seconds: float = 2.0
     typing_max_seconds: float = 10.0
@@ -268,6 +268,9 @@ class AppConfig:
 # 以前有、现在不用了的配置项：旧的 config.toml 里还留着也不提醒（删掉也行）
 RETIRED = {
     "deepseek": {"search_base_url", "search_timeout_seconds", "search_max_uses"},  # 2.5.0 起联网搜索改用 Search 接口
+    # 2.10.0 起主动发言不按“额度”算了（平时隔几分钟看一眼、聊起来就跟着）
+    "defaults": {"refill_turns", "quota_capacity", "min_speak_gap", "min_eval_interval"},
+    "engine": {"react_cost"},
 }
 
 
@@ -319,6 +322,8 @@ def load_config(path: str | Path | None) -> AppConfig:
 
     defaults = dict(BUILTIN_DEFAULTS)
     for key, raw in (data.get("defaults") or {}).items():
+        if key in RETIRED["defaults"]:
+            continue
         if key not in SPECS:
             unknown.append(f"[defaults] {key}")
             continue

@@ -12,7 +12,7 @@ from dsbot.llm import build_payload, parse_completion
 from dsbot.models import ImageAttachment, Usage
 from dsbot.pricing import Pricing
 from dsbot.prompts import build_system_prompt
-from dsbot.quota import QuotaBucket, SlidingWindow, TurnTracker
+from dsbot.quota import SlidingWindow
 from dsbot.render import assistant_text, render_round
 from dsbot.settings import Settings
 from dsbot.store import Store
@@ -113,31 +113,6 @@ class PricingTest(unittest.TestCase):
 
 
 class Quota(unittest.TestCase):
-    def test_bucket(self):
-        b = QuotaBucket(3)
-        self.assertTrue(b.ready(3))
-        b.spend(1)
-        b.spend(1)
-        b.spend(1)
-        self.assertFalse(b.ready(3))
-        for _ in range(4):
-            b.on_turn(5, 3)
-        self.assertFalse(b.ready(3))
-        b.on_turn(5, 3)
-        self.assertTrue(b.ready(3))
-
-    def test_capacity_lowered(self):
-        b = QuotaBucket(5)
-        self.assertTrue(b.ready(1))
-        self.assertEqual(b.tokens, 1)
-
-    def test_turn_tracker(self):
-        t = TurnTracker()
-        self.assertTrue(t.is_new_turn(1, 0, 20))
-        self.assertFalse(t.is_new_turn(1, 10, 20))
-        self.assertTrue(t.is_new_turn(2, 11, 20))
-        self.assertTrue(t.is_new_turn(2, 40, 20))
-
     def test_sliding_window(self):
         w = SlidingWindow()
         self.assertTrue(w.allow("u", 2, 60, 0))
@@ -163,16 +138,19 @@ class ConfigAndSettings(unittest.TestCase):
             self.assertEqual(cfg.unknown, ["[bot] meme_dirr", "[defaults] foo", "[extra]"])
             self.assertIn("meme_dirr", unknown_note(cfg))
             self.assertIsNone(unknown_note(load_config(ROOT / "config.toml")))
-            path.write_text("[defaults]\nrefill_turns = 0\n", encoding="utf-8")
+            path.write_text("[defaults]\ncheck_minutes = 0\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_config(path)
+            # 2.10.0 起不用了的（主动发言的额度）：旧的 config.toml 里还留着也不提醒、不报错
+            path.write_text("[defaults]\nrefill_turns = 15\nquota_capacity = 3\nmin_speak_gap = 120\nmin_eval_interval = 60\n[engine]\nreact_cost = 0.3\n", encoding="utf-8")
+            self.assertEqual(load_config(path).unknown, [])
 
     def test_parse_value(self):
         self.assertIs(parse_value(SPECS["proactive"], "开"), True)
         self.assertIs(parse_value(SPECS["proactive"], "off"), False)
-        self.assertEqual(parse_value(SPECS["refill_turns"], "20"), 20)
+        self.assertEqual(parse_value(SPECS["check_minutes"], "20"), 20)
         self.assertEqual(parse_value(SPECS["proactive_thinking"], "LOW"), "low")
-        for spec, raw in (("refill_turns", "0"), ("refill_turns", "abc"), ("proactive_thinking", "max"), ("proactive", "也许")):
+        for spec, raw in (("check_minutes", "0"), ("check_minutes", "abc"), ("proactive_thinking", "max"), ("proactive", "也许")):
             with self.assertRaises(ValueError):
                 parse_value(SPECS[spec], raw)
 
@@ -183,22 +161,22 @@ class ConfigAndSettings(unittest.TestCase):
 
     def test_resolution_order(self):
         store = Store(":memory:")
-        s = Settings({"refill_turns": 15, **{k: None for k in SPECS if k != "refill_turns"}}, store)
-        self.assertEqual(s.get("refill_turns", guild_id=1, channel_id=9, parent_id=5), 15)
-        s.set("global", 0, "refill_turns", "14")
-        s.set("guild", 1, "refill_turns", "13")
-        self.assertEqual(s.get("refill_turns", guild_id=1, channel_id=9, parent_id=5), 13)
-        s.set("channel", 5, "refill_turns", "12")  # 帖子所在的频道
-        self.assertEqual(s.get("refill_turns", guild_id=1, channel_id=9, parent_id=5), 12)
-        s.set("channel", 9, "refill_turns", "11")
-        self.assertEqual(s.get("refill_turns", guild_id=1, channel_id=9, parent_id=5), 11)
-        self.assertEqual(s.source("refill_turns", guild_id=1, channel_id=9, parent_id=5), "本频道")
-        self.assertEqual(s.get("refill_turns", guild_id=2), 14)
-        s.unset("channel", 9, "refill_turns")
-        self.assertEqual(s.get("refill_turns", guild_id=1, channel_id=9, parent_id=5), 12)
+        s = Settings({"check_minutes": 15, **{k: None for k in SPECS if k != "check_minutes"}}, store)
+        self.assertEqual(s.get("check_minutes", guild_id=1, channel_id=9, parent_id=5), 15)
+        s.set("global", 0, "check_minutes", "14")
+        s.set("guild", 1, "check_minutes", "13")
+        self.assertEqual(s.get("check_minutes", guild_id=1, channel_id=9, parent_id=5), 13)
+        s.set("channel", 5, "check_minutes", "12")  # 帖子所在的频道
+        self.assertEqual(s.get("check_minutes", guild_id=1, channel_id=9, parent_id=5), 12)
+        s.set("channel", 9, "check_minutes", "11")
+        self.assertEqual(s.get("check_minutes", guild_id=1, channel_id=9, parent_id=5), 11)
+        self.assertEqual(s.source("check_minutes", guild_id=1, channel_id=9, parent_id=5), "本频道")
+        self.assertEqual(s.get("check_minutes", guild_id=2), 14)
+        s.unset("channel", 9, "check_minutes")
+        self.assertEqual(s.get("check_minutes", guild_id=1, channel_id=9, parent_id=5), 12)
         # 重新加载后还在
         s2 = Settings(s.defaults, store)
-        self.assertEqual(s2.get("refill_turns", guild_id=1, channel_id=9, parent_id=5), 12)
+        self.assertEqual(s2.get("check_minutes", guild_id=1, channel_id=9, parent_id=5), 12)
 
     def test_secrets(self):
         with self.assertRaises(SystemExit):
@@ -369,7 +347,7 @@ class ReviewRegressions(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse_value(SPECS["daily_budget_usd"], raw)
             with self.assertRaises(ValueError):
-                parse_value(SPECS["refill_turns"], raw)
+                parse_value(SPECS["check_minutes"], raw)
 
     def test_unicode_digit_ids_do_not_crash(self):
         actions, ok = parse_actions('{"actions": [{"type": "reply", "to": "#①", "messages": ["a"]}, {"type": "react", "to": "²", "emoji": "x"}]}')

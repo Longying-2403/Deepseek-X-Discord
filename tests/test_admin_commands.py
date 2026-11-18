@@ -299,8 +299,8 @@ class Settings(WithBot):
         said, _ = await self.run_command("设置", args=(self.key("aliases"), "DS,小D", scope("全服务器")))
         self.assertIn("全服务器：「别名」= DS,小D", said)
         self.assertIn(SPECS["aliases"].help, said)
-        said, _ = await self.run_command("设置", args=(self.key("quota_capacity"), "一百", None))
-        self.assertIn("没改成：「额度上限」要填整数", said)
+        said, _ = await self.run_command("设置", args=(self.key("check_minutes"), "一百", None))
+        self.assertIn("没改成：「几分钟看一眼」要填整数", said)
         said, _ = await self.run_command("设置", args=(self.key("dm"), "关", scope("本频道")))  # 私信只看全服务器这一级
         self.assertIn("全服务器：「私信」= 关", said)
         self.assertEqual(self.overrides("guild"), {"aliases": "DS,小D", "dm": False})
@@ -318,8 +318,8 @@ class Settings(WithBot):
         self.assertEqual(names("主动发言"), names("proactive"))  # 给的是中文名也认
         self.assertEqual(names("share_memory", "关"), [("关", "关")])
         self.assertEqual(names("images", "默"), [reset])
-        self.assertEqual(names("quota_capacity"), [reset])  # 数字：手打，只提醒能填“默认”
-        self.assertEqual(names("quota_capacity", "5"), [])  # 打的字和选项对不上：什么都不弹，发出去的是打的字
+        self.assertEqual(names("check_minutes"), [reset])  # 数字：手打，只提醒能填“默认”
+        self.assertEqual(names("check_minutes", "5"), [])  # 打的字和选项对不上：什么都不弹，发出去的是打的字
         self.assertEqual(names("mention_thinking"), [("off", "off"), ("low", "low"), ("high", "high"), reset])
         self.assertEqual(names(None), [])  # 还没选参数
         self.assertEqual(names("没有这个参数"), [])

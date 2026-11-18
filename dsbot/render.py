@@ -22,9 +22,11 @@ from .prompts import (
     GALLERY_FOOT,
     GALLERY_HEAD,
     HINT_MENTION,
+    HINT_FOLLOW,
     HINT_PASSIVE,
     HINT_PROACTIVE,
     MESSAGE_DELETED,
+    STALE_NOTE,
     MUSIC_IDLE,
     MUSIC_IDLE_AT,
     MUSIC_NOW,
@@ -402,12 +404,12 @@ def render_who(name: str, cards: Sequence[tuple[str, str] | tuple[str, str, str]
     return "\n".join(lines)
 
 
-def _hint(kind: str, targets: list[int]) -> str:
+def _hint(kind: str, targets: list[int], following: bool = False) -> str:
     if kind == "mention" and targets:
         return HINT_MENTION.format(targets="、".join(f"#{t}" for t in targets))
     if kind == "passive":
         return HINT_PASSIVE  # 连通的别的频道补进记录的
-    return HINT_PROACTIVE
+    return HINT_FOLLOW if following else HINT_PROACTIVE
 
 
 def render_round(
@@ -425,10 +427,13 @@ def render_round(
     context: list[str] | None = None,
     cards: list[str] | None = None,
     where: str | None = None,
+    fresh_since: float | None = None,
+    following: bool = False,
 ) -> str | list[dict[str, Any]]:
     """messages: [(编号, 消息)]；images: message_id -> [(data_uri, detail)]；docs: message_id -> 放在这条消息后面的文件块。
     context：放在消息前面的背景（比如这个人刚才在别的频道跟它聊过什么）。cards：在场的人的人设卡（render_cards 的结果）。
     where：连通的频道共用的记录里，这些消息是哪个频道的（写在开头的时间后面）。kind 是 passive：别的连通频道补进来的。
+    fresh_since：主动看一眼时，这个时间以前到的消息只当背景（在它们后面写一句）。following：聊起来以后跟着的那几轮。
 
     没有图片时返回字符串；有图片时返回内容块数组，图片紧跟在它所属的那条消息后面。
     """
@@ -439,11 +444,15 @@ def render_round(
         out.lines.append(f"（前面还有 {omitted} 条消息没显示）")
     images = images or {}
     docs = docs or {}
-    for sid, m in messages:
+    stale = [i for i, (_, m) in enumerate(messages) if fresh_since is not None and 0 < m.received_at < fresh_since]
+    last_stale = stale[-1] if stale and len(stale) < len(messages) else None  # 全是旧的就不写（没有“下面最近的”）
+    for i, (sid, m) in enumerate(messages):
         out.lines.append(render_line(m, sid, sid_by_msg, max_chars))
         out.images(images.get(m.message_id) or [], after=f"（以上是 #{sid} 的图片）")
         out.docs(docs.get(m.message_id) or [])
-    out.lines.append(_hint(kind, targets))
+        if i == last_stale:
+            out.lines.append(STALE_NOTE.format(minutes=max(1, round((now - fresh_since) / 60))))
+    out.lines.append(_hint(kind, targets, following))
     return out.finish()
 
 
@@ -881,6 +890,7 @@ def public_lines(content: Any) -> list[str]:
 
 
 _MSG_LINE = re.compile(r"^#\d+ ")
+_STALE_LINE = re.compile("^" + re.escape(STALE_NOTE).replace(re.escape("{minutes}"), r"\d+") + "$")  # “以上是 N 分钟以前说的”
 # 2.9.1 起带年份、星期（【2026-11-18 周三 13:07】）；更早存下的记录是【11-18 13:07】，两种都认
 _STAMP_LINE = re.compile(r"^【(?:\d{4}-)?\d{2}-\d{2}(?: 周[一二三四五六日])? \d{2}:\d{2}[^】]*】")
 _REPLY_REF = re.compile(r" ↪(#\d+|\(更早的消息\))")
@@ -1065,7 +1075,7 @@ def review_text(content: Any) -> list[str]:
             fenced = True
             out.append("（内容略）")
             continue
-        if not line.strip() or line in (HINT_PROACTIVE, HINT_PASSIVE) or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
+        if not line.strip() or line in (HINT_PROACTIVE, HINT_FOLLOW, HINT_PASSIVE) or _STALE_LINE.match(line) or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
             continue
         out.append(line)
     return out

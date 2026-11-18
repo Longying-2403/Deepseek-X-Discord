@@ -7,7 +7,7 @@
 一个用 DeepSeek V4.1 Flash（`deepseek-flash`）驱动、像普通群友一样待在 Discord 服务器里的 bot：
 
 - **被叫到就回**：有人 @ 它、回复它的消息、或叫它的别名，立刻回应。
-- **主动接话**（按频道开启）：等群里冷场一小会儿（或等太久），再让模型判断要不要说话；默认倾向沉默。
+- **主动接话**（按频道开启）：像人一样隔几分钟看一眼频道，有人在聊、又真有话想说才开口（默认倾向沉默）；开了口、或者被叫过之后会跟着这场聊天接话，没人说话了、或者插不上话了就回到隔几分钟看一眼。
 - **像真人**：口语化，长短看场合（随口接话一两句，接剧情时多写几句）；先显示“正在输入”，按字数等几秒再发；可以把一段话拆成两三条。不需要说什么的（道谢、晚安、哈哈哈）就只加个表情。别人聊得正起劲时也会委婉地插一句，被拒绝就道个歉，这个话题里不再插话。
 - **会 @ 人**：它话里写的 @某人、#频道 会变成真的 @ 和频道链接；有人叫它的时候，被 @ 的人才会真的收到提醒。
 - **跟着删改**：群友删掉的消息，它的聊天记录里也跟着删掉；编辑过的消息，它会以改过之后的内容为准。
@@ -15,7 +15,7 @@
 - **能陪着演**：群友拉它角色扮演时，照设定演、跟着剧情走，动作写在斜体括号里；戏散了自动回到平时的样子。
 - **记得每个人**：每个群友一张人设卡（他自己说的称呼、设定比如自称猫娘、喜好和雷点），聊天时自然地用上（默认每个服务器一张，也可以设成所有服务器共用一张，见“十一”）；还有一份这个服务器的长期记忆（约定、大事、长期的梗和剧情）。说“记住……”当场记下，平时它会趁聊天安静下来时自己整理。人设卡的原文只有本人能看、能改（`/ds-rp`），管理员也看不到；别人问起时它只会用自己的话大概说说，不会照念原文。
 - **dsowner 能在聊天里改人设**：`OWNER_ID` 本人叫它说“以后说话毒舌一点”，它会把人设改好并存进设置，说“改回去”还能撤销；别人这么说，它会让对方找 dsowner。
-- **话量可控**：主动发言额度按群里的消息量恢复，群越热闹恢复越快；档位和各项参数都能在 Discord 里调。
+- **话量可控**：多久看一眼、聊起来以后跟不跟着，都能在 Discord 里调（安静 / 普通 / 话痨三个档位一键套用）。
 - **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
@@ -37,7 +37,7 @@
 A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out in your server like any other member:
 
 - **Answers when called**: when someone @mentions it, replies to one of its messages, or uses one of its aliases, it responds right away.
-- **Joins in on its own** (per channel): it waits for a short lull in the chat (or until it has waited long enough), then lets the model decide whether to say anything; by default it leans toward staying quiet.
+- **Joins in on its own** (per channel): like a person, it glances at the channel every few minutes and only speaks when people are chatting and it really has something to say (by default it leans toward staying quiet); once it has spoken or been called it follows the conversation, and steps back to glancing when the chat dies down or it has nothing to add.
 - **Feels human**: casual, with the length fitting the moment (a sentence or two for a quick comeback, a few more when it's playing along with a story). It shows "typing…" first and waits a few seconds based on the length before sending; it can split a thought into two or three messages. When nothing needs saying (thanks, good night, lol), it just reacts with an emoji. When people are deep in a conversation it may tactfully chime in, and if it's told to stay out of it, it apologizes and keeps out of that topic.
 - **Mentions people**: an @name or #channel in what it writes becomes a real mention or channel link; people only actually get notified when someone called it.
 - **Keeps up with deletes and edits**: when someone deletes a message, it's deleted from its chat history too; for an edited message, it goes by the edited version.
@@ -45,7 +45,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Plays along**: when people pull it into a roleplay, it plays the part they set up and follows the story, with actions in italic parentheses; once the scene is over, it goes back to its usual self.
 - **Remembers everyone**: each member gets a profile card (what they've said about themselves: what to call them, a character they've given themselves such as being a catgirl, likes and pet peeves), and it uses it naturally in chat (one per server by default, or one shared across all servers, see section 十一); there's also a long-term memory for the server (agreements, big events, long-running jokes and storylines). Say "remember …" and it saves it on the spot; otherwise it reviews the chat on its own once things go quiet. Only the card's owner can see and edit its original text (`/ds-rp`), not even admins; if someone else asks, it may sum it up roughly in its own words, but never reads the card out word for word.
 - **dsowner can change its persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites its persona and saves it to the settings, and "change it back" undoes that; if anyone else asks, it tells them to ask dsowner.
-- **You control how much it talks**: its quota for speaking up on its own refills with the chat's message volume, so the livelier the chat, the faster it refills. Presets and every parameter can be adjusted from inside Discord.
+- **You control how much it talks**: how often it glances and whether it follows a conversation can be adjusted from inside Discord (three presets: quiet, normal, chatty).
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
@@ -118,7 +118,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.7.0 之间的版本更新到 2.7.1 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。2.8.1 的 `Dockerfile` 多了一步“构建时先把代码编译好”（启动、读文件都快一些）：没换成新的也照样能跑，只是慢一点。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.9.1 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.10.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -148,7 +148,7 @@ python -m dsbot
 5. 想让它记得别的频道聊过的事：`/dsadmin 设置 参数:记忆共享 值:开 范围:全服务器`（见下面“七、跨频道记忆”）
 6. 给它几张表情包：`/dsadmin 表情包 上传`（见下面“十、发表情包和图”）
 7. 告诉群友：用 `/ds-rp` 可以看、改自己的人设卡（原文只有自己看得到；别人问起时它可能用自己的话大概说说），叫它“记住……”也行（见下面“十一、人设卡和长期记忆”）；想听歌就先进语音频道，再叫它“放首晴天”或者用 `/ds-music 播放`（见下面“十三、点歌”）
-8. 随时看状态：`/dsadmin 状态`（额度、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/dsadmin 区域 查看` 看它在哪些地方会回应
+8. 随时看状态：`/dsadmin 状态`（主动发言的节奏、现在的时间和时区、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/dsadmin 区域 查看` 看它在哪些地方会回应
 
 不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
 
@@ -165,11 +165,11 @@ python -m dsbot
 | `/dsadmin 区域 允许`、`禁止`、`跟随上级` | 让它在这里回应 / 不回应 / 删掉这一层的设置（跟着上一级走）。不允许的地方它完全不看消息：不回 @、不主动说话，也不发给 DeepSeek |
 | `/dsadmin 区域 查看` | 列出这个服务器里允许和禁止的类别、频道，以及主动发言开着的地方 |
 | `/dsadmin 设置` | 调整单项参数：主动发言、记忆共享、发图、别名、话量等（见“五、参数说明”）。选好参数，「值」一栏会弹出能填的（开 / 关 / 默认）；值填“默认”恢复成上一级的设置 |
-| `/dsadmin 档位` | 一键套用：安静 / 普通 / 话痨 |
+| `/dsadmin 档位` | 一键套用主动发言的节奏：安静（每 10～15 分钟看一眼，说完不跟着聊）/ 普通（每 5～8 分钟，聊起来就跟着）/ 话痨（每 3～5 分钟，聊起来就跟着） |
 | `/dsadmin 人设` | 修改人设（弹出编辑框）。`OWNER_ID` 本人也能在聊天里让它改，见“十二” |
 | `/dsadmin 表情包 查看`、`上传`、`删除` | 这个服务器的表情包库：上传（附上图片、写个名字）；删除时「名字」一栏会列出这个服务器的表情包 |
 | `/dsadmin 长期记忆 查看`、`添加`、`删除`、`清空` | 这个服务器的长期记忆：查看（选了编号就只看那一条的全文）、添加、删除（选编号，列表里有内容）、清空（会再确认一次） |
-| `/dsadmin 状态` | 查看本频道的设置、额度、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数、点歌的状态 |
+| `/dsadmin 状态` | 查看本频道的设置、主动发言的节奏（多久看一眼、现在是不是正跟着聊）、现在的时间和时区、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数、点歌的状态 |
 | `/dsadmin 清空记忆` | 清空本频道的对话记录和摘要 |
 
 “区域”的允许、禁止、跟随上级，还有“设置”“档位”“人设”，都有一个“范围”选项：**本频道**（默认，人设除外）、**本类别**（Discord 里的“XX区”）、**全服务器**。
@@ -245,11 +245,10 @@ python -m dsbot
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | 主动发言 | 关 | 没被叫到时，自己判断要不要说话。在想让它主动聊天的频道里打开（它怎么判断见“十六”） |
-| 额度恢复轮数 | 15 | 别人每说这么多轮，恢复 1 次主动发言额度。长期看它的发言占比不超过约 1/15 |
-| 额度上限 | 3 | 最多攒几次。热聊时最多能连着插几句 |
-| 最短发言间隔秒 | 120 | 两次发言至少隔多久（被叫到的回复也算） |
-| 冷场秒数 | 30 | 多久没人说话、也没人在打字，算冷场 |
-| 最长等待秒 | 180 | 一直没冷场时，最多等多久也判断一次 |
+| 几分钟看一眼 | 5 | 开了主动发言时，平时隔多久看一眼这个频道：填的数到它的 1.5 倍之间，每次随机（5 就是 5～8 分钟）。看的时候最近 5 分钟没人说话就什么都不做 |
+| 聊起来就跟着 | 开 | 它开了口、或者有人叫了它之后，接着留意这场聊天：有人说话、停 5 秒就看要不要接（两次之间隔 30～45 秒）。5 分钟没人说话、或者连着 3 次都没话说，就回到平时 |
+| 冷场秒数 | 30 | 平时看一眼时，等多久没人说话、也没人在打字才判断（别人正说着不插话） |
+| 最长等待秒 | 180 | 平时看一眼时一直有人在说：最多等多久也判断一次 |
 | 每人每分钟点名 | 3 | 防止有人连续 @ 刷它 |
 | 别名 | 空 | 消息里出现这些名字也算叫它，逗号分隔，如 `DS,小D`。英文别名要整词出现（`DS` 不会匹配 words） |
 | 记忆共享 | 关 | 和别的也开了共享的频道互通记忆；私密频道要在那个频道里单独开才会分享出去（见“七”） |
@@ -266,7 +265,6 @@ python -m dsbot
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| 最短判断间隔秒 | 60 | 两次主动判断至少隔多久 |
 | 主动判断思考 | low | 主动判断时的思考强度：off / low / high |
 | 点名回复思考 | off | 被叫到时的思考强度；off 最快 |
 | 每日预算美元 | 1.0 | 单个服务器每天的上限。超了只回点名，超过 2 倍连点名也不回。请求超时、响应传到一半断了时拿不到用量（对方多半照样算了钱），按估算算进预算 |
@@ -280,8 +278,6 @@ python -m dsbot
 | 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
 | 桌面操作 | 开 | 你私信它时替你开关电脑上登记过的程序、打开网址（要填 `DESKTOP_TOKEN`、电脑上运行桌面小程序，见“十五”） |
 | 每人每日私信预算美元 | 0.2 | 每个人每天私信它最多花多少，也算进私信挂的那个服务器的预算；你自己私信不受限（见“十四”） |
-
-“一轮”的意思：同一个人 20 秒内连发的几条算一轮，免得分行打字刷额度。
 
 ---
 
@@ -410,7 +406,7 @@ python -m dsbot
   - 每次找图用掉 1 次 Tavily 额度，加上让它审核的那一次调用（通常不到 0.1 美分）。每个服务器每天最多 10 次（`/dsowner 设置 参数:每日找图上限` 改），同一个频道 10 分钟最多找一次（`[engine]` 的 `image_cooldown_seconds`）。
   - 发出去的是原图（作为附件上传，bot 要有“附加文件”权限）。只有透明底的图会先铺上白底、存成 JPEG 再发，和它审核时看到的一样，免得深色主题里冒出它没看到的东西。超过 8 MB 的图不下载。
   - 下载候选图时只连公网地址、不走代理；内网地址、奇怪的 IP 写法一律不连，跳转也会重新检查。
-- 主动聊天时也能发（和说话一样算一次发言、扣额度），被叫到时也会用；大多数时候它还是用文字。
+- 主动聊天时也能发（和说话一样算开了口），被叫到时也会用；大多数时候它还是用文字。
 - 关掉：`/dsadmin 设置 参数:发图 值:关`，表情包和上网找图都不发了（范围可以选本频道、本类别或全服务器）。
 - 部署后可以先试一下：`docker compose exec dsbot python -m dsbot --test-image "水豚"`，候选图会存到 `data/找图测试/`，看完可以删掉。
 
@@ -492,7 +488,7 @@ python -m dsbot
 - 所以**想让它彻底忘掉某条消息里的内容（比如不小心发了手机号），请删掉那条消息，不要只是编辑**：编辑较早的消息时，旧内容还留在它的记录里，只是会告诉它以新的为准。
 - 收不回来的：已经压进摘要的、已经写进人设卡或长期记忆的、它自己的回复里复述过的、已经带到别的频道去的近况。人设卡本人可以用 `/ds-rp` 改，长期记忆管理员可以用 `/dsadmin 长期记忆` 删。它自己发的消息被删掉，不影响它的记录。
 
-**服务器表情和贴图**：它知道这个服务器有哪些自定义表情和贴图（名单放在 system prompt 里，最多列 100 个表情、30 张贴图，在 `[engine]` 的 `emoji_list_limit`、`sticker_list_limit` 改）。回复里写 `:名字:` 会变成那个表情，加表情反应也能用服务器表情，也能单独发一张贴图（和说话一样算一次发言、扣额度）。只给某些身份组用、bot 又没有那个身份组的表情，以及因为加成等级掉了的表情和贴图，不会列出来。
+**服务器表情和贴图**：它知道这个服务器有哪些自定义表情和贴图（名单放在 system prompt 里，最多列 100 个表情、30 张贴图，在 `[engine]` 的 `emoji_list_limit`、`sticker_list_limit` 改）。回复里写 `:名字:` 会变成那个表情，加表情反应也能用服务器表情，也能单独发一张贴图（和说话一样算开了口）。只给某些身份组用、bot 又没有那个身份组的表情，以及因为加成等级掉了的表情和贴图，不会列出来。
 
 **聊天里改人设**：`OWNER_ID` 本人叫它（@、回复它或者叫别名都行）说“以后说话毒舌一点”之类，它会把改好的完整人设存进设置，和用 `/dsadmin 人设` 改一样，下一轮生效。改好后它会在你那条消息上加个 📝，看到它就是真的改了。
 - **改哪一份**：默认改这个频道现在用的那份。大多数时候就是全服务器的；如果这个频道（或所在频道、类别）单独设过人设，改的就是那一份。说“只改这个频道”就只改这里。明确说“全服务器都改”、而这里又单独设过人设时，它不会改，会请你用 `/dsadmin 人设` 去改全服务器的。
@@ -600,10 +596,13 @@ python -m dsbot
 ```
 消息进来 ──► 存进该频道的缓冲区
               │
-              ├─ 是在叫它？──► 立刻跑一轮（不耗额度，只受每人限速）
+              ├─ 是在叫它？──► 立刻跑一轮（只受每人限速）；回了话、这里又开了主动 ──► 开始“跟着”
               │
-              └─ 每 5 秒检查：开了主动 + 有新消息 + (冷场 或 等太久)
-                              + 有额度 + 间隔够 + 没超预算 ──► 跑一轮
+              └─ 开了主动（每 5 秒检查一次该不该跑一轮，没超预算才跑）：
+                   平时：隔几分钟看一眼。最近 5 分钟有人说话 + (冷场 或 等太久) ──► 跑一轮
+                         （更早攒下的消息只当背景；它开了口 ──► 开始“跟着”）
+                   跟着：有人说话、停了 5 秒、离上次判断过了 30～45 秒 ──► 跑一轮
+                         （5 分钟没人说话，或者连着 3 次没话说 ──► 回到平时）
 
 一轮 = 把这批新消息编号（#12、#13…）渲染成一条 user 消息（该读的文件、该打开的链接的内容跟在后面）
       → 连同全部历史发给 DeepSeek（JSON 输出）
@@ -635,7 +634,8 @@ python -m dsbot
 - 你 @ 的可能是它的身份组而不是它本人——这也能识别，但如果服务器把它的身份组隐藏了就看不到。
 
 **主动发言一直不说话**
-- `/dsadmin 状态` 看看：主动发言开了吗？额度是不是 0？上次判断的“想法”是什么？
+- `/dsadmin 状态` 看看：主动发言开了吗？“主动的节奏”那一行写的下一眼还有多久？上次判断的“想法”是什么？
+- 平时它隔几分钟才看一眼（普通档 5～8 分钟），而且只接最近 5 分钟里说的话：刚说完它没反应是正常的。
 - 模型默认倾向沉默。想让它更活跃：`/dsadmin 档位 档位:话痨`，或在人设里写“你很爱聊天”。
 
 **换了人设但说话风格没变**：历史里还有旧风格的发言，`/dsadmin 清空记忆` 后重新开始。
@@ -693,7 +693,7 @@ python -m unittest discover -s tests      # 核心逻辑测试，不需要装 di
 
 | 文件 | 作用 |
 |---|---|
-| `dsbot/engine.py` | 调度引擎：缓冲、时机判断、额度、预算、执行动作、压缩摘要、跨频道记忆 |
+| `dsbot/engine.py` | 调度引擎：缓冲、时机判断（平时隔几分钟看一眼、聊起来就跟着）、预算、执行动作、压缩摘要、跨频道记忆 |
 | `dsbot/render.py` / `prompts.py` | 聊天记录渲染格式、system prompt |
 | `dsbot/memory.py` | 人设卡、长期记忆、私信记忆的存储（人设卡一个 SQLite 文件，长期记忆和私信记忆一个），整理记忆的输出解析 |
 | `dsbot/groups.py` | 服务器组：连起来（并进组里）、退出（带走一份）、组散掉；中途断了再执行一次能接着做完 |
