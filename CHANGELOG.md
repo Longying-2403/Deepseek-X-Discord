@@ -2,6 +2,89 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.9.0] - 2026-11-18
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**改动（升级前先看）**
+
+- **管理员的命令改名叫 `/dsadmin`**（以前叫 `/ds`）。更新以后旧名字就没有了，Discord 的斜杠命令没有别名。`/ds-rp`、`/ds-dm`、`/ds-music`、`/dsowner` 没变。
+- **有几种做法的命令改成了子命令**，不再用“操作”一栏来选：`区域`（查看 / 允许 / 禁止 / 跟随上级）、`表情包`（查看 / 上传 / 删除）、`长期记忆`（查看 / 添加 / 删除 / 清空）。每个子命令只出现它用得上的栏，必填的栏 Discord 会拦着不让漏（以前在 iPad、手机上，“操作”后面选填的栏容易没发出来）。
+- **三个命令并掉了**：`区域列表` 并进 `区域 查看`；`主动`、`记忆共享` 并进 `设置`（参数里多了“主动发言”“记忆共享”，原来那两个命令会多说的提醒照样说）。
+- 对照着换：
+
+  | 以前（`/ds` 后面接） | 现在（`/dsadmin` 后面接） |
+  |---|---|
+  | `区域 操作:允许`（禁止、跟随上级一样） | `区域 允许`（`区域 禁止`、`区域 跟随上级`） |
+  | `区域列表` | `区域 查看` |
+  | `主动 开关:开` | `设置 参数:主动发言 值:开` |
+  | `记忆共享 操作:开`（关、跟随上级） | `设置 参数:记忆共享 值:开`（值填“关”；填“默认”就是跟随上级） |
+  | `表情包 操作:上传`（删除、列表） | `表情包 上传`（`表情包 删除`、`表情包 查看`） |
+  | `长期记忆 操作:查看`（添加、删除、清空） | `长期记忆 查看`（`长期记忆 添加`、`长期记忆 删除`、`长期记忆 清空`） |
+  | `档位`、`设置`、`人设`、`状态`、`清空记忆` | 后面的写法没变 |
+
+**改进**
+
+- `/dsadmin 设置` 的「值」一栏：选好参数以后会弹出能填的（开关类的是 开 / 关，还有“默认”），不用手打；数字、文字照样直接打。
+- `/dsadmin 表情包 删除` 的「名字」一栏会列出这个服务器自己的表情包，输入几个字能筛选。
+- 它自己说的话里提到的命令（比如“先用 `/dsadmin 区域 允许`”）、别人问它有什么指令时的回答，都换成了新的写法。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.9.0 启动中`，接着是 `已注册 4 个全局斜杠命令：/dsadmin、/ds-rp、/ds-music、/ds-dm`（顺序可能不一样）。数据库不变，以前用 `/ds` 改过的设置都还在。`config.toml` 只有注释里的命令名变了，不换也行。从 2.8.0 或更早的版本升上来，`Dockerfile` 也要换（见 2.8.1）。
+- **在“服务器设置 → 整合”里单独给 `/ds` 调过权限的服务器，要在 `/dsadmin` 上重新调一次**：`/dsadmin` 是一个新命令，默认只有有“管理服务器”权限的人看得到。
+- Discord 的命令列表有缓存：更新后没看到 `/dsadmin`，电脑版按 Ctrl+R（Mac 是 ⌘R）刷新，手机版把 App 完全关掉再打开。
+- 记得告诉各服务器的管理员命令换了名字。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `commands.py`：管理员的命令组叫 `dsadmin`，下面三个子命令组（`区域`、`表情包`、`长期记忆`，都用 `app_commands.Group(..., parent=admin)`）；`ADMIN_SET_KEYS` 只去掉 `enabled`、`persona`；`setting_notes`（改完主动发言、记忆共享以后多说的几句）、`value_choices`（「值」一栏弹出的选项）、`meme_name_choices`（删表情包时弹出的名字）。`AREA_ACTIONS`、`SHARE_ACTIONS`、`MEME_ACTIONS`、`MEMORY_ACTIONS` 没有了。
+- 新加有几种做法的命令时做成子命令，别再用“操作”一栏（贡献指南“代码风格”里加了这一条）。
+- 测试增加到 1408 个（新增 `tests/test_admin_commands.py`：命令在 Discord 那边的样子、每个子命令办的事，还会查代码和 README 里反引号括着的每一处 `/dsadmin …` 是不是真的有这个命令、这一栏、这个参数）。
+
+### English
+
+**Changed (read before upgrading)**
+
+- **The admin command is now `/dsadmin`** (it used to be `/ds`). The old name disappears as soon as you update; Discord slash commands have no aliases. `/ds-rp`, `/ds-dm`, `/ds-music` and `/dsowner` are unchanged.
+- **Commands with several actions are now subcommands** instead of an "操作" (action) field: `区域` (查看 / 允许 / 禁止 / 跟随上级), `表情包` (查看 / 上传 / 删除), `长期记忆` (查看 / 添加 / 删除 / 清空). Each subcommand only shows the fields it uses, and Discord enforces the required ones (on iPad and phones, optional fields after the action field were easy to lose).
+- **Three commands were merged**: `区域列表` is now `区域 查看`; `主动` and `记忆共享` are now parameters of `设置` ("主动发言" and "记忆共享"; the hints those two commands used to add are still shown).
+- Old to new:
+
+  | Before (after `/ds`) | Now (after `/dsadmin`) |
+  |---|---|
+  | `区域 操作:允许` (same for 禁止, 跟随上级) | `区域 允许` (`区域 禁止`, `区域 跟随上级`) |
+  | `区域列表` | `区域 查看` |
+  | `主动 开关:开` | `设置 参数:主动发言 值:开` |
+  | `记忆共享 操作:开` (关, 跟随上级) | `设置 参数:记忆共享 值:开` (use "关" to turn it off; "默认" means follow the level above) |
+  | `表情包 操作:上传` (删除, 列表) | `表情包 上传` (`表情包 删除`, `表情包 查看`) |
+  | `长期记忆 操作:查看` (添加, 删除, 清空) | `长期记忆 查看` (`长期记忆 添加`, `长期记忆 删除`, `长期记忆 清空`) |
+  | `档位`, `设置`, `人设`, `状态`, `清空记忆` | the rest is written as before |
+
+**Improved**
+
+- The 「值」 (value) field of `/dsadmin 设置` now suggests what can be entered once a parameter is chosen (开 / 关 for switches, plus "默认"); numbers and text are still typed directly.
+- The 「名字」 (name) field of `/dsadmin 表情包 删除` lists this server's own memes and filters as you type.
+- Commands mentioned in the bot's own messages (for example "先用 `/dsadmin 区域 允许`") and its answer when asked what commands it has use the new names.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.9.0 启动中`, followed by `已注册 4 个全局斜杠命令：/dsadmin、/ds-rp、/ds-music、/ds-dm` (the order may differ). The database is unchanged and settings made with `/ds` are kept. In `config.toml` only command names in comments changed, so replacing it is optional. Coming from 2.8.0 or earlier, replace the `Dockerfile` too (see 2.8.1).
+- **Servers that customised the permissions of `/ds` under Server Settings → Integrations need to do it again for `/dsadmin`**: `/dsadmin` is a new command and by default is visible only to members with "Manage Server".
+- Discord caches the command list: if `/dsadmin` doesn't show up after updating, press Ctrl+R (⌘R on Mac) on desktop, or fully close and reopen the app on mobile.
+- Remember to tell each server's admins that the command was renamed.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `commands.py`: the admin group is named `dsadmin` and has three subcommand groups (`区域`, `表情包`, `长期记忆`, each an `app_commands.Group(..., parent=admin)`); `ADMIN_SET_KEYS` now only leaves out `enabled` and `persona`; `setting_notes` (the extra lines after changing 主动发言 / 记忆共享), `value_choices` (suggestions for the value field) and `meme_name_choices` (names offered when deleting a meme). `AREA_ACTIONS`, `SHARE_ACTIONS`, `MEME_ACTIONS` and `MEMORY_ACTIONS` are gone.
+- New commands with several actions should be subcommands, not an action field (added to "代码风格" in the contributing guide).
+- There are now 1408 tests (new `tests/test_admin_commands.py`: how the commands look on Discord's side, what each subcommand does, and a check that every backticked `/dsadmin …` in the code and README names a real command, field and parameter).
+
 ## [2.8.2] - 2026-11-18
 
 > 英文版这次没有更新，还是 2.0.0。
