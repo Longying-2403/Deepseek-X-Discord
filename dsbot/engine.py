@@ -454,6 +454,31 @@ def _size(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB" if n >= 1024 * 1024 else f"{max(1, n // 1024)} KB"
 
 
+async def _together(*jobs: Awaitable[Any]) -> list[Any]:
+    """同时办这几件互不相干的事，结果照传进来的顺序给。有一件出错（或者这一轮被取消）：别的也停下，等它们收拾完，
+    再把那个错照原样抛出去（和一件一件办时一样是它本来的错，不是包了一层的）。"""
+    tasks = [asyncio.ensure_future(job) for job in jobs]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        await _settle(tasks)
+        raise
+
+
+async def _settle(tasks: Iterable[asyncio.Future[Any]]) -> None:
+    """提前开始办的那几件事用不着了（出错、关机）：还没办完的让它停下，等它收拾完（记账的那一笔别一直“进行中”）；
+    办完了没人要的，把它的错取走（免得日志里多一条“没人处理的异常”）。"""
+    tasks = list(tasks)
+    pending = [task for task in tasks if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    for task in tasks:
+        if not task.cancelled():
+            task.exception()
+
+
 def _block_without_images(block: DocBlock) -> DocBlock:
     if not block.result.images:
         return block
@@ -1820,7 +1845,6 @@ class Engine:
         numbered = self._number(st, conv, shown)
         shown_ids = {id(m) for m in shown}
         targets = [st.sid_by_msg[m.message_id] for m in triggers if id(m) in shown_ids]
-        images = await self._images(shown, triggers) if view.vision else {}
         budget = _Budget(
             self.ec.max_files_per_round,
             self.ec.file_round_max_chars,
@@ -1828,7 +1852,14 @@ class Engine:
             bool(view.vision),
             links=max(0, self.ec.max_links_per_round),
         )
-        docs, planned, opened = await self._round_content(st, view, kind, shown, triggers, budget, now)
+        # 看图（下载、缩小）和读文件、打开链接互不相干：同时办，不用等图都下完了才去读
+        images: dict[int, list[tuple[str, str]]] = {}
+        if view.vision:
+            images, (docs, planned, opened) = await _together(
+                self._images(shown, triggers), self._round_content(st, view, kind, shown, triggers, budget, now)
+            )
+        else:
+            docs, planned, opened = await self._round_content(st, view, kind, shown, triggers, budget, now)
         if st.generation != generation:
             # 读文件的时候记忆被清空了：这一轮作废，点名留着，马上用新的记忆重来
             st.mention_due = st.mention_due or any(m.trigger for m in batch)
@@ -2151,49 +2182,70 @@ class Engine:
 
         async def work() -> tuple[list[tuple[int, DocBlock, _Planned, FileText]], list[tuple[_LinkPlan, DocBlock, FileText]]]:
             nonlocal gallery
-            results = await self._read_planned(st, plan, budget)
-            opened = await self._read_links(st, view, link_plan, budget, now)
             # 点歌的动作照模型写的顺序一个一个办（“放 X，然后删掉”就是先放再删；看队列放在最后），同一轮共用一份记录
             # （music.RoundState）：编号按这一轮开始时的队列算，切歌只切那时正在放的那首，清空只清那时排着的。
             # 同一个人接连写的几个删歌一起删
             ordered = [a for a in tools if not _queue_view(a)] + [a for a in tools if _queue_view(a)]
-            music_round: Any = None
-            i = 0
-            while i < len(ordered):
-                action = ordered[i]
-                i += 1
+            # 上网搜、找图只是去拿资料，和读文件、打开链接互不相干：不等前面的办完，一开始就同时去办（以前是读完文件、打开完
+            # 链接才一个一个搜），结果还是放在模型写的那个位置。规矩照旧：
+            # - 每天的次数照模型写的顺序占（各自一开始就先记一笔占住名额，再去搜、去找）；
+            # - 排在点歌后面的不提前：按歌名找歌和搜索共用每天的搜索次数，谁先占要照原来的顺序（现在 _interpret 总把搜索、
+            #   找图排在点歌前面，这一条是保险）；
+            # - 打开链接用不用要花钱的读法，在它们开始之前就定好（和原来先读完再搜时一样）。搜不搜、找不找图，则是在这一轮
+            #   打开链接的钱记上之前定的：预算正好卡在这中间时，最多多搜这一轮的这几次
+            pay = not self._over_budget(st, view, now)[0]
+            early: dict[int, asyncio.Future[Any]] = {}
+            for index, action in enumerate(ordered):
                 if action.kind == "music":
-                    if music_round is None and self.music is not None:
-                        music_round = self.music.round_state(st.guild_id)
-                    also: list[Action] = []
-                    while (
-                        action.op == "remove"
-                        and i < len(ordered)
-                        and ordered[i].kind == "music"
-                        and ordered[i].op == "remove"
-                        and self._music_to(ordered[i], targets) == self._music_to(action, targets)
-                    ):
-                        also.append(ordered[i])
-                        i += 1
-                    sections.append(
-                        await self._music_section(st, view, action, numbered, targets, also=also, state=music_round)
-                    )
-                elif action.kind == "desktop":
-                    sections.append(await self._desktop_section(st, view, info, action, numbered, targets))
-                elif action.kind == "search":
-                    sections.append(await self._search_section(st, view, action, now))
-                elif action.kind == "recall":
-                    sections.append(self._recall_section(st, view, action, info))
-                elif action.kind == "persona":
-                    sections.append(await self._persona_section(st, action, numbered, targets, self._seen_cards(conv)))
-                elif action.kind == "who":
-                    sections.append(self._who_section(st, view, action, who_marks))
+                    break
+                if action.kind == "search":
+                    early[index] = asyncio.ensure_future(self._search_section(st, view, action, now))
                 elif action.kind == "image":
-                    note, found = await self._image_section(st, view, action, now)
-                    if found:
-                        gallery = Gallery(action.query or "", [(p.description, p.uri) for p in found])
-                    elif note:
-                        sections.append(note)
+                    early[index] = asyncio.ensure_future(self._image_section(st, view, action, now))
+            try:
+                results = await self._read_planned(st, plan, budget)
+                opened = await self._read_links(st, view, link_plan, budget, now, pay=pay)
+                music_round: Any = None
+                i = 0
+                while i < len(ordered):
+                    index, action = i, ordered[i]
+                    i += 1
+                    if action.kind == "music":
+                        if music_round is None and self.music is not None:
+                            music_round = self.music.round_state(st.guild_id)
+                        also: list[Action] = []
+                        while (
+                            action.op == "remove"
+                            and i < len(ordered)
+                            and ordered[i].kind == "music"
+                            and ordered[i].op == "remove"
+                            and self._music_to(ordered[i], targets) == self._music_to(action, targets)
+                        ):
+                            also.append(ordered[i])
+                            i += 1
+                        sections.append(
+                            await self._music_section(st, view, action, numbered, targets, also=also, state=music_round)
+                        )
+                    elif action.kind == "desktop":
+                        sections.append(await self._desktop_section(st, view, info, action, numbered, targets))
+                    elif action.kind == "search":
+                        sections.append(
+                            await early[index] if index in early else await self._search_section(st, view, action, now)
+                        )
+                    elif action.kind == "recall":
+                        sections.append(self._recall_section(st, view, action, info))
+                    elif action.kind == "persona":
+                        sections.append(await self._persona_section(st, action, numbered, targets, self._seen_cards(conv)))
+                    elif action.kind == "who":
+                        sections.append(self._who_section(st, view, action, who_marks))
+                    elif action.kind == "image":
+                        note, found = await early[index] if index in early else await self._image_section(st, view, action, now)
+                        if found:
+                            gallery = Gallery(action.query or "", [(p.description, p.uri) for p in found])
+                        elif note:
+                            sections.append(note)
+            finally:
+                await _settle(early.values())  # 平时到这里都办完、取走了；中途出错、关机时让还在搜的停下
             return results, opened
 
         if kind == "mention":
@@ -2646,14 +2698,16 @@ class Engine:
         return await self._read_links(st, view, plan, budget, now)
 
     async def _read_links(
-        self, st: ChannelState, view: View, plan: list[_LinkPlan], budget: _Budget, now: float
+        self, st: ChannelState, view: View, plan: list[_LinkPlan], budget: _Budget, now: float, *, pay: bool | None = None
     ) -> list[tuple[_LinkPlan, DocBlock, FileText]]:
         """打开这些链接（同时打开，最多几秒）。名额、字数、每日次数不够的，告诉模型没打开。
-        超了预算就不用要花钱的读法（DeepSeek 的 Fetch 按次收费），和超了预算不搜一样；推文、Tavily 不花钱，照常。"""
+        超了预算就不用要花钱的读法（DeepSeek 的 Fetch 按次收费），和超了预算不搜一样；推文、Tavily 不花钱，照常。
+        pay：调用方已经定好了用不用要花钱的读法（查资料那一步：同时在搜的那几次的钱不算在前面）；不填就现在看预算。"""
         if not plan:
             return []
         assert self.link_reader is not None
-        pay = not self._over_budget(st, view, now)[0]
+        if pay is None:
+            pay = not self._over_budget(st, view, now)[0]
         day = self.ledger.day(now)
         limit = max(0, int(self.ec.daily_link_limit))
         used = self.store.count_usage(day, guild_id=st.guild_id, kind="link")
@@ -5560,20 +5614,27 @@ class Engine:
         budget = self.ec.max_images_per_round
         trigger_ids = {m.message_id for m in triggers}
         # 先看群友发的图、GIF、贴图（优先最近的），名额还有剩才看链接预览的图
-        for previews in (False, True):
-            for m in reversed(shown):
-                for att in m.images:
-                    if (att.kind == "preview") != previews:
-                        continue
-                    if budget <= 0:
-                        return out
-                    wanted = m.message_id in trigger_ids  # 叫它的人发的图看清楚点，其他图看个大概
-                    side = self.ec.image_max_side if wanted else self.ec.low_detail_max_side
-                    uri = await self.image_loader(att, side)
-                    if uri is None:
-                        continue
-                    budget -= 1
-                    out.setdefault(m.message_id, []).append((uri, "auto" if wanted else "low"))
+        queue = [
+            (m, att, m.message_id in trigger_ids)  # 叫它的人发的图看清楚点，其他图看个大概
+            for previews in (False, True)
+            for m in reversed(shown)
+            for att in m.images
+            if (att.kind == "preview") == previews
+        ]
+        # 一批一批同时下载、缩小（以前是一张下完再下一张）：每批只拿“一张一张来也一定会下载”的那几张（还剩几个名额就拿几张），
+        # 有没下成的（不占名额）再拿后面的补。选中哪几张、先后顺序都和一张一张来一样，也不会多下载
+        start = 0
+        while budget > 0 and start < len(queue):
+            wave = queue[start : start + budget]
+            start += len(wave)
+            loaded = await _together(
+                *(self.image_loader(att, self.ec.image_max_side if wanted else self.ec.low_detail_max_side) for _, att, wanted in wave)
+            )
+            for (m, _, wanted), uri in zip(wave, loaded):
+                if uri is None:
+                    continue
+                budget -= 1
+                out.setdefault(m.message_id, []).append((uri, "auto" if wanted else "low"))
         return out
 
     async def _load_image(self, att: ImageAttachment, max_side: int) -> str | None:
