@@ -1,6 +1,6 @@
 # DeepSeek 群友 —— 配置文件
 # 这里是所有参数的默认值，改完重启生效。
-# 服务器管理员在 Discord 里用 /ds 改的设置会覆盖这里的默认值（存在数据库里）。
+# 服务器管理员在 Discord 里用 /dsadmin 改的设置会覆盖这里的默认值（存在数据库里）。
 
 [deepseek]
 base_url = "https://api.deepseek.com"
@@ -16,7 +16,7 @@ sync_commands_on_start = true     # 启动时注册斜杠命令
 log_level = "INFO"
 tick_seconds = 5                  # 多久检查一次各频道要不要主动判断
 meme_dir = "data/表情包"           # 通用表情包库：在 NAS 上自己建这个文件夹、放图，文件名就是名字（所有服务器都能用）
-server_meme_dir = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的（bot 自己管）
+server_meme_dir = "data/服务器表情包"  # 各服务器用 /dsadmin 表情包 上传的（bot 自己管）
 cards_database = "data/cards.sqlite3"     # 人设卡（和聊天记录分开存：备份、搬家只要复制这个文件）
 memory_database = "data/memory.sqlite3"   # 长期记忆
 shared_cards = false              # 人设卡：false = 每个服务器一张（连成服务器组的共用一张）；true = 每个人在所有服务器（和私信里）共用一张
@@ -36,9 +36,9 @@ search_per_1000 = 0.75            # DeepSeek 的 Search 接口：美元 / 千次
 fetch_per_1000 = 0.75             # DeepSeek 的 Fetch 接口：美元 / 千次（读到内容才算，不分峰谷）
 
 [defaults]
-# —— 管理员可以在 Discord 里用 /ds 改的 ——
-enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /ds 区域 允许 的地方回（白名单）
-proactive = false                 # 主动发言默认关，在需要的频道里用 /ds 主动 打开
+# —— 管理员可以在 Discord 里用 /dsadmin 改的 ——
+enabled = true                    # 允许回应的区域。改成 false = 所有服务器默认都不回，只在用 /dsadmin 区域 允许 的地方回（白名单）
+proactive = false                 # 主动发言默认关，在需要的频道里用 /dsadmin 设置 参数:主动发言 值:开 打开
 refill_turns = 15                 # 别人每说 15 轮，恢复 1 次主动发言额度
 quota_capacity = 3                # 额度最多攒 3 次（热聊时最多连插 3 句）
 min_speak_gap = 120               # 两次发言至少隔 120 秒
@@ -46,12 +46,12 @@ quiet_seconds = 30                # 30 秒没人说话、也没人在打字，�
 max_wait_seconds = 180            # 一直没冷场的话，最多等 180 秒也判断一次
 mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
 aliases = ""                      # 别名，逗号分隔；消息里出现也算叫它，例如 "DS,小D"
-persona = ""                      # 留空 = 默认人设；建议用 /ds 人设 在 Discord 里改
-share_memory = false              # 跨频道记忆，默认关；用 /ds 记忆共享 打开（私密频道要单独开才会分享出去）
+persona = ""                      # 留空 = 默认人设；建议用 /dsadmin 人设 在 Discord 里改
+share_memory = false              # 跨频道记忆，默认关；用 /dsadmin 设置 参数:记忆共享 值:开 打开（私密频道要单独开才会分享出去）
 images = true                     # 让它自己发表情包库里的图、上网找图（找到的图它会先看一遍再决定发不发）
 cards = true                      # 人设卡：记住群友自己说的称呼、设定、喜好（群友用 /ds-rp 管自己的卡，管理员看不到）
-long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/ds 长期记忆 管理）
-dm = true                         # 私信：服务器成员可以私信它（私信里用这个服务器的人设、记忆和人设卡；/ds 设置 私信 关掉）
+long_memory = true                # 长期记忆：记住这个服务器的约定、大事、长期的梗和剧情（/dsadmin 长期记忆 管理）
+dm = true                         # 私信：服务器成员可以私信它（私信里用这个服务器的人设、记忆和人设卡；/dsadmin 设置 参数:私信 值:关 关掉）
 dm_memory = true                  # 私信记忆：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时带上不敏感的那些
 cross_server = false              # 跨服务器：和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的跟着他走
 

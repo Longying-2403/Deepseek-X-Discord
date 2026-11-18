@@ -162,7 +162,7 @@ class ClearingALinkedChannel(unittest.IsolatedAsyncioTestCase):
                         ds.busy = 1
                         await say(engine, clock, 2, "@小D 在吗")  # 主服 #闲聊：DeepSeek 忙（503），那条没问成也没被拒
                         self.assertIn(RISKY, record(engine, sync))  # 对照：那条还在共用的记录里
-                        await engine.reset_linked(channel)  # 有人在这个频道 /ds 清空记忆（别的频道说的不动）
+                        await engine.reset_linked(channel)  # 有人在这个频道 /dsadmin 清空记忆（别的频道说的不动）
                         await say(engine, clock, 3, "@小D 大厅这边呢", channel=HALL, author=22, name="小蓝")  # 带着那条：被拒了
                         await say(engine, clock, 4, "@小D 还在吗", channel=HALL, author=22, name="小蓝")
                     self.assertEqual(ds.results[-3:], ["503", "拒了", "回了"])  # 只拒了一次：之后照常回

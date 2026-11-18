@@ -11,7 +11,7 @@
   变了就放开、照现在的重新等，不在没拿着锁的记录上动手（那里正在跑的一轮不会被作废，跨服务器的记录里不会留下只该原来那边看的
   人设卡）；一直在变就不办（TimeoutError，什么都不改）。没写进去的删改照现在用的那几份记录写进去（等的时候换成了新的状态的，
   要改的在新的那份上）。
-- /ds 清空记忆 等完以后，照那时的情况说这个频道还连通不连通。"""
+- /dsadmin 清空记忆 等完以后，照那时的情况说这个频道还连通不连通。"""
 
 import asyncio
 import json
@@ -109,7 +109,7 @@ class WithCommands(unittest.IsolatedAsyncioTestCase):
 
 
 def clear_command(engine):
-    """/ds 清空记忆（commands.reset_cmd，像 test_chatsync_lifecycle.ClearCommand 那样注册）：返回 run(频道) -> 它最后回的那句。"""
+    """/dsadmin 清空记忆（commands.reset_cmd，像 test_chatsync_lifecycle.ClearCommand 那样注册）：返回 run(频道) -> 它最后回的那句。"""
     from dsbot.commands import register_commands
 
     added = []
@@ -117,7 +117,7 @@ def clear_command(engine):
     bot = NS(store=engine.store, engine=engine, settings=engine.settings, cfg=engine.cfg, cards=None, memory=None, tree=tree)
     bot.secrets = NS(owner_id=OWNER, control_guild_ids=())
     register_commands(bot)
-    callback = next(c for c in added if c.name == "ds").get_command("清空记忆").callback
+    callback = next(c for c in added if c.name == "dsadmin").get_command("清空记忆").callback
 
     async def run(channel):
         response = Deferred()
@@ -273,9 +273,9 @@ class ClearingWhatTheGroupsReviewStillHolds(WithCommands):
 
     async def test_its_chunk_queued_in_the_groups_review_is_not_reviewed_after_it_clears(self):
         engine, llm, memory, gate, clear = await self.compacted_then_left("主服旧事")  # 正在问主服那段
-        await clear(LOBBY)  # 主服 #大厅 /ds 清空记忆：组的摘要整个删了（摘要里有别的服 #大厅的那部分也就不记了）
+        await clear(LOBBY)  # 主服 #大厅 /dsadmin 清空记忆：组的摘要整个删了（摘要里有别的服 #大厅的那部分也就不记了）
         self.assertEqual(engine.store.origin_syncs(HALL), [])  # 对照：看不出组里还留着它的聊天
-        await clear(HALL)  # 别的服 #大厅 /ds 清空记忆：直接清它自己那份
+        await clear(HALL)  # 别的服 #大厅 /dsadmin 清空记忆：直接清它自己那份
         gate.set()
         await engine.drain()
         llm.hook = None
@@ -288,7 +288,7 @@ class ClearingWhatTheGroupsReviewStillHolds(WithCommands):
         await clear(LOBBY)  # 那批交给组的新的那份接着整理
         await spin()
         self.assertEqual(times_reviewed(llm, "我养了一只猫"), 2)  # 对照：新的那份又在问小红那段
-        await clear(HALL)  # 问着的时候别的服 #大厅 /ds 清空记忆
+        await clear(HALL)  # 问着的时候别的服 #大厅 /dsadmin 清空记忆
         gate.set()
         await engine.drain()
         llm.hook = None
@@ -312,7 +312,7 @@ class GuardsRecheckAfterWaiting(unittest.IsolatedAsyncioTestCase):
             engine.handle_delete(OTHER, HALL, [1])  # 清空刚做完（组的记录换成了新的状态），断开还没接着做：小红删了那条
 
         engine.reset_channel = reset_then_delete
-        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /ds 清空记忆：等组的锁
+        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /dsadmin 清空记忆：等组的锁
         await spin()
         unlinking = asyncio.create_task(unlink_like_the_command(engine, HALL))  # 断开别的服 #大厅：也等，排在清空后面
         await spin()
@@ -390,7 +390,7 @@ class GuardsRecheckAfterWaiting(unittest.IsolatedAsyncioTestCase):
         hold(llm, gates)
         await engine.handle_message(msg(10, "@小D 闲聊这边很忙", mentions_bot=True))  # 组里这一轮在等模型回话
         await spin()
-        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /ds 清空记忆：等组里那一轮
+        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /dsadmin 清空记忆：等组里那一轮
         await spin()
         group = await link_like_the_command(engine, LOBBY, SQUARE)  # 这时候 bot 主人把主服 #大厅和别的服 #广场连通了
         await engine.handle_message(msg(11, "@小D 广场有人吗", channel_id=SQUARE, guild_id=OTHER, author=22, name="小蓝", mentions_bot=True))
@@ -415,7 +415,7 @@ class GuardsRecheckAfterWaiting(unittest.IsolatedAsyncioTestCase):
         hold(llm, gates)
         await engine.handle_message(msg(10, "@小D 闲聊这边很忙", mentions_bot=True))
         await spin()
-        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /ds 清空记忆：等组里那一轮
+        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /dsadmin 清空记忆：等组里那一轮
         await spin()
         # 这时候 bot 主人把主服 #大厅连进别的服那个组，小雨在那边说了一句，又断开了：那个组还在，留着她说的
         await link_like_the_command(engine, LOBBY, SQUARE)
@@ -449,7 +449,7 @@ class ClearCommandReply(WithCommands):
         await spin()
         unlinking = asyncio.create_task(unlink_like_the_command(engine, LOBBY))  # bot 主人让主服 #大厅断开：等那一轮
         await spin()
-        clearing = asyncio.create_task(clear(LOBBY))  # 主服 #大厅 /ds 清空记忆（这时候还连通着）：排在断开后面
+        clearing = asyncio.create_task(clear(LOBBY))  # 主服 #大厅 /dsadmin 清空记忆（这时候还连通着）：排在断开后面
         await spin()
         gate.set()
         await unlinking

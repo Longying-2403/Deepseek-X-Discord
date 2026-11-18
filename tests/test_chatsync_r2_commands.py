@@ -1,4 +1,4 @@
-"""2.8.0 连通的频道，第二轮评审修掉的问题：清空记忆、断开、/ds 状态，还有没连通时服务器连组、退组附过的人设卡。
+"""2.8.0 连通的频道，第二轮评审修掉的问题：清空记忆、断开、/dsadmin 状态，还有没连通时服务器连组、退组附过的人设卡。
 
 - 没连通的频道（默认模式，和 2.7.1 一样）：服务器连组、退组时人设卡挪进组里、复制回来，版本号不变，对话里附过的那份照样算，
   不再附一遍；连组以后他没有卡了，告诉它之前附过的那份删掉了。
@@ -6,7 +6,7 @@
   服务器（原话已经压掉了，不整理就没了）；别的频道还没附上的“改成了什么”照样附上。
 - 断开时等着的那会儿组里又连进来频道：照样断开，跟 bot 主人照实说办成了，说明里也列上新连进来的。
 - 它自己那份在连通期间被旧版本写过（断开时拿不回连通期间的聊天）：确认框、频道里的说明、结果都照实说，不许诺拿回去。
-- /ds 状态：和别的服务器的频道连通时，“能翻记录的频道”一个也不列（这里翻不了）。"""
+- /dsadmin 状态：和别的服务器的频道连通时，“能翻记录的频道”一个也不列（这里翻不了）。"""
 
 import asyncio
 import unittest
@@ -200,7 +200,7 @@ class UnlinkCommand(unittest.IsolatedAsyncioTestCase):
 
 
 class StatusCommand(unittest.IsolatedAsyncioTestCase):
-    """/ds 状态（借 test_chatsync.OwnerCommand 的假 Discord）。"""
+    """/dsadmin 状态（借 test_chatsync.OwnerCommand 的假 Discord）。"""
 
     setUp = test_chatsync.OwnerCommand.setUp
     interaction = test_chatsync.OwnerCommand.interaction

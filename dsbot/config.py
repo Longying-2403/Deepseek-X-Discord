@@ -16,7 +16,7 @@ from .pricing import Pricing
 
 # ---------------------------------------------------------------------------
 # 可调参数的定义
-# level = "admin"：服务器管理员可以用 /ds 改（服务器默认或单个频道）
+# level = "admin"：服务器管理员可以用 /dsadmin 改（服务器默认或单个频道）
 # level = "owner"：只有你能改（config.toml 或 CONTROL_GUILD_ID 里那几个服务器的 /dsowner）
 # ---------------------------------------------------------------------------
 
@@ -48,7 +48,7 @@ _SPEC_LIST = [
     Spec("share_memory", "记忆共享", bool, "admin", "和别的也开了共享的频道互通记忆（私密频道要单独开才会分享出去）"),
     Spec("images", "发图", bool, "admin", "让它自己发表情包库里的图，或者上网找图（找到的图它会先看一遍再决定发不发）"),
     Spec("cards", "人设卡", bool, "admin", "记住群友自己说的称呼、设定、喜好，聊天时用上（群友用 /ds-rp 管自己的卡，管理员看不到）"),
-    Spec("long_memory", "长期记忆", bool, "admin", "记住这个服务器的约定、大事、长期的梗和剧情（用 /ds 长期记忆 管理）"),
+    Spec("long_memory", "长期记忆", bool, "admin", "记住这个服务器的约定、大事、长期的梗和剧情（用 /dsadmin 长期记忆 管理）"),
     Spec("dm", "私信", bool, "admin", "让服务器成员私信它：私信里用这个服务器的人设、长期记忆和他的人设卡；私信里聊的可能记进来，也可能在他叫它的频道里被提起（只看全服务器这一级）"),
     Spec("dm_memory", "私信记忆", bool, "admin", "私信挂在这个服务器的人：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时，带上不敏感的那些（只看全服务器这一级）"),
     Spec("cross_server", "跨服务器", bool, "admin", "和别的也开了这项的服务器之间，同一个人跟它聊过的会跟着他走：他最近几小时在那边跟它的对话、私信记忆里不敏感的那些（只看全服务器这一级）"),
@@ -193,7 +193,7 @@ class BotConfig:
     log_level: str = "INFO"
     tick_seconds: float = 5.0
     meme_dir: str = "data/表情包"  # 通用表情包库：自己在 NAS 上建这个文件夹放图
-    server_meme_dir: str = "data/服务器表情包"  # 各服务器用 /ds 表情包 上传的
+    server_meme_dir: str = "data/服务器表情包"  # 各服务器用 /dsadmin 表情包 上传的
     cards_database: str = "data/cards.sqlite3"  # 人设卡（和聊天记录分开存，方便备份、搬家）
     memory_database: str = "data/memory.sqlite3"  # 长期记忆
     # true = 每个人在所有服务器（和私信里）共用一张人设卡；false = 每个服务器一张（连成服务器组的几个服务器共用一张）。

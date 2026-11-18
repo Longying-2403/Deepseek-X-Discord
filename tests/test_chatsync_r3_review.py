@@ -162,7 +162,7 @@ class ClearAfterTheQuietReviewWasKicked(unittest.IsolatedAsyncioTestCase):
         hold_reviews(llm, "别的服的话", gate)  # 问到别的服那段时模型回得慢
         clock.advance(700)
         await engine.tick()  # 到时间了：安静时整理排上了（还没开始跑）
-        # 同一轮里主服 /ds 清空记忆先做完了（锁都空着时 reset_linked 中间不停）：组的记录换成了新的
+        # 同一轮里主服 /dsadmin 清空记忆先做完了（锁都空着时 reset_linked 中间不停）：组的记录换成了新的
         engine.reset_channel(CHANNEL)
         await spin()
         await engine.tick()  # 新的那份记录也到时间了

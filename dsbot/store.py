@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS persona_history (
     old TEXT,                     -- 改之前这一级单独设置的人设；NULL = 没单独设置（沿用上一级）
     new TEXT,                     -- 改之后；NULL = 不再单独设置
     by_user INTEGER NOT NULL,     -- 谁改的（用户 ID）
-    via TEXT NOT NULL,            -- chat（聊天里让它改）/ command（/ds 人设）/ undo（撤销）
+    via TEXT NOT NULL,            -- chat（聊天里让它改）/ command（/dsadmin 人设）/ undo（撤销）
     request TEXT,                 -- 当时那条要求，方便以后查
     reverted INTEGER NOT NULL DEFAULT 0  -- 这次修改已经被撤销了
 );

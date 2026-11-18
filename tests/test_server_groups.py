@@ -1681,16 +1681,16 @@ class OwnerCommand(unittest.IsolatedAsyncioTestCase):
         do_link(bot, GUILD, OTHER)
         self.assertEqual(memory_entry_text(bot, GUILD, 1), "(1) 游戏服的事" + "很长的约定" * 38 + "（「游戏服」记的）")
         self.assertEqual(memory_entry_text(bot, GUILD, 2), "(2) 主服的事")
-        # /ds 长期记忆 操作:查看 选了编号：只看这一条
+        # /dsadmin 长期记忆 查看 选了编号：只看这一条
         from dsbot.commands import register_commands
 
         added = []
         bot.tree = NS(add_command=lambda c, **kw: added.append(c), command=lambda **kw: (lambda f: f), error=lambda f: f)
         bot.secrets = NS(owner_id=OWNER, control_guild_ids=())
         register_commands(bot)
-        command = next(c for c in added if c.name == "ds").get_command("长期记忆").callback
+        command = next(c for c in added if c.name == "dsadmin").get_command("长期记忆").get_command("查看").callback
         ask = NS(guild_id=GUILD, user=NS(id=OWNER), response=FakeResponse(), followup=NS(send=None))
-        await command(ask, NS(value="list", name="查看"), None, 2)
+        await command(ask, 2)
         self.assertEqual(ask.response.sent[-1][0], "(2) 主服的事")
 
     async def test_asks_before_doing_anything(self):

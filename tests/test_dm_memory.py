@@ -498,7 +498,7 @@ class ReviewFixes(unittest.IsolatedAsyncioTestCase):
         text = all_text(chats(llm)[-1])
         self.assertIn("学吉他", text)
         self.assertNotIn("分手", text)
-        # 服务器关掉私信记忆（/ds 设置）：附过的也撤回
+        # 服务器关掉私信记忆（/dsadmin 设置）：附过的也撤回
         engine.settings.set("guild", GUILD, "dm_memory", False)
         settings_changed(bot, "dm_memory", "guild", GUILD)
         self.assertNotIn("学吉他", history(engine))

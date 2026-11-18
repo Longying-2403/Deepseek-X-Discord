@@ -99,7 +99,7 @@ class UnvettedAcrossARestart(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(engine.store.load_unvetted(HALL), NOTHING)
 
     async def test_a_clear_after_a_restart_keeps_what_the_other_channels_left_unvetted(self):
-        for how in ("/ds 清空记忆（等正在回的说完）", "直接清空（reset_channel）"):
+        for how in ("/dsadmin 清空记忆（等正在回的说完）", "直接清空（reset_channel）"):
             with self.subTest(how):
                 ds = DeepSeek()
                 engine, llm, transport, clock = world(ds)

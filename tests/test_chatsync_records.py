@@ -191,7 +191,7 @@ class AfterLeaving(unittest.IsolatedAsyncioTestCase):
         await say(engine, clock, 3, "@小D 主服大厅说的", channel=LOBBY, author=12, name="小雨")
         disconnect(engine, HALL)
         self.assertEqual(engine.store.origin_syncs(HALL), [sync])  # 组的记录里还留着它说过的
-        engine.reset_channel(HALL)  # 断开以后 /ds 清空记忆
+        engine.reset_channel(HALL)  # 断开以后 /dsadmin 清空记忆
         group = engine.store.load_conversation(sync, 0)
         self.assertEqual(said(group), ["#1 阿明：@小D 主服闲聊说的 〔@你〕", "#3 小雨：@小D 主服大厅说的 〔@你〕"])  # 还在组里的说的不动
         self.assertEqual({t.origin for t in group.turns}, {CHANNEL, LOBBY})

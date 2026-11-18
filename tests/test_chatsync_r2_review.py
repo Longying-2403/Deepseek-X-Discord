@@ -190,7 +190,7 @@ class ClearAndDissolve(unittest.IsolatedAsyncioTestCase):
 
     async def test_clearing_one_channel_still_reviews_the_others_compacted_chat(self):
         engine, memory, gate = await self.review_in_flight()
-        await engine.reset_linked(CHANNEL)  # 主服 /ds 清空记忆：只清它那部分
+        await engine.reset_linked(CHANNEL)  # 主服 /dsadmin 清空记忆：只清它那部分
         gate.set()
         await engine.drain()
         self.assertEqual([m.text for m in memory.entries(OTHER)], ["小红的猫叫咪咪"])  # 别的服压掉的接着整理

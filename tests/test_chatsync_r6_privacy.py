@@ -168,7 +168,7 @@ class EditsWhereItNoLongerReads(unittest.IsolatedAsyncioTestCase):
                 if how == "变成私密的":
                     turn_private(transport)  # 连通暂停
                 else:
-                    engine.settings.set("channel", HALL, "enabled", False)  # 别的服的管理员在 #大厅关了“允许回应”（/ds 区域）
+                    engine.settings.set("channel", HALL, "enabled", False)  # 别的服的管理员在 #大厅关了“允许回应”（/dsadmin 区域）
                 engine.handle_edit(edited_in_hall(), edited=True)
                 await engine.drain()
                 whole = record(engine, sync)
@@ -189,7 +189,7 @@ class EditsWhereItNoLongerReads(unittest.IsolatedAsyncioTestCase):
         turn_private(transport)
         engine.handle_edit(edited_in_hall(), edited=True)  # 变成私密的以后又改了
         await engine.drain()
-        disconnect(engine, HALL)  # bot 主人照 /ds 状态 说的把暂停的频道断开（以前：还没附上的那句这时直接写进组里的记录）
+        disconnect(engine, HALL)  # bot 主人照 /dsadmin 状态 说的把暂停的频道断开（以前：还没附上的那句这时直接写进组里的记录）
         whole = record(engine, sync)
         self.assertNotIn(SECRET, whole)  # 私密频道里改的没写进组里的记录
         self.assertIn(f"#1 小红：{MESSAGE_DELETED}", whole)  # 那一行当成删了：还公开时等着的那句也不再写进去
@@ -305,7 +305,7 @@ class ClearingAfterLeaving(unittest.IsolatedAsyncioTestCase):
         engine, llm, clock, sync = await self.joined_after_a_compaction()
         disconnect(engine, LOBBY)  # 组还在（主服 #闲聊 + 别的服 #大厅），它说的那句还留在组里
         self.assertEqual(engine.store.origin_syncs(LOBBY), [sync])
-        await engine.reset_linked(LOBBY)  # 主服 #大厅 /ds 清空记忆（断开时收到的说明就是这么教的）
+        await engine.reset_linked(LOBBY)  # 主服 #大厅 /dsadmin 清空记忆（断开时收到的说明就是这么教的）
         self.assertNotIn("我只是路过", record(engine, sync))  # 对照：它那部分删掉了
         self.assertEqual(engine.store.load_conversation(sync, 0).summary, SUMMARY)  # 它说的没压进摘要：别的频道的摘要照旧
         await say(engine, clock, 5, "@小D 我们以前聊过什么", channel=HALL, author=21, name="小红")

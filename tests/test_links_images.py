@@ -968,9 +968,9 @@ class ConfigDefaults(unittest.TestCase):
         self.assertEqual((cfg.defaults["images"], cfg.defaults["links"], cfg.defaults["daily_image_limit"]), (True, True, 10))
 
     def test_slash_command_choices_fit(self):
-        # /ds 设置 的参数是固定选单：Discord 一个选项最多 25 个选择，超了所有命令都注册不上
+        # /dsadmin 设置 的参数是固定选单：Discord 一个选项最多 25 个选择，超了所有命令都注册不上
         # （/dsowner 设置 的参数多，改成了输入时提示，见 test_memory 的 OwnerKeys）
-        self.assertLessEqual(len([k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]), 25)
+        self.assertLessEqual(len([k for k in ADMIN_KEYS if k not in ("enabled", "persona")]), 25)  # 2.9.0：主动发言、记忆共享也在里面
         self.assertIn("images", ADMIN_KEYS)
         self.assertTrue({"links", "daily_image_limit"} <= set(OWNER_KEYS))
 

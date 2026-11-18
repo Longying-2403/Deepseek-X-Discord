@@ -57,7 +57,7 @@ class ClearingWithoutAChannelState(unittest.IsolatedAsyncioTestCase):
         engine.states.clear()
         engine.convs.clear()  # 重启了：内存里什么都没有，之后 #大厅 一直没人说话（暂停着的频道也是这样）
         self.assertEqual(disconnect(engine, CHANNEL), ([CHANNEL, HALL], []))  # 组散了：#大厅拿回它那部分，载入了内存
-        # 别的服 #大厅 /ds 清空记忆：它已经不在组里，也没有组还留着它说过的话，直接清它自己那份
+        # 别的服 #大厅 /dsadmin 清空记忆：它已经不在组里，也没有组还留着它说过的话，直接清它自己那份
         self.assertFalse(engine.store.origin_syncs(HALL))
         engine.reset_channel(HALL)
         self.assertEqual(engine.store.load_conversation(HALL, OTHER).turns, [])  # 对照：库里清空了
@@ -79,7 +79,7 @@ class GuardsAfterARecordIsReplaced(unittest.IsolatedAsyncioTestCase):
         # 别的服 #大厅（还没连通）也在回话：它自己那份的锁被占着
         await engine.handle_message(msg(2, "@小D 别的服在忙", channel_id=HALL, guild_id=OTHER, author=21, name="小红", mentions_bot=True))
         await spin()
-        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /ds 清空记忆：等组的锁
+        clearing = asyncio.create_task(engine.reset_linked(LOBBY))  # 主服 #大厅 /dsadmin 清空记忆：等组的锁
         await spin()
         linking = asyncio.create_task(link_like_the_command(engine, HALL, CHANNEL))  # 把别的服 #大厅连进来：排在清空后面
         await spin()
@@ -110,7 +110,7 @@ class GuardsAfterARecordIsReplaced(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(2, "@小D 第二轮", channel_id=HALL, guild_id=OTHER, author=21, name="小红", mentions_bot=True))
         unlinking = asyncio.create_task(unlink_like_the_command(engine, HALL))  # 断开别的服 #大厅：等组的锁
         await spin()
-        clearing = asyncio.create_task(engine.reset_linked(HALL))  # 别的服 #大厅 /ds 清空记忆：也等组的锁，排在断开后面
+        clearing = asyncio.create_task(engine.reset_linked(HALL))  # 别的服 #大厅 /dsadmin 清空记忆：也等组的锁，排在断开后面
         await spin()
         gates["第一轮"].set()  # 先断开（#大厅自己那份换成新的状态），#大厅叫它的那一轮接着在新的那份上跑
         await spin()
@@ -142,13 +142,13 @@ class ReviewsLeftByADissolvedGroup(unittest.IsolatedAsyncioTestCase):
         await spin()
         self.assertEqual(disconnect(engine, CHANNEL), ([CHANNEL, HALL], []))  # 组散了
         await spin()
-        # 两边都不在组里了，也没有组还留着它们说过的话（散组时删了）：/ds 清空记忆直接清它自己那份
+        # 两边都不在组里了，也没有组还留着它们说过的话（散组时删了）：/dsadmin 清空记忆直接清它自己那份
         self.assertFalse(engine.store.origin_syncs(HALL) or engine.store.origin_syncs(CHANNEL))
         return engine, llm, memory, gate
 
     async def test_clearing_a_channel_after_its_group_dissolved_drops_its_part_of_the_pending_review(self):
         engine, llm, memory, gate = await self.dissolved_while_asking()
-        engine.reset_channel(HALL)  # 别的服 #大厅 /ds 清空记忆
+        engine.reset_channel(HALL)  # 别的服 #大厅 /dsadmin 清空记忆
         gate.set()
         await engine.drain()
         llm.hook = None
@@ -159,7 +159,7 @@ class ReviewsLeftByADissolvedGroup(unittest.IsolatedAsyncioTestCase):
 
     async def test_clearing_the_other_channel_afterwards_drops_its_part_too(self):
         engine, llm, memory, gate = await self.dissolved_while_asking()
-        engine.reset_channel(HALL)  # 别的服 #大厅 /ds 清空记忆：主服那段交给新的一份接着整理
+        engine.reset_channel(HALL)  # 别的服 #大厅 /dsadmin 清空记忆：主服那段交给新的一份接着整理
         await spin()  # 新的那份又在问主服那段
         engine.reset_channel(CHANNEL)  # 主服 #闲聊也清空了记忆
         gate.set()
@@ -224,7 +224,7 @@ class OwnReviewWhenLeaving(unittest.IsolatedAsyncioTestCase):
         await spin()
         await compact(engine, CHANNEL)  # 又压缩了一次：压掉的只有别的服的闲聊，整理进度记过了主服 #大厅 那段
         self.assertIn("别的服闲聊二", summarized(llm))
-        await engine.reset_linked(CHANNEL)  # 主服 #闲聊 /ds 清空记忆：那批交给新的那份接着整理（#闲聊 那段不整理了）
+        await engine.reset_linked(CHANNEL)  # 主服 #闲聊 /dsadmin 清空记忆：那批交给新的那份接着整理（#闲聊 那段不整理了）
         gate.set()
         await engine.drain()
         llm.hook = None

@@ -1,13 +1,15 @@
 """斜杠命令。
 
-/ds …       服务器管理员（默认需要“管理服务器”权限）：区域、话量、档位、人设、表情包库、长期记忆、状态。
+/dsadmin …  服务器管理员（默认需要“管理服务器”权限）：区域、设置（主动发言、记忆共享、话量等）、档位、人设、表情包库、长期记忆、
+            状态、清空记忆。有几种做法的（区域、表情包、长期记忆）是子命令：/dsadmin 区域 允许、/dsadmin 长期记忆 添加……
+            （2.9.0 以前叫 /ds，用“操作”一栏选做法；“区域列表”“主动”“记忆共享”三个命令并进了 区域 查看 和 设置。）
 /ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。私信里用是私信挂的那个服务器的卡。
 /ds-dm …    服务器里和私信里都能用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录。
 /ds-music … 所有人：点歌（B站）、切歌、暂停、继续、停止、看队列、从队列里删歌、清空队列。切歌这些要在它放歌的语音频道里。
 /dsowner …  只注册在 CONTROL_GUILD_ID 里的服务器（可以填几个），并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡、服务器组等。
-            和 /ds 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
+            和 /dsadmin 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
 
-连成一组的服务器（/dsowner 服务器组）共用一份人设卡和长期记忆：/ds 长期记忆、/ds-rp 看的、改的都是组里那份。
+连成一组的服务器（/dsowner 服务器组）共用一份人设卡和长期记忆：/dsadmin 长期记忆、/ds-rp 看的、改的都是组里那份。
 config.toml 里 [bot] shared_cards = true 时，每个人在所有服务器共用一张人设卡（/ds-rp 改的就是那张），连组只管长期记忆。
 """
 
@@ -61,30 +63,9 @@ SCOPE_CHOICES = [
     Choice(name="本类别", value="category"),
     Choice(name="全服务器", value="guild"),
 ]
-AREA_ACTIONS = [
-    Choice(name="允许", value="on"),
-    Choice(name="禁止", value="off"),
-    Choice(name="跟随上级", value="inherit"),
-]
-SHARE_ACTIONS = [
-    Choice(name="开", value="on"),
-    Choice(name="关", value="off"),
-    Choice(name="跟随上级", value="inherit"),
-]
-MEME_ACTIONS = [
-    Choice(name="上传", value="add"),
-    Choice(name="删除", value="remove"),
-    Choice(name="列表", value="list"),
-]
 CARD_ACTIONS = [
     Choice(name="编辑", value="edit"),
     Choice(name="改回上一版", value="undo"),
-    Choice(name="清空", value="clear"),
-]
-MEMORY_ACTIONS = [
-    Choice(name="查看", value="list"),
-    Choice(name="添加", value="add"),
-    Choice(name="删除", value="delete"),
     Choice(name="清空", value="clear"),
 ]
 LINK_MODES = {
@@ -93,10 +74,27 @@ LINK_MODES = {
     "off": "读链接：关",
 }
 NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”或“全服务器”。"
-# 区域、主动开关、人设、记忆共享有专门的命令；其余管理员参数走 /ds 设置
-ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "proactive", "persona", "share_memory")]
+# 区域（允许回应）、人设有专门的命令；其余管理员参数走 /dsadmin 设置（主动发言、记忆共享也在里面：2.9.0 以前各有一个命令）
+ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "persona")]
 GUILD_ONLY_KEYS = ("dm", "dm_memory", "cross_server")  # 只看全服务器这一级的参数
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
+RESET_CHOICE = "默认（恢复成上一级的设置）"
+
+
+def value_choices(key: str | None, current: str) -> list[Choice[str]]:
+    """/dsadmin 设置 的「值」一栏弹出的选项：选好了参数，就列出它能填的（开关：开 / 关；只有固定几种的：那几种），最后是
+    “默认”。数字、文字照样手打：打的字和选项对不上就什么都不弹，发出去的是打的那几个字。还没选参数时也不弹。
+    key：选单里那一项的参数名；给的是中文名也认（输入到一半时，Discord 给的不一定是选好的那一项的值）。"""
+    spec = SPECS.get(owner_key(key) or "") if key else None
+    if spec is None:
+        return []
+    if spec.kind is bool:
+        options = ["开", "关"]
+    else:
+        options = list(spec.choices or ())
+    out = [Choice(name=option, value=option) for option in options] + [Choice(name=RESET_CHOICE, value="默认")]
+    words = current.strip().casefold()
+    return [choice for choice in out if not words or words in choice.name.casefold()]
 
 
 def owner_key(raw: str) -> str | None:
@@ -310,7 +308,7 @@ class PersonaModal(discord.ui.Modal):
             )
         await _reply(
             interaction,
-            f"{self.where}：{done}，下一轮对话生效。\n改动比较大的话，可以用 `/ds 清空记忆` 让它不受之前说话风格的影响。",
+            f"{self.where}：{done}，下一轮对话生效。\n改动比较大的话，可以用 `/dsadmin 清空记忆` 让它不受之前说话风格的影响。",
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
@@ -462,7 +460,7 @@ class ConfirmClear(discord.ui.View):
         if self.bot.store.memory_scope(self.guild_id) != self.scope or self._members() != self.members:
             # 问完之后连进了服务器组（或者退了出来、组里进出了别的服务器）：现在这份不是刚才问的那份，不清
             await interaction.response.edit_message(
-                content="服务器组刚变过，现在的长期记忆不是刚才那份：没清空。要清空的话再执行一次 `/ds 长期记忆 操作:清空`。", view=None
+                content="服务器组刚变过，现在的长期记忆不是刚才那份：没清空。要清空的话再执行一次 `/dsadmin 长期记忆 清空`。", view=None
             )
             return
         n = self.bot.memory.clear(self.scope)
@@ -510,7 +508,7 @@ def memory_list_text(bot: "DSBot", guild_id: int) -> str:
         head.append("⚠️ 记满了：整理记忆时它只合并、删掉这个服务器自己记的，腾不出地方就记不进新的，可以在这里删几条。")
     tail = []
     if not bot.settings.get("long_memory", guild_id=guild_id):
-        tail.append("⚠️ 这个服务器关掉了长期记忆：`/ds 设置 参数:长期记忆 值:开 范围:全服务器` 打开")
+        tail.append("⚠️ 这个服务器关掉了长期记忆：`/dsadmin 设置 参数:长期记忆 值:开 范围:全服务器` 打开")
     if not entries:
         return "\n".join(head + ["还没有。聊天时有人叫它记住群里的事，或者它整理聊天时觉得值得记，就会记在这里。"] + tail)
 
@@ -527,17 +525,17 @@ def memory_list_text(bot: "DSBot", guild_id: int) -> str:
 
 
 def memory_entry_text(bot: "DSBot", guild_id: int, no: int) -> str:
-    """长期记忆里的一条，全文（/ds 长期记忆 查看时选了编号）；连成一组时写上是哪个服务器记的。"""
+    """长期记忆里的一条，全文（/dsadmin 长期记忆 查看 时选了编号）；连成一组时写上是哪个服务器记的。"""
     assert bot.memory is not None
     m = bot.memory.get(bot.store.memory_scope(guild_id), no)
     if m is None:
-        return f"没有第 {no} 条（`/ds 长期记忆 操作:查看` 能看到编号）。"
+        return f"没有第 {no} 条（`/dsadmin 长期记忆 查看` 能看到编号）。"
     whose = _memory_labels(bot, guild_id, [m]).get(no)
     return f"({m.no}) {m.text}" + (f"（{whose}记的）" if whose else "")
 
 
 def memory_number_choices(bot: "DSBot", guild_id: int | None, current: str) -> list[Choice[int]]:
-    """/ds 长期记忆 的编号：列出“(编号) 内容”（输入的字能筛选），删之前看得到是哪一条（连组以后编号会变）。"""
+    """/dsadmin 长期记忆 查看、删除 的编号：列出“(编号) 内容”（输入的字能筛选），删之前看得到是哪一条（连组以后编号会变）。"""
     memory = getattr(bot, "memory", None)
     if memory is None or guild_id is None:
         return []
@@ -564,7 +562,7 @@ def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     if shares_out:
         out_text = "这里的内容也会分享给别的共享频道"
     elif place is not None and not place.public:
-        out_text = "🔒 这是私密频道，这里的内容不会分享出去（要分享就在这里单独执行 `/ds 记忆共享 操作:开`）"
+        out_text = "🔒 这是私密频道，这里的内容不会分享出去（要分享就在这里单独执行 `/dsadmin 设置 参数:记忆共享 值:开`）"
     else:
         out_text = "这里的内容不会分享出去"
     sources = bot.engine.shared_sources(guild_id, channel_id)
@@ -574,6 +572,19 @@ def share_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     if bot.engine.sync_foreign_at(channel_id, guild_id):
         names = "无（这个频道和别的服务器的频道连通了：别的频道的记录这里不翻，别处的近况也不带进来）"
     return f"记忆共享：开（来自{view.source('share_memory')}）· {out_text}\n能翻记录的频道：{names}"
+
+
+def setting_notes(bot: "DSBot", interaction: discord.Interaction, key: str, value: Any, scope: str) -> list[str]:
+    """/dsadmin 设置 改完以后多说的几句（2.9.0 以前“主动”“记忆共享”两个命令各自会说的）。
+    value：新的值（恢复默认时是 None）；scope：改的是哪一级（channel / category / guild）。"""
+    notes: list[str] = []
+    if key == "proactive" and value and not bot.settings.view(*_ids(interaction)).enabled:
+        notes.append("⚠️ 但这个频道不在允许的区域，它不会说话。先用 `/dsadmin 区域 允许`。")
+    if key == "share_memory":
+        notes.append(share_text(bot, interaction))  # 这个频道现在共享不共享、来自哪一级、能翻哪些频道
+        if value and scope != "channel":
+            notes.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
+    return notes
 
 
 def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
@@ -641,7 +652,7 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     else:
         lines.append(f"人设卡：关（来自{view.source('cards')}）")
     if st["memory_on"]:
-        lines.append(f"长期记忆：开 · {st['memory_count']} / {st['memory_max']} 条{'（组里共用）' if grouped else ''}（/ds 长期记忆 查看）")
+        lines.append(f"长期记忆：开 · {st['memory_count']} / {st['memory_max']} 条{'（组里共用）' if grouped else ''}（/dsadmin 长期记忆 查看）")
     else:
         lines.append(f"长期记忆：关（来自{view.source('long_memory')}）")
     if (st["cards_on"] or st["memory_on"]) and not st["review_here"]:
@@ -696,11 +707,22 @@ def meme_list_text(bot: "DSBot", guild_id: int) -> str:
     own = sorted(name for name, meme in entries.items() if not meme.shared)
     shared = sorted(name for name, meme in entries.items() if meme.shared)
     lines = [f"**表情包库**（本服务器 {len(own)} 张 · 通用 {len(shared)} 张）"]
-    lines.append("本服务器：" + ("、".join(own) if own else "还没有（用 `/ds 表情包 操作:上传` 加）"))
+    lines.append("本服务器：" + ("、".join(own) if own else "还没有（用 `/dsadmin 表情包 上传` 加）"))
     lines.append("通用：" + ("、".join(shared) if shared else f"没有（bot 主人可以在 NAS 上的 `{bot.cfg.bot.meme_dir}/` 里放图）"))
     if not bot.settings.get("images", guild_id=guild_id):
-        lines.append("⚠️ 这个服务器关掉了发图：`/ds 设置 参数:发图 值:开 范围:全服务器` 打开")
+        lines.append("⚠️ 这个服务器关掉了发图：`/dsadmin 设置 参数:发图 值:开 范围:全服务器` 打开")
     return "\n".join(lines)
+
+
+def meme_name_choices(bot: "DSBot", guild_id: int | None, current: str) -> list[Choice[str]]:
+    """/dsadmin 表情包 删除 的「名字」：列出这个服务器自己的表情包（输入的字能筛选）。通用库里的要在 NAS 上删，不列。"""
+    library = getattr(bot, "memes", None)
+    if library is None or guild_id is None:
+        return []
+    words = current.strip().casefold()
+    names = sorted(name for name, meme in library.entries(guild_id).items() if not meme.shared)
+    # 选项的名字最多 100 字：更长的不列（照样可以手打名字删）
+    return [Choice(name=name, value=name) for name in names if len(name) <= 100 and (not words or words in name.casefold())][:25]
 
 
 def area_list_text(bot: "DSBot", guild: discord.Guild) -> str:
@@ -930,16 +952,16 @@ def link_preview_text(bot: "DSBot", plan: LinkPlan) -> str:
     if plan.memory_total > limit:
         memory_line += (
             f"，超过上限 {limit} 条：删到 {limit - 1} 条以内之前不会记新的。整理记忆时每个服务器只合并、删改自己服务器记的，"
-            "别的服务器记的不动，所以最好用 `/ds 长期记忆` 删几条（连之前、连之后都行）。"
+            "别的服务器记的不动，所以最好用 `/dsadmin 长期记忆 删除` 删几条（连之前、连之后都行）。"
         )
     elif plan.memory_total == limit > 0:
         memory_line += (
             f"，正好到上限 {limit} 条：整理记忆时每个服务器只合并、删改自己服务器记的，腾不出地方就记不进新的，"
-            "可以用 `/ds 长期记忆` 删几条（连之前、连之后都行）。"
+            "可以用 `/dsadmin 长期记忆 删除` 删几条（连之前、连之后都行）。"
         )
     lines.append(memory_line + ("" if memory_line.endswith("。") else "。"))
     if plan.renumbered:
-        lines.append(f"- {joining}原来的长期记忆会接在组里原来的后面、重新编号：要删哪条，先重新 `/ds 长期记忆 操作:查看`。")
+        lines.append(f"- {joining}原来的长期记忆会接在组里原来的后面、重新编号：要删哪条，先重新 `/dsadmin 长期记忆 查看`。")
     both = plan.cards_kept - plan.cards_deleted
     if both:
         lines.append(
@@ -969,12 +991,12 @@ def linked_text(bot: "DSBot", result: Linked) -> str:
             cards += f"；{result.cards_kept} 个人的{joining}那张存成了旧版本（两边都有卡，或者组里删掉了他的卡）"
     lines.append(f"长期记忆并进来 {result.memories_added} 条，组里现在 {result.memory_total} 条；{cards}。")
     if result.renumbered:
-        lines.append(f"{joining}原来的长期记忆接在组里原来的后面，编号变了：要删哪条，先重新 `/ds 长期记忆 操作:查看`。")
+        lines.append(f"{joining}原来的长期记忆接在组里原来的后面，编号变了：要删哪条，先重新 `/dsadmin 长期记忆 查看`。")
     limit = bot.cfg.engine.memory_max_entries
     if result.memory_total > limit:
         lines.append(
             f"⚠️ 长期记忆超过上限 {limit} 条了：删到 {limit - 1} 条以内之前不会记新的。整理记忆时每个服务器只合并、删改自己服务器记的，"
-            "最好用 `/ds 长期记忆` 删几条。"
+            "最好用 `/dsadmin 长期记忆 删除` 删几条。"
         )
     return "\n".join(lines)
 
@@ -1233,7 +1255,7 @@ SYNC_NOTICE_ADDED = (
 )
 SYNC_NOTICE_JOINED = "📡 {new}也连进来了：现在{members}共用一份聊天记录。这里之前共用的记录（连同更早的摘要），那边以后也看得到。"
 SYNC_NOTICE_LEFT = "📡 这个频道和{others}不再连通了：之后各记各的（连通期间这边说过的，这里还记得{rest}）。"
-SYNC_NOTICE_LEFT_REST = "，还连着的频道也还记得：要让它们也忘掉，在这里用 /ds 清空记忆"
+SYNC_NOTICE_LEFT_REST = "，还连着的频道也还记得：要让它们也忘掉，在这里用 /dsadmin 清空记忆"
 SYNC_NOTICE_GONE = "📡 {gone}断开了连通，之后不再和这里共用聊天记录（它连通期间说过的，这里还记得）。"
 # 它自己那份记录在连通期间被旧版本写过：连通期间的聊天没拿回来（编号会撞上）
 SYNC_NOTICE_LEFT_STALE = "📡 这个频道和{others}不再连通了：之后各记各的（连通期间这边说过的没能拿回这里{rest}）。"
@@ -1341,7 +1363,7 @@ def sync_check(bot: "DSBot", channel_id: int) -> tuple[Any, str | None, list[str
         return channel, f"{label}是私密频道（不是所有人都看得到，或者是成人内容频道）：私密频道不能连通。", []
     notes: list[str] = []
     if not bot.engine.enabled(channel.guild.id, channel_id, None, safe_category_id(channel)):
-        notes.append(f"⚠️ {label}没开“允许回应”：bot 看不到那里的消息（先在那个服务器用 `/ds 区域` 打开）。")
+        notes.append(f"⚠️ {label}没开“允许回应”：bot 看不到那里的消息（先在那个服务器用 `/dsadmin 区域 允许` 打开）。")
     try:
         perms = channel.permissions_for(channel.guild.me)
         if not (perms.view_channel and perms.send_messages):
@@ -1439,7 +1461,7 @@ def sync_unlink_preview(bot: "DSBot", channel_id: int) -> str:
     else:
         lines.append(
             f"- 组里还剩{'、'.join(channel_label(bot, c) for c in rest)}，照样共用（{label}连通期间说过的，它们还记得；"
-            f"要让它们也忘掉，在{label}用 `/ds 清空记忆`）。"
+            f"要让它们也忘掉，在{label}用 `/dsadmin 清空记忆`）。"
         )
     lines.append("- bot 会在相关的频道各发一条说明。")
     return "\n".join(lines)
@@ -1671,7 +1693,7 @@ def register_dm_commands(bot: "DSBot") -> None:
                 await _reply(interaction, "我不在这个服务器里：换一个你和我都在的服务器再用这个命令。")
                 return
             if not bot.dm_open(guild):
-                await _reply(interaction, "这个服务器关掉了私信（管理员可以用 `/ds 设置 参数:私信` 打开）。")
+                await _reply(interaction, "这个服务器关掉了私信（管理员可以用 `/dsadmin 设置 参数:私信 值:开` 打开）。")
                 return
         else:
             named = bot.get_guild(int(wanted)) if wanted.isdecimal() else None  # 从列表里选的是服务器 ID
@@ -1923,200 +1945,101 @@ def register_music_commands(bot: "DSBot") -> None:
 
 def register_commands(bot: "DSBot") -> None:
     admin = app_commands.Group(
-        name="ds",
-        description="DeepSeek 群友：本服务器的设置",
+        name="dsadmin",
+        description="DeepSeek 群友：本服务器的设置（管理员用）",
         guild_only=True,
         default_permissions=discord.Permissions(manage_guild=True),
     )
+    # 有几种做法的（区域、表情包、长期记忆）都是子命令，不用“操作”那一栏：必填的栏 Discord 会拦着不让漏，
+    # 用不上的栏也不会出现（手机、iPad 上“操作”后面选填的栏容易发不出来，/dsowner chatsync 就是这么改成子命令的）
 
-    @admin.command(name="区域", description="限制它在哪些频道或类别里回应（不允许的地方完全不看消息）")
-    @app_commands.rename(action="操作", scope="范围")
-    @app_commands.describe(action="允许 / 禁止 / 跟随上级（删掉这一层的设置）", scope="本频道、本类别，还是全服务器（不选 = 本频道）")
-    @app_commands.choices(action=AREA_ACTIONS, scope=SCOPE_CHOICES)
-    async def area_cmd(interaction: discord.Interaction, action: Choice[str], scope: Optional[Choice[str]] = None) -> None:
-        target = _target(interaction, scope)
-        if target is None:
-            await _reply(interaction, NO_CATEGORY)
-            return
-        scope_name, scope_id, where = target
-        if action.value == "inherit":
-            bot.settings.unset(scope_name, scope_id, "enabled")
-        else:
-            bot.settings.set(scope_name, scope_id, "enabled", action.value)
-        view = bot.settings.view(*_ids(interaction))
-        lines = [
-            f"{where}：已设为「{action.name}」。",
-            f"现在这个频道：{'会回应' if view.enabled else '不回应'}（来自{view.source('enabled')}）",
-        ]
-        if scope_name == "guild" and action.value == "off":
-            lines.append("现在是白名单模式：在要用的频道里执行 `/ds 区域 操作:允许`（或选“本类别”放开整个区）。")
-        await _reply(interaction, "\n".join(lines))
+    # ------------------------------------------------------------ 区域
+    area = app_commands.Group(name="区域", description="限制它在哪些频道或类别里回应（不允许的地方完全不看消息）", parent=admin)
 
-    @admin.command(name="记忆共享", description="让它在开了共享的频道之间互通记忆（私密频道要单独开才会分享出去）")
-    @app_commands.rename(action="操作", scope="范围")
-    @app_commands.describe(action="开 / 关 / 跟随上级（删掉这一层的设置）", scope="本频道、本类别，还是全服务器（不选 = 本频道）")
-    @app_commands.choices(action=SHARE_ACTIONS, scope=SCOPE_CHOICES)
-    async def share_cmd(interaction: discord.Interaction, action: Choice[str], scope: Optional[Choice[str]] = None) -> None:
-        target = _target(interaction, scope)
-        if target is None:
-            await _reply(interaction, NO_CATEGORY)
-            return
-        scope_name, scope_id, where = target
-        if action.value == "inherit":
-            bot.settings.unset(scope_name, scope_id, "share_memory")
-            done = "改为跟随上级"
-        else:
-            bot.settings.set(scope_name, scope_id, "share_memory", action.value)
-            done = "打开" if action.value == "on" else "关闭"
-        lines = [f"{where}：记忆共享已{done}。", share_text(bot, interaction)]
-        if action.value == "on" and scope_name != "channel":
-            lines.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
-        await _reply(interaction, "\n".join(lines))
-
-    @admin.command(name="表情包", description="管理这个服务器的表情包库：上传、删除、查看（它会按名字挑着发）")
-    @app_commands.rename(action="操作", name="名字", image="图片")
-    @app_commands.describe(
-        action="上传 / 删除 / 列表",
-        name="表情包的名字，写清楚是什么意思，比如“熊猫头-无语”（它按名字挑图）；上传时不填就用文件名",
-        image="上传时附上图片：PNG、JPG、GIF、WebP，8 MB 以内",
-    )
-    @app_commands.choices(action=MEME_ACTIONS)
-    async def meme_cmd(
-        interaction: discord.Interaction,
-        action: Choice[str],
-        name: Optional[str] = None,
-        image: Optional[discord.Attachment] = None,
-    ) -> None:
-        guild_id = interaction.guild_id
-        library = bot.memes
-        if action.value == "list":
-            await _reply(interaction, meme_list_text(bot, guild_id))
-            return
-        if action.value == "remove":
-            if not name or not name.strip():
-                await _reply(interaction, "要删哪一张？在「名字」里填上表情包的名字（`/ds 表情包 操作:列表` 能看到全部）。")
-                return
-            await interaction.response.defer(ephemeral=True, thinking=True)  # 可能要等正在上传的那张写完
-            result = await asyncio.to_thread(library.remove, guild_id, name)
-            if result == "removed":
-                await _reply(interaction, f"已删掉表情包「{name.strip()}」。")
-            elif result == "shared":
-                await _reply(interaction, f"「{name.strip()}」是通用库里的，要在 NAS 上的 `{bot.cfg.bot.meme_dir}/` 文件夹里删。")
-            else:
-                await _reply(interaction, f"这个服务器没有叫「{name.strip()}」的表情包。")
-            return
-        if image is None:
-            await _reply(interaction, "上传要在「图片」里附上一张图。")
-            return
-        if image.size > library.max_bytes:
-            await _reply(interaction, f"图片太大了（最多 {library.max_bytes // 1_000_000} MB）。")
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)  # 下载图片要一会儿
-        try:
-            data = await image.read()
-        except discord.HTTPException as exc:
-            await _reply(interaction, f"下载图片失败：{exc}")
-            return
-        try:
-            meme = await asyncio.to_thread(library.add, guild_id, name or PurePath(image.filename).stem, data)
-        except ValueError as exc:
-            await _reply(interaction, f"没存成：{exc}")
-            return
-        except OSError as exc:
-            log.exception("保存表情包失败")
-            await _reply(interaction, f"没存成（写文件出错）：{exc}")
-            return
-        text = f"已加入这个服务器的表情包库：「{meme.name}」。它看名字决定什么时候发，名字写清楚是什么意思最好。"
-        if not bot.settings.view(*_ids(interaction)).images:
-            text += "\n⚠️ 但这里关掉了发图，它不会发：`/ds 设置 参数:发图 值:开`"
-        await _reply(interaction, text)
-
-    async def memory_entry_numbers(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
-        return memory_number_choices(bot, interaction.guild_id, current)
-
-    @admin.command(name="长期记忆", description="查看、添加、删除这个服务器的长期记忆（它记下的约定、大事、梗和剧情）")
-    @app_commands.rename(action="操作", text="内容", number="编号")
-    @app_commands.describe(
-        action="查看 / 添加 / 删除 / 清空",
-        text="添加时填要记的事（一条只记一件事）",
-        number="选第几条（列表里有内容；输入几个字可以筛选）：查看时只看这一条的全文；删除时必填",
-    )
-    @app_commands.choices(action=MEMORY_ACTIONS)
-    @app_commands.autocomplete(number=memory_entry_numbers)
-    async def memory_cmd(
-        interaction: discord.Interaction,
-        action: Choice[str],
-        text: Optional[str] = None,
-        number: Optional[int] = None,
-    ) -> None:
-        guild_id = interaction.guild_id
-        memory = bot.memory
-        if memory is None:
-            await _reply(interaction, "长期记忆没有启用。")
-            return
-        ec = bot.cfg.engine
-        scope = bot.store.memory_scope(guild_id)  # 连成一组的服务器：组里共用的那份
-        if action.value == "list" and number is not None:  # 只看这一条的全文（条目多时列表里每条截短了）
-            await _reply(interaction, memory_entry_text(bot, guild_id, number))
-        elif action.value == "list":
-            await _reply_long(interaction, memory_list_text(bot, guild_id))
-        elif action.value == "add":
-            entry = " ".join((text or "").split())
-            if not entry:
-                await _reply(interaction, "要记什么？在「内容」里填上。")
-            elif len(entry) > ec.memory_entry_chars:
-                await _reply(interaction, f"太长了（{len(entry)} 字），一条最多 {ec.memory_entry_chars} 字。")
-            elif (n := memory.count(scope)) >= ec.memory_max_entries:
-                await _reply(
-                    interaction,
-                    f"已经记满了（现在 {n} 条，最多 {ec.memory_max_entries} 条）：先删掉 {n - ec.memory_max_entries + 1} 条才能再记。",
-                )
-            else:
-                no = memory.add(scope, entry, via="command", origin=guild_id)
-                await _reply(interaction, f"已记下第 {no} 条：{entry}")
-        elif action.value == "delete":
-            current = memory.get(scope, number) if number is not None else None
-            if number is None:
-                await _reply(interaction, "要删哪一条？在「编号」里填上（`/ds 长期记忆 操作:查看` 能看到编号）。")
-            elif current is not None and memory.delete(scope, number):
-                whose = _memory_labels(bot, guild_id, [current]).get(number)
-                # 写出来：编号记错了也看得出删的是哪条；连成一组时，删的是别的服务器记的也写明
-                await _reply(interaction, f"已删掉第 {number} 条：{current.text}" + (f"（这条是{whose}记的）" if whose else ""))
-            else:
-                await _reply(interaction, f"没有第 {number} 条。")
-        else:
-            n = memory.count(scope)
-            if not n:
-                await _reply(interaction, "长期记忆本来就是空的。")
-                return
-            grouped = "（组里的服务器共用这一份，那边的也会一起清空）" if group_others(bot, guild_id) else ""
-            await interaction.response.send_message(
-                f"确定要清空{shared_where(bot, guild_id)}的 {n} 条长期记忆吗？清空后找不回来。{grouped}",
-                view=ConfirmClear(bot, guild_id, interaction.user.id),
-                ephemeral=True,
-            )
-
-    @admin.command(name="区域列表", description="看看它在这个服务器的哪些地方会回应")
+    @area.command(name="查看", description="看看它在这个服务器的哪些地方会回应、哪些地方开了主动发言")
     async def area_list_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, area_list_text(bot, interaction.guild))
 
-    @admin.command(name="主动", description="开关主动发言（没被叫到时，自己判断要不要说话）")
-    @app_commands.rename(state="开关", scope="范围")
-    @app_commands.describe(state="开还是关", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）")
-    @app_commands.choices(state=[Choice(name="开", value="on"), Choice(name="关", value="off")], scope=SCOPE_CHOICES)
-    async def proactive_cmd(
-        interaction: discord.Interaction, state: Choice[str], scope: Optional[Choice[str]] = None
-    ) -> None:
+    async def set_area(interaction: discord.Interaction, value: str | None, done: str, scope: Optional[Choice[str]]) -> None:
+        """value：on（允许）/ off（禁止）；None = 删掉这一层的设置（跟随上级）。"""
         target = _target(interaction, scope)
         if target is None:
             await _reply(interaction, NO_CATEGORY)
             return
         scope_name, scope_id, where = target
-        bot.settings.set(scope_name, scope_id, "proactive", state.value)
-        text = f"{where}：主动发言已{'打开' if state.value == 'on' else '关闭'}。"
-        if state.value == "on" and not bot.settings.view(*_ids(interaction)).enabled:
-            text += "\n⚠️ 但这个频道不在允许的区域，它不会说话。先用 `/ds 区域 操作:允许`。"
-        await _reply(interaction, text)
+        if value is None:
+            bot.settings.unset(scope_name, scope_id, "enabled")
+        else:
+            bot.settings.set(scope_name, scope_id, "enabled", value)
+        view = bot.settings.view(*_ids(interaction))
+        lines = [
+            f"{where}：已设为「{done}」。",
+            f"现在这个频道：{'会回应' if view.enabled else '不回应'}（来自{view.source('enabled')}）",
+        ]
+        if scope_name == "guild" and value == "off":
+            lines.append("现在是白名单模式：在要用的频道里执行 `/dsadmin 区域 允许`（或选“本类别”放开整个区）。")
+        await _reply(interaction, "\n".join(lines))
+
+    @area.command(name="允许", description="让它在这里回应")
+    @app_commands.rename(scope="范围")
+    @app_commands.describe(scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @app_commands.choices(scope=SCOPE_CHOICES)
+    async def area_allow_cmd(interaction: discord.Interaction, scope: Optional[Choice[str]] = None) -> None:
+        await set_area(interaction, "on", "允许", scope)
+
+    @area.command(name="禁止", description="不让它在这里回应（这里的消息它完全不看：不回 @、不主动说话）")
+    @app_commands.rename(scope="范围")
+    @app_commands.describe(scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @app_commands.choices(scope=SCOPE_CHOICES)
+    async def area_deny_cmd(interaction: discord.Interaction, scope: Optional[Choice[str]] = None) -> None:
+        await set_area(interaction, "off", "禁止", scope)
+
+    @area.command(name="跟随上级", description="删掉这一层的设置，跟着上一级走（频道跟类别，类别跟全服务器）")
+    @app_commands.rename(scope="范围")
+    @app_commands.describe(scope="本频道、本类别，还是全服务器（不选 = 本频道）")
+    @app_commands.choices(scope=SCOPE_CHOICES)
+    async def area_inherit_cmd(interaction: discord.Interaction, scope: Optional[Choice[str]] = None) -> None:
+        await set_area(interaction, None, "跟随上级", scope)
+
+    # ------------------------------------------------------------ 设置、档位、人设
+    async def admin_values(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        # 输入时 Discord 给的是命令里显示的栏名（“参数”），值是选单里那一项的参数名
+        return value_choices(getattr(interaction.namespace, "参数", None), current)
+
+    @admin.command(name="设置", description="调整单项参数：主动发言、记忆共享、发图、别名、话量等（值填“默认”恢复）")
+    @app_commands.rename(key="参数", value="值", scope="范围")
+    @app_commands.describe(
+        key="要改哪个参数",
+        value="新的值（开关类的填 开 / 关，选好参数会弹出来）；填“默认”恢复成上一级的设置",
+        scope="本频道、本类别，还是全服务器默认（不选 = 本频道）",
+    )
+    @app_commands.choices(key=[Choice(name=SPECS[k].label, value=k) for k in ADMIN_SET_KEYS], scope=SCOPE_CHOICES)
+    @app_commands.autocomplete(value=admin_values)
+    async def set_cmd(
+        interaction: discord.Interaction, key: Choice[str], value: str, scope: Optional[Choice[str]] = None
+    ) -> None:
+        # 私信、私信记忆、跨服务器不在任何频道、类别里：只看全服务器这一级
+        whole = key.value in GUILD_ONLY_KEYS
+        target = _target(interaction, scope) if not whole else ("guild", interaction.guild_id, "全服务器")
+        if target is None:
+            await _reply(interaction, NO_CATEGORY)
+            return
+        scope_name, scope_id, where = target
+        spec = SPECS[key.value]
+        if value.strip() in RESET_WORDS:
+            bot.settings.unset(scope_name, scope_id, key.value)
+            settings_changed(bot, key.value, scope_name, scope_id)
+            lines = [f"{where}：「{spec.label}」已恢复默认。"]
+            parsed = None
+        else:
+            try:
+                parsed = bot.settings.set(scope_name, scope_id, key.value, value)
+            except ValueError as exc:
+                await _reply(interaction, f"没改成：{exc}")
+                return
+            settings_changed(bot, key.value, scope_name, scope_id)
+            lines = [f"{where}：「{spec.label}」= {format_value(spec, parsed)}", f"（{spec.help}）"]
+        await _reply(interaction, "\n".join(lines + setting_notes(bot, interaction, key.value, parsed, scope_name)))
 
     @admin.command(name="档位", description="一键套用发言频率：安静 / 普通 / 话痨")
     @app_commands.rename(preset="档位", scope="范围")
@@ -2136,36 +2059,6 @@ def register_commands(bot: "DSBot") -> None:
         for key, value in PRESETS[preset.value].items():
             bot.settings.set(scope_name, scope_id, key, value)
         await _reply(interaction, f"{where}：已切到「{preset.value}」档（{_preset_text(PRESETS[preset.value])}）。")
-
-    @admin.command(name="设置", description="调整单项参数（值填“默认”恢复）")
-    @app_commands.rename(key="参数", value="值", scope="范围")
-    @app_commands.describe(
-        key="要改哪个参数", value="新的值；填“默认”恢复成上一级的设置", scope="本频道、本类别，还是全服务器默认（不选 = 本频道）"
-    )
-    @app_commands.choices(key=[Choice(name=SPECS[k].label, value=k) for k in ADMIN_SET_KEYS], scope=SCOPE_CHOICES)
-    async def set_cmd(
-        interaction: discord.Interaction, key: Choice[str], value: str, scope: Optional[Choice[str]] = None
-    ) -> None:
-        # 私信、私信记忆、跨服务器不在任何频道、类别里：只看全服务器这一级
-        whole = key.value in GUILD_ONLY_KEYS
-        target = _target(interaction, scope) if not whole else ("guild", interaction.guild_id, "全服务器")
-        if target is None:
-            await _reply(interaction, NO_CATEGORY)
-            return
-        scope_name, scope_id, where = target
-        spec = SPECS[key.value]
-        if value.strip() in RESET_WORDS:
-            bot.settings.unset(scope_name, scope_id, key.value)
-            settings_changed(bot, key.value, scope_name, scope_id)
-            await _reply(interaction, f"{where}：「{spec.label}」已恢复默认。")
-            return
-        try:
-            parsed = bot.settings.set(scope_name, scope_id, key.value, value)
-        except ValueError as exc:
-            await _reply(interaction, f"没改成：{exc}")
-            return
-        settings_changed(bot, key.value, scope_name, scope_id)
-        await _reply(interaction, f"{where}：「{spec.label}」= {format_value(spec, parsed)}\n（{spec.help}）")
 
     @admin.command(name="人设", description="修改人设（会弹出编辑框）")
     @app_commands.rename(scope="范围")
@@ -2189,6 +2082,152 @@ def register_commands(bot: "DSBot") -> None:
         current = bot.settings.overrides(scope_name, scope_id).get("persona") or inherited
         await interaction.response.send_modal(PersonaModal(bot, scope_name, scope_id, where, current, inherited))
 
+    # ------------------------------------------------------------ 表情包
+    memes = app_commands.Group(name="表情包", description="这个服务器的表情包库：查看、上传、删除（它会按名字挑着发）", parent=admin)
+
+    @memes.command(name="查看", description="列出这个服务器的表情包，还有通用库里的")
+    async def meme_list_cmd(interaction: discord.Interaction) -> None:
+        await _reply(interaction, meme_list_text(bot, interaction.guild_id))
+
+    @memes.command(name="上传", description="往这个服务器的表情包库里加一张图")
+    @app_commands.rename(image="图片", name="名字")
+    @app_commands.describe(
+        image="PNG、JPG、GIF、WebP，8 MB 以内",
+        name="表情包的名字，写清楚是什么意思，比如“熊猫头-无语”（它按名字挑图）；不填就用文件名",
+    )
+    async def meme_add_cmd(interaction: discord.Interaction, image: discord.Attachment, name: Optional[str] = None) -> None:
+        guild_id = interaction.guild_id
+        library = bot.memes
+        if image.size > library.max_bytes:
+            await _reply(interaction, f"图片太大了（最多 {library.max_bytes // 1_000_000} MB）。")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)  # 下载图片要一会儿
+        try:
+            data = await image.read()
+        except discord.HTTPException as exc:
+            await _reply(interaction, f"下载图片失败：{exc}")
+            return
+        try:
+            meme = await asyncio.to_thread(library.add, guild_id, name or PurePath(image.filename).stem, data)
+        except ValueError as exc:
+            await _reply(interaction, f"没存成：{exc}")
+            return
+        except OSError as exc:
+            log.exception("保存表情包失败")
+            await _reply(interaction, f"没存成（写文件出错）：{exc}")
+            return
+        text = f"已加入这个服务器的表情包库：「{meme.name}」。它看名字决定什么时候发，名字写清楚是什么意思最好。"
+        if not bot.settings.view(*_ids(interaction)).images:
+            text += "\n⚠️ 但这里关掉了发图，它不会发：`/dsadmin 设置 参数:发图 值:开`"
+        await _reply(interaction, text)
+
+    async def own_memes(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        return meme_name_choices(bot, interaction.guild_id, current)
+
+    @memes.command(name="删除", description="从这个服务器的表情包库里删掉一张")
+    @app_commands.rename(name="名字")
+    @app_commands.describe(name="要删哪一张（从弹出的列表里选，输入几个字能筛选；也可以直接打名字）")
+    @app_commands.autocomplete(name=own_memes)
+    async def meme_remove_cmd(interaction: discord.Interaction, name: str) -> None:
+        guild_id = interaction.guild_id
+        library = bot.memes
+        if not name.strip():
+            await _reply(interaction, "要删哪一张？在「名字」里填上表情包的名字（`/dsadmin 表情包 查看` 能看到全部）。")
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)  # 可能要等正在上传的那张写完
+        result = await asyncio.to_thread(library.remove, guild_id, name)
+        if result == "removed":
+            await _reply(interaction, f"已删掉表情包「{name.strip()}」。")
+        elif result == "shared":
+            await _reply(interaction, f"「{name.strip()}」是通用库里的，要在 NAS 上的 `{bot.cfg.bot.meme_dir}/` 文件夹里删。")
+        else:
+            await _reply(interaction, f"这个服务器没有叫「{name.strip()}」的表情包。")
+
+    # ------------------------------------------------------------ 长期记忆
+    notes = app_commands.Group(
+        name="长期记忆", description="这个服务器的长期记忆（它记下的约定、大事、梗和剧情）：查看、添加、删除、清空", parent=admin
+    )
+
+    async def memory_entry_numbers(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
+        return memory_number_choices(bot, interaction.guild_id, current)
+
+    async def memory_ready(interaction: discord.Interaction) -> bool:
+        if bot.memory is None:
+            await _reply(interaction, "长期记忆没有启用。")
+            return False
+        return True
+
+    @notes.command(name="查看", description="列出这个服务器的长期记忆；选了编号就只看那一条的全文")
+    @app_commands.rename(number="编号")
+    @app_commands.describe(number="只看第几条的全文（列表里有内容；输入几个字可以筛选）；不选 = 全部列出来")
+    @app_commands.autocomplete(number=memory_entry_numbers)
+    async def memory_list_cmd(interaction: discord.Interaction, number: Optional[int] = None) -> None:
+        if not await memory_ready(interaction):
+            return
+        if number is not None:  # 只看这一条的全文（条目多时列表里每条截短了）
+            await _reply(interaction, memory_entry_text(bot, interaction.guild_id, number))
+        else:
+            await _reply_long(interaction, memory_list_text(bot, interaction.guild_id))
+
+    @notes.command(name="添加", description="让它记下一件事（一条只记一件事）")
+    @app_commands.rename(text="内容")
+    @app_commands.describe(text="要记的事（一条只记一件事）")
+    async def memory_add_cmd(interaction: discord.Interaction, text: str) -> None:
+        if not await memory_ready(interaction):
+            return
+        guild_id = interaction.guild_id
+        memory = bot.memory
+        ec = bot.cfg.engine
+        scope = bot.store.memory_scope(guild_id)  # 连成一组的服务器：组里共用的那份
+        entry = " ".join(text.split())
+        if not entry:
+            await _reply(interaction, "要记什么？在「内容」里填上。")
+        elif len(entry) > ec.memory_entry_chars:
+            await _reply(interaction, f"太长了（{len(entry)} 字），一条最多 {ec.memory_entry_chars} 字。")
+        elif (n := memory.count(scope)) >= ec.memory_max_entries:
+            await _reply(
+                interaction,
+                f"已经记满了（现在 {n} 条，最多 {ec.memory_max_entries} 条）：先删掉 {n - ec.memory_max_entries + 1} 条才能再记。",
+            )
+        else:
+            no = memory.add(scope, entry, via="command", origin=guild_id)
+            await _reply(interaction, f"已记下第 {no} 条：{entry}")
+
+    @notes.command(name="删除", description="删掉长期记忆里的一条")
+    @app_commands.rename(number="编号")
+    @app_commands.describe(number="要删第几条（列表里有内容；输入几个字可以筛选）")
+    @app_commands.autocomplete(number=memory_entry_numbers)
+    async def memory_delete_cmd(interaction: discord.Interaction, number: int) -> None:
+        if not await memory_ready(interaction):
+            return
+        guild_id = interaction.guild_id
+        memory = bot.memory
+        scope = bot.store.memory_scope(guild_id)
+        current = memory.get(scope, number)
+        if current is not None and memory.delete(scope, number):
+            whose = _memory_labels(bot, guild_id, [current]).get(number)
+            # 写出来：编号记错了也看得出删的是哪条；连成一组时，删的是别的服务器记的也写明
+            await _reply(interaction, f"已删掉第 {number} 条：{current.text}" + (f"（这条是{whose}记的）" if whose else ""))
+        else:
+            await _reply(interaction, f"没有第 {number} 条（`/dsadmin 长期记忆 查看` 能看到编号）。")
+
+    @notes.command(name="清空", description="清空这个服务器的全部长期记忆（会再确认一次）")
+    async def memory_clear_cmd(interaction: discord.Interaction) -> None:
+        if not await memory_ready(interaction):
+            return
+        guild_id = interaction.guild_id
+        n = bot.memory.count(bot.store.memory_scope(guild_id))
+        if not n:
+            await _reply(interaction, "长期记忆本来就是空的。")
+            return
+        grouped = "（组里的服务器共用这一份，那边的也会一起清空）" if group_others(bot, guild_id) else ""
+        await interaction.response.send_message(
+            f"确定要清空{shared_where(bot, guild_id)}的 {n} 条长期记忆吗？清空后找不回来。{grouped}",
+            view=ConfirmClear(bot, guild_id, interaction.user.id),
+            ephemeral=True,
+        )
+
+    # ------------------------------------------------------------ 状态、清空记忆
     @admin.command(name="状态", description="查看本频道的设置、额度和今天的花费")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, status_text(bot, interaction))
@@ -2282,7 +2321,7 @@ def register_commands(bot: "DSBot") -> None:
         return
 
     # 能不能用由 is_owner 决定；default_permissions 只是让普通成员看不到。用“管理服务器”而不是“管理员”：
-    # bot 放在朋友的服务器时，你在那里多半只是管理（能用 /ds），不一定有“管理员”权限
+    # bot 放在朋友的服务器时，你在那里多半只是管理（能用 /dsadmin），不一定有“管理员”权限
     owner = app_commands.Group(
         name="dsowner",
         description="DeepSeek 群友：主人专用",

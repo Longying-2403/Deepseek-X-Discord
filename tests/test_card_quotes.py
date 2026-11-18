@@ -815,7 +815,7 @@ class StatusLine(unittest.TestCase):
 
         source = (Path(__file__).resolve().parents[1] / "dsbot" / "commands.py").read_text(encoding="utf-8")
         self.assertIn("别人问起时它可能用自己的话大概说说", source)  # /ds-rp 窗口里的说明
-        self.assertIn("照念人设卡被拦下", source)  # /ds 状态：重说的那几次也看得到
+        self.assertIn("照念人设卡被拦下", source)  # /dsadmin 状态：重说的那几次也看得到
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +951,7 @@ class RoundTwoEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn((CHANNEL, 502, "📝"), transport.reactions)
 
     async def test_proactive_block_shows_in_the_stats(self):
-        """主动聊天时照念被拦下（没让它重说）：这一笔记成 recited，/ds 状态 看得到，不是“沉默”。"""
+        """主动聊天时照念被拦下（没让它重说）：这一笔记成 recited，/dsadmin 状态 看得到，不是“沉默”。"""
         cards, memory = stores()
         cards.put(GUILD, 11, "阿明", CARD, via="command")
         engine, llm, transport, clock = make_engine(

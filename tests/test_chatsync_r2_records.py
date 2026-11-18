@@ -317,7 +317,7 @@ class AfterLeaving(unittest.IsolatedAsyncioTestCase):
         group = engine.store.load_conversation(sync, 0)
         self.assertNotIn(HALL, {t.origin for t in group.turns})  # 它的原话都压掉了……
         self.assertIn("13800001111", group.summary)  # ……压进了组的摘要
-        await engine.reset_linked(HALL)  # 断开以后在别的服 #大厅 /ds 清空记忆
+        await engine.reset_linked(HALL)  # 断开以后在别的服 #大厅 /dsadmin 清空记忆
         self.assertNotIn("13800001111", engine.store.load_conversation(sync, 0).summary or "")  # 组的摘要也删掉了
         self.assertEqual(engine.store.origin_syncs(HALL), [])  # 组里不再有它的东西：以后清空不再动那个组
 

@@ -121,7 +121,7 @@ class EditsMadeWhilePaused(unittest.IsolatedAsyncioTestCase):
                     engine.states.clear()
                     engine.convs.clear()  # 像刚重启：内存里什么都没有（还连通着）
                 if how == "关掉了允许回应":
-                    engine.settings.set("channel", HALL, "enabled", False)  # 别的服的管理员在 #大厅关了“允许回应”（/ds 区域）
+                    engine.settings.set("channel", HALL, "enabled", False)  # 别的服的管理员在 #大厅关了“允许回应”（/dsadmin 区域）
                 else:
                     set_public(transport, False)  # 连通暂停
                 engine.handle_edit(edited(HIDDEN), edited=True)
@@ -130,7 +130,7 @@ class EditsMadeWhilePaused(unittest.IsolatedAsyncioTestCase):
                 if dissolve:
                     self.assertEqual(disconnect(engine, CHANNEL), ([CHANNEL, HALL], []))  # 主服 #闲聊断开：组散了
                 else:
-                    # bot 主人照 /ds 状态 说的把暂停的频道断开
+                    # bot 主人照 /dsadmin 状态 说的把暂停的频道断开
                     self.assertEqual(disconnect(engine, HALL), ([HALL], [CHANNEL, LOBBY]))
                 await engine.drain()
                 own = own_record(engine, HALL, OTHER)

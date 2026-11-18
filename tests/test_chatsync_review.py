@@ -258,7 +258,7 @@ class SharedPrompts(unittest.IsolatedAsyncioTestCase):
 
 
 class SyncTexts(unittest.IsolatedAsyncioTestCase):
-    """连通、断开时给 bot 主人看的说明、在频道里发的说明和 /ds 状态（借 test_chatsync.OwnerCommand 的假 Discord）。"""
+    """连通、断开时给 bot 主人看的说明、在频道里发的说明和 /dsadmin 状态（借 test_chatsync.OwnerCommand 的假 Discord）。"""
 
     setUp = test_chatsync.OwnerCommand.setUp
     interaction = test_chatsync.OwnerCommand.interaction
@@ -299,7 +299,7 @@ class SyncTexts(unittest.IsolatedAsyncioTestCase):
         # 一个断开、组里还剩两个：共用的摘要不带走；还连着的频道也还记得它说过的
         preview, notices = await self.unlink(LOBBY)
         self.assertIn("共用记录更早的摘要也不带走", preview)
-        self.assertIn("要让它们也忘掉，在「主服」#大厅用 `/ds 清空记忆`", preview)
+        self.assertIn("要让它们也忘掉，在「主服」#大厅用 `/dsadmin 清空记忆`", preview)
         self.assertIn(SYNC_NOTICE_LEFT_REST, notices[LOBBY])
         self.assertIn("还连着的频道也还记得", notices[LOBBY])
         # 最后两个断开、组散了：共用的记录连同摘要删掉；没有还连着的频道了

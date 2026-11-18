@@ -344,7 +344,7 @@ class ClearCommand(unittest.IsolatedAsyncioTestCase):
             self.skipTest("没装 discord.py")
 
     async def test_clear_command_in_a_linked_channel_waits_then_confirms(self):
-        """/ds 清空记忆 在连通的频道里：先回“正在处理”，等别的频道正在回的那一轮写完再清，清完再说一声。"""
+        """/dsadmin 清空记忆 在连通的频道里：先回“正在处理”，等别的频道正在回的那一轮写完再清，清完再说一声。"""
         from dsbot.commands import register_commands
 
         gate = asyncio.Event()
@@ -355,7 +355,7 @@ class ClearCommand(unittest.IsolatedAsyncioTestCase):
         bot = NS(store=engine.store, engine=engine, settings=engine.settings, cfg=engine.cfg, cards=None, memory=None, tree=tree)
         bot.secrets = NS(owner_id=OWNER, control_guild_ids=())
         register_commands(bot)
-        clear = next(c for c in added if c.name == "ds").get_command("清空记忆").callback
+        clear = next(c for c in added if c.name == "dsadmin").get_command("清空记忆").callback
         sync = connect(engine)
         await say(engine, clock, 1, "@小D 主服说的")
         await engine.handle_message(msg(2, "@小D 别的服的问题", channel_id=HALL, guild_id=OTHER, author=21, name="小红", mentions_bot=True))

@@ -4804,7 +4804,7 @@ class Engine:
         return origin[0], origin[1], where
 
     def _inherited_persona(self, st: ChannelState, scope: str, scope_id: int) -> str:
-        """这一级不单独设置时会用的人设（和 /ds 人设 的“上一级”一致）。"""
+        """这一级不单独设置时会用的人设（和 /dsadmin 人设 的“上一级”一致）。"""
         if scope == "guild":
             value = self.settings.get("persona")
         elif scope == "category":

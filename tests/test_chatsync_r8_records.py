@@ -94,7 +94,7 @@ def turn_public(transport):
 
 
 def stop_reading(engine, transport, how):
-    """它不再看别的服 #大厅：变成私密的，或者那里的管理员关了“允许回应”（/ds 区域）。"""
+    """它不再看别的服 #大厅：变成私密的，或者那里的管理员关了“允许回应”（/dsadmin 区域）。"""
     if how == "变成私密的":
         turn_private(transport)
     else:
