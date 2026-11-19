@@ -2,6 +2,99 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.12.0] - 2026-11-20
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **主动私信**（每个人自己开，默认关）：`/ds-dm 主动 档位:低/中/高`，你一阵子没找它，它会自己来私信你说句话。
+  - **多久一次**：低 = 6～10 小时没聊、一天最多 1～2 次；中 = 3～5 小时、3～4 次；高 = 1.5～3 小时、5～7 次（都在范围里随机）。你一说话，钟就重新走。
+  - **时段**：默认全天。想限定就一起填「从几点」「到几点」（可以跨夜，比如 22 到 2；都填 0 改回全天）。
+  - **没回就停**：连着 3 次你都没回，它先停下，等你说话了再继续。
+  - **说什么**：它自己挑：问候、接着你们聊过的事或者私信记忆里记着的事问一句。三成的时候程序先替它搜一条你感兴趣的新鲜事，合适它就分享、带上链接，不合适就照常问候。
+  - `/ds-dm 状态` 多了一行主动私信的情况。
+- **冒泡分三档**：`/dsadmin 设置 参数:冒泡 值:关/低/中/高`。低 = 安静 8～12 小时、一天最多 1 次；中 = 4～6 小时、3 次（就是以前的“开”）；高 = 2～3 小时、5 次。
+- 冒泡不去搜新鲜事的那几次，它不只打招呼，也会提起以前聊过的事、长期记忆里记着的事（约好的活动、还在进行的剧情、大家的梗），说什么它自己挑。
+
+**变更**
+
+- **服务器的长期记忆上限从 50 条改成 300 条**（`[engine]` 的 `memory_max_entries`）。记得很多时，聊天里只列最近改过的那些（最多约 10000 字，新的 `memory_prompt_chars`；正好是以前 50 条写满的量），比较早的它聊天时看不到、也不能照编号改删；整理记忆时全都看得到。没超过这个量的服务器和以前一样。
+- 冒泡去搜新鲜事的比例从八成改成七成（`bubble_greet_share` 0.2 → 0.3）。
+- “冒泡间隔小时”这个参数和 `[engine]` 的 `bubble_daily_limit` 没有了，由档位决定。旧的 `config.toml` 里留着这两行也不会报错。
+
+**修复**
+
+- `/dsadmin 设置` 选了「冒泡」以后，「值」一栏不弹选项（2.11.0 起就这样）：现在会弹出 关 / 低 / 中 / 高。
+
+**须知**
+
+- 主动私信要先私信过它一次（它得知道往哪发）；私信挂的那个服务器关掉了私信时不发。你关了私信、屏蔽了它，连着两次发不出去，它会替你关掉。
+- 主动私信去搜的话题是从你们的私信里看出来的，只记能公开搜的兴趣（游戏、作品、比赛、技术这类），不记私事；发给搜索服务的只有话题那几个词。关掉主动私信时，记下的兴趣一起删掉。
+- 花费：每发一次是一次模型调用（去搜的那次再加一两次搜索），算进私信挂的那个服务器的预算和这个人今天的私信额度；额度用完了就不再主动找他。
+- 没定时段的话半夜也可能发：不想被吵到就填时段。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.12.0 启动中`。数据库会自动多出一张表（`dm_reach`），原来的数据不动。
+- 你自己的 `config.toml` 里要是写着 `memory_max_entries = 50`，上限还是 50：想要 300 就把那一行改掉（或者删掉那一行）。
+- 2.11.0 里开着冒泡的频道自动算中档，不用重新设。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 主动私信就是私信里的冒泡，走同一套：`engine.py` 的 `_bubble_profile`（这里照什么规矩来：频道看档位和 `config.toml` 的时段，私信看那个人自己定的）、`_Bubble`、`_in_hours`、`_bubble_cap`（一天几次是个范围时每天随机定一次）、`_reach_off`。`bubble_state.waiting` 从“等没等人理”改成“连着几次没人理”。
+- `store.py`：`dm_reach` 表，`dm_reach` / `set_dm_reach` / `dm_reach_channels` / `clear_interests`。`config.py`：`BUBBLE_LEVELS`、`REACH_LEVELS`、`level_of`。
+- 用真模型演练过：下午、晚上、深夜各发一次，话题换着来（毕设、猫、比赛），第四次因为连着三次没回没有发；搜到的不合适时改成了问候。
+- 测试共 1482 个（新增 `tests/test_reach.py`）。
+
+### English
+
+**Added**
+
+- **Proactive DMs** (each person turns it on for themselves, off by default): `/ds-dm 主动 档位:低/中/高`. When you haven't talked to the bot for a while, it DMs you first.
+  - **How often**: low = after 6–10 hours without a chat, at most 1–2 a day; mid = 3–5 hours, 3–4 a day; high = 1.5–3 hours, 5–7 a day (random within the range). The clock restarts whenever you write.
+  - **Hours**: any time by default. To limit it, fill in both "从几点" and "到几点" (may cross midnight, e.g. 22 to 2; 0 and 0 means any time again).
+  - **It stops if you don't answer**: after 3 messages in a row without a reply it waits until you write.
+  - **What it says** is up to the bot: a greeting, or a question about something you talked about or something in your DM memory. 30% of the time the engine first searches for something recent about one of your interests; the bot shares it with the link if it fits, otherwise it just greets you.
+  - `/ds-dm 状态` has a new line about proactive DMs.
+- **Three bubbling levels**: `/dsadmin 设置 参数:冒泡 值:关/低/中/高`. Low = after 8–12 quiet hours, once a day at most; mid = 4–6 hours, 3 a day (the former "on"); high = 2–3 hours, 5 a day.
+- When a bubble doesn't search for news, the bot may also bring up things discussed earlier or kept in long-term memory (planned events, ongoing stories, running jokes) instead of only saying hello.
+
+**Changed**
+
+- **The server long-term memory limit goes from 50 to 300 entries** (`memory_max_entries` in `[engine]`). When there are many, only the most recently changed ones are listed in chat (about 10,000 characters, the new `memory_prompt_chars`; exactly what 50 full entries used to take); older ones aren't visible in chat and can't be edited or deleted by number there, but tidying memory still sees all of them. Servers below that amount behave as before.
+- Bubbles now search for news 70% of the time instead of 80% (`bubble_greet_share` 0.2 → 0.3).
+- The "冒泡间隔小时" setting and `bubble_daily_limit` in `[engine]` are gone; the level decides. An old `config.toml` that still has them is accepted.
+
+**Fixed**
+
+- In `/dsadmin 设置`, choosing "冒泡" didn't offer any values (since 2.11.0); it now offers 关 / 低 / 中 / 高.
+
+**Notes**
+
+- Proactive DMs need you to have DMed the bot once (it has to know where to send); nothing is sent while the server your DMs belong to has DMs turned off. If you closed your DMs or blocked the bot and two messages in a row can't be delivered, it turns the feature off for you.
+- The topics it searches for come from your DMs, limited to interests that are fine to search publicly (games, shows, sports, tech and the like), never personal matters; only the topic words are sent to the search service. Turning proactive DMs off deletes the noted interests.
+- Cost: each message is one model call (plus one or two searches when it searches), counted toward the server's budget and that person's daily DM allowance; once the allowance is used up it stops reaching out.
+- With no hours set it may write in the middle of the night: set hours if you don't want that.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.12.0 启动中`. One table (`dm_reach`) is added to the database automatically; existing data is untouched.
+- If your own `config.toml` says `memory_max_entries = 50`, the limit stays 50: change or delete that line to get 300.
+- Channels that had bubbling on in 2.11.0 count as the middle level; nothing to redo.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- A proactive DM is a bubble in a DM and uses the same path: in `engine.py`, `_bubble_profile` (the rules that apply here: level and `config.toml` hours for a channel, the person's own choice for a DM), `_Bubble`, `_in_hours`, `_bubble_cap` (a daily range is rolled once a day), `_reach_off`. `bubble_state.waiting` now counts consecutive unanswered bubbles.
+- `store.py`: table `dm_reach`, `dm_reach` / `set_dm_reach` / `dm_reach_channels` / `clear_interests`. `config.py`: `BUBBLE_LEVELS`, `REACH_LEVELS`, `level_of`.
+- Rehearsed with the real model: one message in the afternoon, evening and late night, each on a different subject (thesis, cat, race); the fourth wasn't sent after three unanswered ones; when the search result didn't fit, it greeted instead.
+- There are now 1482 tests (new `tests/test_reach.py`).
+
 ## [2.11.0] - 2026-11-19
 
 > 英文版这次没有更新，还是 2.0.0。
