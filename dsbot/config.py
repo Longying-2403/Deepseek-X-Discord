@@ -39,8 +39,12 @@ _SPEC_LIST = [
     Spec("proactive", "主动发言", bool, "admin", "没被点名时，是否自己判断要不要说话"),
     Spec("check_minutes", "几分钟看一眼", int, "admin", "开了主动发言时，平时隔多久看一眼这个频道有没有新的聊天（填 5 就是每 5～8 分钟，随机）", 1, 720),
     Spec("follow", "聊起来就跟着", bool, "admin", "它开口了、或者有人叫了它之后，接着留意这里的聊天，有人说话就看要不要接；5 分钟没人说话、或者连着几次都没话说就回到平时"),
-    Spec("bubble", "冒泡", bool, "admin", "这个频道安静久了，它自己冒个泡：说说大家感兴趣的新鲜事（多半是 X 上的）、打个招呼，也可能不说。只对本频道生效（见 /dsadmin 兴趣）"),
-    Spec("bubble_hours", "冒泡间隔小时", int, "admin", "安静多久以后冒泡：填的数到它的 1.5 倍之间，每次随机（填 4 就是 4～6 小时）", 1, 168),
+    Spec(
+        "bubble", "冒泡", str, "admin",
+        "这个频道安静久了，它自己冒个泡：说说大家感兴趣的新鲜事（多半是 X 上的）、打个招呼、提起以前聊过的事，也可能不说。"
+        "关 / 低（安静 8～12 小时，一天最多 1 次）/ 中（4～6 小时，3 次）/ 高（2～3 小时，5 次）。只对本频道生效（见 /dsadmin 兴趣）",
+        choices=("off", "low", "mid", "high"),
+    ),
     Spec("quiet_seconds", "冷场秒数", int, "admin", "平时看一眼时，等多久没人说话、也没人在打字才判断（别人正说着不插话）", 5, 3600),
     Spec("max_wait_seconds", "最长等待秒", int, "admin", "平时看一眼时一直有人在说话：最多等多久也判断一次", 30, 86400),
     Spec("mention_rate_limit", "每人每分钟点名", int, "admin", "每个人每分钟最多能叫它几次", 1, 60),
@@ -78,8 +82,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "proactive": False,
     "check_minutes": 5,
     "follow": True,
-    "bubble": False,
-    "bubble_hours": 4,
+    "bubble": "off",
     "quiet_seconds": 30,
     "max_wait_seconds": 180,
     "mention_rate_limit": 3,
@@ -119,6 +122,28 @@ def check_range(minutes: int) -> tuple[int, int]:
     """平时看一眼的间隔：最短、最长几分钟（10 → 10～15，5 → 5～8，3 → 3～5）。"""
     return minutes, max(minutes + 1, math.ceil(minutes * 1.5))
 
+# 冒泡（频道）、主动私信（每个人自己的）的档位：安静多久以后（最短、最长几小时，每次随机）、一天最多几次（最少、最多，每天随机）
+LEVEL_LABELS = {"off": "关", "low": "低", "mid": "中", "high": "高"}
+BUBBLE_LEVELS: dict[str, tuple[float, float, int, int]] = {"low": (8, 12, 1, 1), "mid": (4, 6, 3, 3), "high": (2, 3, 5, 5)}
+REACH_LEVELS: dict[str, tuple[float, float, int, int]] = {"low": (6, 10, 1, 2), "mid": (3, 5, 3, 4), "high": (1.5, 3, 5, 7)}
+_LEVEL_WORDS = {"关": "off", "低": "low", "中": "mid", "高": "high", "开": "mid", "medium": "mid", "middle": "mid"}
+
+
+def level_of(raw: Any) -> str:
+    """档位：off / low / mid / high。也认 关 / 低 / 中 / 高；以前的 开（true）算中档。认不出来抛 ValueError。"""
+    if isinstance(raw, bool):
+        return "mid" if raw else "off"
+    text = str(raw).strip().lower()
+    text = _LEVEL_WORDS.get(text, text)
+    if text in _TRUE:
+        return "mid"
+    if text in _FALSE:
+        return "off"
+    if text not in LEVEL_LABELS:
+        raise ValueError("只能是：关 / 低 / 中 / 高")
+    return text
+
+
 _TRUE = {"on", "true", "1", "yes", "y", "开", "是", "启用", "打开"}
 _FALSE = {"off", "false", "0", "no", "n", "关", "否", "停用", "关闭"}
 RESET_WORDS = {"默认", "default", "reset", "清除"}
@@ -126,6 +151,11 @@ RESET_WORDS = {"默认", "default", "reset", "清除"}
 
 def parse_value(spec: Spec, raw: Any) -> Any:
     """把命令里输入的字符串（或 toml 里的值）转成参数值，不合法就抛 ValueError（中文说明）。"""
+    if spec.key == "bubble":
+        try:
+            return level_of(raw)
+        except ValueError:
+            raise ValueError(f"「{spec.label}」只能是：关 / 低 / 中 / 高") from None
     if spec.kind is bool:
         if isinstance(raw, bool):
             return raw
@@ -165,6 +195,11 @@ def parse_value(spec: Spec, raw: Any) -> Any:
 
 
 def format_value(spec: Spec, value: Any) -> str:
+    if spec.key == "bubble":
+        try:
+            return LEVEL_LABELS[level_of(value)]
+        except ValueError:
+            return "关"
     if spec.kind is bool:
         return "开" if value else "关"
     if spec.kind is float:
@@ -226,8 +261,9 @@ class EngineConfig:
     # 冒泡（/dsadmin 设置 参数:冒泡 在频道里打开）
     bubble_from_hour: int = 8  # 几点以后才冒泡（bot.timezone 的时间）
     bubble_until_hour: int = 23  # 几点以后不冒泡
-    bubble_daily_limit: int = 3  # 每个频道每天最多冒几次泡
-    bubble_greet_share: float = 0.2  # 多少比例的冒泡只打个招呼、不去搜新鲜事
+    bubble_greet_share: float = 0.3  # 多少比例的冒泡不去搜新鲜事（打个招呼，或者提起以前聊过的事）
+    reach_search_share: float = 0.3  # 主动私信时，多少比例先替它搜一条他感兴趣的新鲜事（其余它自己决定说什么）
+    reach_max_unanswered: int = 3  # 主动私信连着几次没人回就停下，等他说话了再继续
     bubble_x_share: float = 0.7  # 去搜新鲜事时，多少比例只搜 X 上的（其余搜全网的新闻）
     bubble_fresh_days: int = 3  # 只要最近几天的
     bubble_max_topics: int = 20  # 它自己看出来的兴趣每个频道最多留几个
@@ -255,8 +291,9 @@ class EngineConfig:
     card_max_chars: int = 1600  # 一张人设卡最多多少字
     cards_per_round: int = 6  # 一轮最多附几个人的人设卡
     card_list_limit: int = 100  # 告诉它哪些人有人设卡，最多列多少个名字
-    memory_max_entries: int = 50  # 每个服务器的长期记忆最多几条
+    memory_max_entries: int = 300  # 每个服务器的长期记忆最多几条
     memory_entry_chars: int = 200  # 每条长期记忆最多多少字
+    memory_prompt_chars: int = 10000  # 聊天时最多列出多少字的长期记忆（太多了只列最近改过的；整理记忆时全都看得到）
     dm_memory_max_entries: int = 150  # 每个人的私信记忆最多几条（满了它会自己合并、删掉旧的）
     dm_memory_entry_chars: int = 200  # 每条私信记忆最多多少字
     dm_memory_prompt_chars: int = 6000  # 私信里最多列出多少字的私信记忆（太多了只列最近改过的；整理记忆时全都看得到）
@@ -281,8 +318,9 @@ class AppConfig:
 RETIRED = {
     "deepseek": {"search_base_url", "search_timeout_seconds", "search_max_uses"},  # 2.5.0 起联网搜索改用 Search 接口
     # 2.10.0 起主动发言不按“额度”算了（平时隔几分钟看一眼、聊起来就跟着）
-    "defaults": {"refill_turns", "quota_capacity", "min_speak_gap", "min_eval_interval"},
-    "engine": {"react_cost"},
+    # 2.12.0 起冒泡按档位算（低 / 中 / 高），不再单独填间隔和每天几次
+    "defaults": {"refill_turns", "quota_capacity", "min_speak_gap", "min_eval_interval", "bubble_hours"},
+    "engine": {"react_cost", "bubble_daily_limit"},
 }
 
 

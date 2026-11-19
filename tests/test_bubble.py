@@ -1,8 +1,8 @@
 """2.11.0 冒泡：频道安静了很久，它自己来说点什么。
 
-- 只在开了冒泡的频道（只认频道自己这一级的设置）；安静 bubble_hours～1.5 倍小时（随机）以后；只在白天（8～23 点）；
-  每天最多 3 次；上次冒的没人理，就等有人说话再冒。
-- 大多数时候（八成）替它找一条新鲜事：先单独问一次模型“这群人对什么感兴趣”，程序从里面（和记着的兴趣里）挑一个最近
+- 只在开了冒泡的频道（只认频道自己这一级的设置）；2.12.0 起按档位：低 = 安静 8～12 小时、一天 1 次，中 = 4～6 小时、
+  3 次（以前的“开”），高 = 2～3 小时、5 次；只在白天（8～23 点）；上次冒的没人理，就等有人说话再冒。
+- 大多数时候（七成）替它找一条新鲜事：先单独问一次模型“这群人对什么感兴趣”，程序从里面（和记着的兴趣里）挑一个最近
   没搜过的话题去搜，限定最近 3 天，七成先只搜 X 上的、没搜到再搜全网；搜到的写在这一轮里，它挑一条用自己的话说。
   其余时候、不能搜、看不出兴趣、没搜到时，只打个招呼。
 - 搜过的话题记进这个频道的兴趣；管理员不让搜的不搜；发过的链接记下来，下次告诉它别再发。
@@ -35,15 +35,20 @@ def TOPICS(*names):
 
 
 class Fixed(random.Random):
-    """随机的间隔取最短的那头；roll：掷出来的数（0.8 以上只打招呼；小于 0.7 先搜 X，否则搜全网）。"""
+    """随机的间隔取最短的那头；roll：掷出来的数（搜不搜：0.7 以上不搜；去哪搜：小于 0.7 先搜 X，否则搜全网）。
+    rolls：依次掷出来的数（用完了再用 roll）。"""
 
     roll = 0.0
+    rolls: list = []
 
     def uniform(self, a, b):
         return a
 
+    def randint(self, a, b):
+        return b
+
     def random(self):
-        return self.roll
+        return type(self).rolls.pop(0) if type(self).rolls else self.roll
 
     def choice(self, seq):
         return seq[0]
@@ -72,6 +77,7 @@ def asked_for_topics(call):
 class Case(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.addCleanup(setattr, Fixed, "roll", 0.0)
+        self.addCleanup(setattr, Fixed, "rolls", [])
 
     async def say(self, engine, mid, words="最近原神新版本好玩吗", author=11, **kw):
         await engine.handle_message(msg(mid, words, author=author, **kw))
@@ -159,7 +165,7 @@ class WhenItBubbles(Case):
         engine, llm, transport, clock, searcher = setup([REPLY(None, "嗨")])
         await self.say(engine, 501)
         st = engine.states[CHANNEL]
-        st.bubble_loaded, st.bubble_day, st.bubble_count = True, engine.ledger.day(clock()), engine.ec.bubble_daily_limit
+        st.bubble_loaded, st.bubble_day, st.bubble_count = True, engine.ledger.day(clock()), 3  # 中档一天 3 次
         await self.wait(engine, clock, 4 * HOUR + 1)
         self.assertEqual(llm.calls, [])  # 今天冒够了
         st.bubble_count -= 1
@@ -227,13 +233,13 @@ class WhatItShares(Case):
         self.assertEqual(engine.store.count_usage(engine.ledger.day(clock()), guild_id=GUILD, kind="search"), 2)  # 两次都记上
 
     async def test_some_of_the_time_it_searches_the_news(self):
-        Fixed.roll = 0.75  # 不是只打招呼的那两成（0.8 以上），也不在先搜 X 的那七成里
+        Fixed.rolls = [0.5, 0.75]  # 这次去搜（不在不搜的那三成里），但不在先搜 X 的那七成里
         engine, llm, transport, clock, searcher = await self.bubbled()
         self.assertEqual(searcher.calls, [NEWS_QUERY])
-        self.assertEqual((engine.ec.bubble_x_share, engine.ec.bubble_greet_share), (0.7, 0.2))
+        self.assertEqual((engine.ec.bubble_x_share, engine.ec.bubble_greet_share), (0.7, 0.3))
 
     async def test_now_and_then_it_just_says_hello(self):
-        Fixed.roll = 0.9  # 两成的时候不找新鲜事
+        Fixed.roll = 0.9  # 三成的时候不找新鲜事
         engine, llm, transport, clock, searcher = await self.bubbled([REPLY(None, "下午好")])
         self.assertEqual(len(llm.calls), 1)  # 不问兴趣、不搜
         self.assertFalse(asked_for_topics(llm.calls[0]))

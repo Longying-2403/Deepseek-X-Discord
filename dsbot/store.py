@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS dm_homes (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dm_homes_channel ON dm_homes (channel_id);
+CREATE TABLE IF NOT EXISTS dm_reach (
+    user_id INTEGER PRIMARY KEY,  -- 让它主动私信自己的人（/ds-dm 主动；每个人只管自己的）
+    level TEXT NOT NULL,          -- low / mid / high（关掉就删掉这一行）
+    from_hour INTEGER,            -- 只在几点到几点之间发（都是 NULL = 全天）；可以跨夜（22 到 2）
+    until_hour INTEGER,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS server_groups (
     guild_id INTEGER PRIMARY KEY,  -- 连成一组的服务器（bot 主人用 /dsowner 服务器组 连的）
     group_id INTEGER NOT NULL,     -- 哪个组：负数，组里共用的人设卡、长期记忆按它存（和服务器 ID 撞不上）
@@ -132,7 +139,7 @@ CREATE TABLE IF NOT EXISTS interests (
 CREATE TABLE IF NOT EXISTS bubble_state (
     channel_id INTEGER PRIMARY KEY,  -- 开了冒泡的频道：重启以后也记得今天冒过几次、上次有没有人理
     last_at REAL NOT NULL DEFAULT 0,
-    waiting INTEGER NOT NULL DEFAULT 0,  -- 上次冒泡以后还没人说话：等有人说话再冒
+    waiting INTEGER NOT NULL DEFAULT 0,  -- 连着冒了几次泡都没人说话（频道：1 次就等有人说话；主动私信：3 次）
     day TEXT NOT NULL DEFAULT '',
     count INTEGER NOT NULL DEFAULT 0     -- day 那天冒了几次
 );
@@ -344,16 +351,23 @@ class Store:
             )
             self._trim_interests(channel_id, keep)
 
+    def clear_interests(self, channel_id: int) -> None:
+        """这个频道（私信）记着的兴趣、发过的链接全部删掉（关掉主动私信时）。"""
+        with self.db:
+            self.db.execute("DELETE FROM interests WHERE channel_id = ?", (channel_id,))
+            self.db.execute("DELETE FROM bubble_links WHERE channel_id = ?", (channel_id,))
+            self.db.execute("DELETE FROM bubble_state WHERE channel_id = ?", (channel_id,))
+
     def delete_interest(self, channel_id: int, topic: str) -> bool:
         with self.db:
             return self.db.execute("DELETE FROM interests WHERE channel_id = ? AND topic = ?", (channel_id, topic)).rowcount > 0
 
-    def bubble_state(self, channel_id: int) -> tuple[float, bool, str, int]:
-        """(上次冒泡的时间, 还在等人说话, 哪一天, 那天冒了几次)。"""
+    def bubble_state(self, channel_id: int) -> tuple[float, int, str, int]:
+        """(上次冒泡的时间, 连着几次没人理, 哪一天, 那天冒了几次)。"""
         r = self.db.execute("SELECT last_at, waiting, day, count FROM bubble_state WHERE channel_id = ?", (channel_id,)).fetchone()
-        return (r["last_at"], bool(r["waiting"]), r["day"], r["count"]) if r is not None else (0.0, False, "", 0)
+        return (r["last_at"], int(r["waiting"]), r["day"], r["count"]) if r is not None else (0.0, 0, "", 0)
 
-    def set_bubble_state(self, channel_id: int, last_at: float, waiting: bool, day: str, count: int) -> None:
+    def set_bubble_state(self, channel_id: int, last_at: float, waiting: int, day: str, count: int) -> None:
         with self.db:
             self.db.execute(
                 "INSERT INTO bubble_state (channel_id, last_at, waiting, day, count) VALUES (?, ?, ?, ?, ?) "
@@ -858,6 +872,32 @@ class Store:
                 "channel_id = COALESCE(excluded.channel_id, dm_homes.channel_id), updated_at = excluded.updated_at",
                 (user_id, guild_id, channel_id, time.time()),
             )
+
+    def dm_reach(self, user_id: int) -> tuple[str, int | None, int | None] | None:
+        """他让它主动私信自己的设置：(档位, 从几点, 到几点)；没开是 None。"""
+        r = self.db.execute("SELECT level, from_hour, until_hour FROM dm_reach WHERE user_id = ?", (user_id,)).fetchone()
+        return (r["level"], r["from_hour"], r["until_hour"]) if r is not None else None
+
+    def dm_reach_channels(self) -> dict[int, tuple[int, str, int | None, int | None]]:
+        """开了主动私信、又私信过它的人：私信频道 -> (人, 档位, 从几点, 到几点)。"""
+        rows = self.db.execute(
+            "SELECT h.channel_id, h.user_id, r.level, r.from_hour, r.until_hour FROM dm_reach r "
+            "JOIN dm_homes h ON h.user_id = r.user_id WHERE h.channel_id IS NOT NULL"
+        )
+        return {int(r["channel_id"]): (int(r["user_id"]), r["level"], r["from_hour"], r["until_hour"]) for r in rows}
+
+    def set_dm_reach(self, user_id: int, level: str | None, from_hour: int | None = None, until_hour: int | None = None) -> None:
+        """level 是 None：关掉。"""
+        with self.db:
+            if level is None:
+                self.db.execute("DELETE FROM dm_reach WHERE user_id = ?", (user_id,))
+            else:
+                self.db.execute(
+                    "INSERT INTO dm_reach (user_id, level, from_hour, until_hour, updated_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET level = excluded.level, from_hour = excluded.from_hour, "
+                    "until_hour = excluded.until_hour, updated_at = excluded.updated_at",
+                    (user_id, level, from_hour, until_hour, time.time()),
+                )
 
     # ---------------------------------------------------------------- 服务器组
 

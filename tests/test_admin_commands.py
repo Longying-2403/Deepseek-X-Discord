@@ -464,25 +464,39 @@ class Bubbling(WithBot):
         from dsbot.commands import OWNER_SET_KEYS
 
         said, _ = await self.run_command("设置", args=(self.key("bubble"), "开", scope("全服务器")))
-        self.assertIn(f"<#{CHANNEL}>：「冒泡」= 开", said)  # 选了全服务器也是本频道
-        self.assertIn("冒泡：开 · 安静 4～6 小时以后冒一次，只在 8～23 点，每天最多 3 次", said)
+        self.assertIn(f"<#{CHANNEL}>：「冒泡」= 中", said)  # 选了全服务器也是本频道；以前的“开”就是中档
+        self.assertIn("冒泡：中 · 安静 4～6 小时以后冒一次，只在 8～23 点，每天最多 3 次", said)
         self.assertIn("`/dsadmin 兴趣 查看` 能看到、能加、能删", said)
-        self.assertEqual((self.overrides("channel"), self.overrides("guild")), ({"bubble": True}, {}))
-        said, _ = await self.run_command("设置", args=(self.key("bubble_hours"), "6", scope("本类别")))
-        self.assertIn(f"<#{CHANNEL}>：「冒泡间隔小时」= 6", said)
-        self.assertIn("安静 6～9 小时以后冒一次", said)
+        self.assertEqual((self.overrides("channel"), self.overrides("guild")), ({"bubble": "mid"}, {}))
+        said, _ = await self.run_command("设置", args=(self.key("bubble"), "高", scope("本类别")))
+        self.assertIn(f"<#{CHANNEL}>：「冒泡」= 高", said)
+        self.assertIn("冒泡：高 · 安静 2～3 小时以后冒一次，只在 8～23 点，每天最多 5 次", said)
         self.assertEqual(self.overrides("category"), {})
+        said, _ = await self.run_command("设置", args=(self.key("bubble"), "低", None))
+        self.assertIn("冒泡：低 · 安静 8～12 小时以后冒一次，只在 8～23 点，每天最多 1 次", said)
+        said, _ = await self.run_command("设置", args=(self.key("bubble"), "很高", None))
+        self.assertIn("没改成：「冒泡」只能是：关 / 低 / 中 / 高", said)
         said, _ = await self.run_command("设置", args=(self.key("bubble"), "关", None))
         self.assertIn("冒泡：关", said)
+        self.assertNotIn("兴趣 查看", said)
         self.assertNotIn("bubble", OWNER_SET_KEYS)  # 主人的 设置 是全局、全服务器的：不能拿来开冒泡
-        self.assertNotIn("bubble_hours", OWNER_SET_KEYS)
+        self.assertNotIn("bubble_hours", SPECS)  # 2.12.0 起由档位决定
+
+    def test_value_choices_and_old_switch(self):
+        from dsbot.commands import bubble_level, value_choices
+
+        self.assertEqual([c.name for c in value_choices("bubble", "")][:4], ["关", "低", "中", "高"])
+        self.bot.settings._overrides[("channel", CHANNEL)] = {"bubble": True}  # 2.11.0 存下的“开”
+        self.assertEqual(bubble_level(self.bot, CHANNEL), "mid")
+        self.bot.settings._overrides[("channel", CHANNEL)] = {"bubble": False}
+        self.assertEqual(bubble_level(self.bot, CHANNEL), "off")
 
     async def test_status_has_a_bubble_line(self):
         said, _ = await self.run_command("状态")
-        self.assertIn("冒泡：关（`/dsadmin 设置 参数:冒泡 值:开` 在这个频道打开）", said)
-        await self.run_command("设置", args=(self.key("bubble"), "开", None))
+        self.assertIn("冒泡：关（`/dsadmin 设置 参数:冒泡 值:低/中/高` 在这个频道打开）", said)
+        await self.run_command("设置", args=(self.key("bubble"), "中", None))
         said, _ = await self.run_command("状态")
-        self.assertIn("冒泡：开 · 安静 4～6 小时以后冒一次", said)
+        self.assertIn("冒泡：中 · 安静 4～6 小时以后冒一次", said)
 
     async def test_interests(self):
         from dsbot.commands import interest_choices

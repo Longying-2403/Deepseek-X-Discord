@@ -26,7 +26,19 @@ import discord
 from discord import app_commands
 from discord.app_commands import Choice
 
-from .config import ADMIN_KEYS, OWNER_KEYS, PRESETS, RESET_WORDS, SPECS, check_range, format_value
+from .config import (
+    ADMIN_KEYS,
+    BUBBLE_LEVELS,
+    LEVEL_LABELS,
+    OWNER_KEYS,
+    PRESETS,
+    REACH_LEVELS,
+    RESET_WORDS,
+    SPECS,
+    check_range,
+    format_value,
+    level_of,
+)
 from .convert import safe_category_id
 from .groups import (
     GroupError,
@@ -78,7 +90,7 @@ NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”�
 # 区域（允许回应）、人设有专门的命令；其余管理员参数走 /dsadmin 设置（主动发言、记忆共享也在里面：2.9.0 以前各有一个命令）
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "persona")]
 GUILD_ONLY_KEYS = ("dm", "dm_memory", "cross_server")  # 只看全服务器这一级的参数
-CHANNEL_ONLY_KEYS = ("bubble", "bubble_hours")  # 冒泡：只在本频道这一级设（开在全服务器上，每个频道都冒泡就太吵了）
+CHANNEL_ONLY_KEYS = ("bubble",)  # 冒泡：只在本频道这一级设（开在全服务器上，每个频道都冒泡就太吵了）
 OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona" and k not in CHANNEL_ONLY_KEYS]
 INTEREST_KINDS = {"auto": "它从聊天里看出来的", "manual": "管理员加的", "blocked": "不让搜的"}
 INTEREST_MAX_CHARS = 40
@@ -89,11 +101,15 @@ def value_choices(key: str | None, current: str) -> list[Choice[str]]:
     """/dsadmin 设置 的「值」一栏弹出的选项：选好了参数，就列出它能填的（开关：开 / 关；只有固定几种的：那几种），最后是
     “默认”。数字、文字照样手打：打的字和选项对不上就什么都不弹，发出去的是打的那几个字。还没选参数时也不弹。
     key：选单里那一项的参数名；给的是中文名也认（输入到一半时，Discord 给的不一定是选好的那一项的值）。"""
-    spec = SPECS.get(owner_key(key) or "") if key else None
+    # 冒泡这种只在本频道设的参数不在主人的名单里：直接按参数名、中文名找
+    name = (key or "").strip()
+    spec = SPECS.get(owner_key(name) or name) or next((s for s in SPECS.values() if s.label == name), None) if name else None
     if spec is None:
         return []
     if spec.kind is bool:
         options = ["开", "关"]
+    elif spec.key == "bubble":
+        options = ["关", "低", "中", "高"]
     else:
         options = list(spec.choices or ())
     out = [Choice(name=option, value=option) for option in options] + [Choice(name=RESET_CHOICE, value="默认")]
@@ -607,23 +623,63 @@ def setting_notes(bot: "DSBot", interaction: discord.Interaction, key: str, valu
             notes.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
     if key in CHANNEL_ONLY_KEYS:
         notes.append(bubble_text(bot, interaction))
-        if key == "bubble" and value:
+        if key == "bubble" and value and value != "off":
             notes.append("它会从这里的聊天里看大家对什么感兴趣，去搜最近的新鲜事（多半是 X 上的）；`/dsadmin 兴趣 查看` 能看到、能加、能删。只对这个频道生效。")
     return notes
+
+
+def bubble_level(bot: "DSBot", channel_id: int | None) -> str:
+    """这个频道的冒泡档位（off / low / mid / high）：只认频道自己这一级的设置；以前的“开”算中档。"""
+    try:
+        return level_of(bot.settings.overrides("channel", channel_id or 0).get("bubble", "off"))
+    except ValueError:
+        return "off"
+
+
+def _hours_text(low: float, high: float) -> str:
+    return f"{low:g}～{high:g} 小时"
+
+
+def _times_text(least: int, most: int) -> str:
+    return f"{least} 次" if least == most else f"{least}～{most} 次"
+
+
+def hours_window_text(start: int | None, end: int | None) -> str:
+    """主动私信的时段：没填（或者两个一样）= 全天。"""
+    if start is None or end is None or start == end:
+        return "全天"
+    return f"{start} 点到{'第二天 ' if start > end else ''}{end} 点"
+
+
+def reach_text(bot: "DSBot", user_id: int) -> str:
+    """他的主动私信现在怎么样（/ds-dm 状态 里的一行；/ds-dm 主动 改完以后也说一遍）。"""
+    reach = bot.store.dm_reach(user_id)
+    if reach is None or reach[0] not in REACH_LEVELS:
+        return "主动私信：关（`/ds-dm 主动 档位:低/中/高` 打开：你一阵子没找它，它会自己来找你说句话）"
+    low, high, least, most = REACH_LEVELS[reach[0]]
+    strikes = max(1, int(getattr(getattr(getattr(bot, "cfg", None), "engine", None), "reach_max_unanswered", 3)))
+    text = (
+        f"主动私信：{LEVEL_LABELS[reach[0]]} · 你 {_hours_text(low, high)}没找它，它会来找你说句话，一天最多 {_times_text(least, most)}"
+        f" · 时段：{hours_window_text(reach[1], reach[2])} · 连着 {strikes} 次你都没回就先停下，等你说话了再继续"
+    )
+    home = bot.store.dm_home(user_id)
+    if home is None or home[1] is None:
+        text += "\n⚠️ 你还没私信过它：先私信它说句话，它才知道往哪发。"
+    return text
 
 
 def bubble_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     """这个频道的冒泡现在怎么样（状态里的一行；改了冒泡的设置以后也说一遍）。"""
     st = bot.engine.status(*_ids(interaction))
     info = st.get("bubble")
-    view = bot.settings.view(*_ids(interaction))
-    hours = int(view.bubble_hours)
-    if not bot.settings.overrides("channel", interaction.channel_id).get("bubble"):
-        return "冒泡：关（`/dsadmin 设置 参数:冒泡 值:开` 在这个频道打开）"
+    level = bubble_level(bot, interaction.channel_id)
+    if level == "off":
+        return "冒泡：关（`/dsadmin 设置 参数:冒泡 值:低/中/高` 在这个频道打开）"
     ec = bot.cfg.engine
+    low, high, least, most = BUBBLE_LEVELS[level]
     text = (
-        f"冒泡：开 · 安静 {hours}～{hours * 1.5:g} 小时以后冒一次，只在 {ec.bubble_from_hour}～{ec.bubble_until_hour} 点，"
-        f"每天最多 {ec.bubble_daily_limit} 次"
+        f"冒泡：{LEVEL_LABELS[level]} · 安静 {_hours_text(low, high)}以后冒一次，只在 {ec.bubble_from_hour}～{ec.bubble_until_hour} 点，"
+        f"每天最多 {_times_text(least, most)}"
     )
     if info is None:
         return text + " · 有人说过话以后开始算"
@@ -651,8 +707,8 @@ def interests_text(bot: "DSBot", channel_id: int) -> str:
             lines.append(f"{INTEREST_KINDS[kind]}：" + "、".join(names))
     if len(lines) == 1:
         lines.append("还没有。打开冒泡以后，这里聊上几句、停下来一阵，它会把看出来的大家感兴趣的话题记在这里，冒泡时拿去搜；也可以用 `/dsadmin 兴趣 添加` 自己加。")
-    if not bot.settings.overrides("channel", channel_id).get("bubble"):
-        lines.append("⚠️ 这个频道没开冒泡：`/dsadmin 设置 参数:冒泡 值:开` 打开")
+    if bubble_level(bot, channel_id) == "off":
+        lines.append("⚠️ 这个频道没开冒泡：`/dsadmin 设置 参数:冒泡 值:中` 打开（低 / 中 / 高）")
     return "\n".join(lines)
 
 
@@ -1856,6 +1912,7 @@ def register_dm_commands(bot: "DSBot") -> None:
                 lines.append("私信记忆：那个服务器关掉了（已经记下的还在，用 `/ds-dm 记忆` 看）")
             else:
                 lines.append(f"私信记忆：{len(entries)} 条（{hidden} 条敏感），用 `/ds-dm 记忆` 查看和管理")
+        lines.append(reach_text(bot, user_id))
         if user_id == bot.secrets.owner_id:
             lines.append(f"今天私信花了 ${spent:.4f}（你是 bot 的主人，不受每人上限限制）")
         else:
@@ -1864,6 +1921,64 @@ def register_dm_commands(bot: "DSBot") -> None:
             lines.append("⚠️ 那个服务器现在关掉了私信。" + await switch_note(user_id, home))
         elif interaction.guild_id != guild.id and await bot.is_member(guild, user_id) is False:
             lines.append("⚠️ 你已经不在那个服务器里了。" + await switch_note(user_id, home))
+        await _reply(interaction, "\n".join(lines))
+
+    @dm.command(name="主动", description="让它隔一阵主动私信你：关 / 低 / 中 / 高，还可以定只在几点到几点之间发（只管你自己的）")
+    @app_commands.rename(level="档位", start="从几点", end="到几点")
+    @app_commands.describe(
+        level="关 = 不主动找你；低 / 中 / 高 = 你一阵子没找它，它来找你的勤快程度（不选 = 只看现在的设置）",
+        start="只在几点以后发（0～23）；和「到几点」一起填，可以跨夜（22 到 2）。两个都不填 = 不改；都填 0 = 全天",
+        end="到几点为止（0～23，不含这个钟点）",
+    )
+    @app_commands.choices(
+        level=[
+            Choice(name="关", value="off"),
+            Choice(name="低：6～10 小时没聊，一天最多 1～2 次", value="low"),
+            Choice(name="中：3～5 小时没聊，一天最多 3～4 次", value="mid"),
+            Choice(name="高：1.5～3 小时没聊，一天最多 5～7 次", value="high"),
+        ]
+    )
+    async def dm_reach_cmd(
+        interaction: discord.Interaction,
+        level: Optional[Choice[str]] = None,
+        start: Optional[app_commands.Range[int, 0, 23]] = None,
+        end: Optional[app_commands.Range[int, 0, 23]] = None,
+    ) -> None:
+        user_id = interaction.user.id
+        current = bot.store.dm_reach(user_id)
+        if level is None and start is None and end is None:
+            await _reply(interaction, reach_text(bot, user_id))
+            return
+        if (start is None) != (end is None):
+            await _reply(interaction, "「从几点」和「到几点」要一起填（比如 从几点:8 到几点:23；都填 0 = 全天）。")
+            return
+        new_level = level.value if level is not None else (current[0] if current is not None else None)
+        if new_level is None:
+            await _reply(interaction, "主动私信还没打开：先选一个档位（低 / 中 / 高），时段可以一起填。")
+            return
+        channel_id = dm_channel_of(bot, interaction)
+        if new_level == "off":
+            bot.store.set_dm_reach(user_id, None)
+            if channel_id is not None:
+                bot.store.clear_interests(channel_id)  # 它为了找话题记下的你的兴趣、发过的链接也一起删掉
+            bot.engine.reach_changed()
+            await _reply(interaction, "主动私信：关。它不会再自己来找你；它为了找话题记下的你的兴趣也删掉了。你私信它，它照常回。")
+            return
+        if start is None:
+            window = (current[1], current[2]) if current is not None else (None, None)
+        else:
+            window = (None, None) if start == end else (int(start), int(end))
+        bot.store.set_dm_reach(user_id, new_level, window[0], window[1])
+        bot.engine.reach_changed()
+        lines = [reach_text(bot, user_id)]
+        home = bot.store.dm_home(user_id)
+        guild = bot.get_guild(home[0]) if home is not None else None
+        if guild is not None and not bot.dm_open(guild):
+            lines.append("⚠️ 你的私信现在用的那个服务器关掉了私信，它发不了：用 `/ds-dm 服务器` 换一个。")
+        lines.append(
+            "它会自己决定说什么：问候、接着你们以前聊过的事问一句，有时去搜一条你感兴趣的新鲜事（话题是从你们的私信里看出来的，"
+            "只拿公开的兴趣去搜，不拿你的私事）。每发一次算一次花费，算进你今天的私信额度。随时可以用 `/ds-dm 主动 档位:关` 关掉。"
+        )
         await _reply(interaction, "\n".join(lines))
 
     async def memory_numbers(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
@@ -2327,8 +2442,8 @@ def register_commands(bot: "DSBot") -> None:
             return
         bot.store.set_interest(interaction.channel_id, name, "manual", time.time())
         text = f"已加上：「{discord_safe(name)}」。"
-        if not bot.settings.overrides("channel", interaction.channel_id).get("bubble"):
-            text += "\n⚠️ 这个频道没开冒泡，现在用不上：`/dsadmin 设置 参数:冒泡 值:开` 打开"
+        if bubble_level(bot, interaction.channel_id) == "off":
+            text += "\n⚠️ 这个频道没开冒泡，现在用不上：`/dsadmin 设置 参数:冒泡 值:中` 打开（低 / 中 / 高）"
         await _reply(interaction, text)
 
     async def interest_options(interaction: discord.Interaction, current: str) -> list[Choice[str]]:

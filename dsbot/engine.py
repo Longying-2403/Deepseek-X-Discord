@@ -50,6 +50,10 @@ from .models import (
 )
 from .prompts import (
     BUBBLE_GREET,
+    REACH_FREE,
+    REACH_NOTE,
+    REACH_PICK,
+    REACH_TOPICS_PRIVATE,
     BUBBLE_TOPICS_KNOWN,
     BUBBLE_TOPICS_SYSTEM,
     BUBBLE_NOTE,
@@ -110,7 +114,7 @@ from .prompts import (
 )
 from .mentions import link, merge_tiers, name_forms
 from .music import pick_link
-from .config import check_range
+from .config import BUBBLE_LEVELS, REACH_LEVELS, check_range, level_of
 from .quota import SlidingWindow
 from .render import (
     Gallery,
@@ -166,6 +170,29 @@ FOLLOW_MAX_WAIT = 30.0  # 跟着的时候：一直有人在说，最多等这么
 _SEARCH_SYNTAX = ("site:", "-site:", "after:", "before:")  # 冒泡时模型自己写的这些限定去掉，由这边加
 _LINK = re.compile(r"https?://[^\s<>]+")
 _LINK_TAIL = "。，、；：！？）》」』)]>,.;:!?\"'"
+REACH_FAIL_LIMIT = 2  # 主动私信连着几次发不出去就替他关掉
+
+
+@dataclass(frozen=True)
+class _Bubble:
+    """冒泡的规矩：安静多久以后（最短、最长几小时）、一天最多几次（最少、最多）、连着几次没人理就停、只在几点到几点。"""
+
+    low: float
+    high: float
+    least: int
+    most: int
+    strikes: int
+    from_hour: int | None
+    until_hour: int | None
+
+
+def _in_hours(hour: int, start: int | None, end: int | None) -> bool:
+    """hour 点在不在 start～end 点之间（不含 end）。没填、两个一样 = 全天；start 比 end 大 = 跨夜（22～2）。"""
+    if start is None or end is None or start == end:
+        return True
+    return start <= hour < end if start < end else hour >= start or hour < end
+
+
 BUBBLE_ASK_TOPICS = 3  # 看大家的兴趣：一次最多要几个话题
 BUBBLE_SCOUT_MIN = 4  # 开了冒泡的频道：攒了这么多条新消息、聊天又停了一阵，就看一次大家对什么感兴趣
 BUBBLE_SCOUT_QUIET = 600.0  # 停了多久算“聊天停了”
@@ -724,7 +751,9 @@ class ChannelState:
     waiting_since: float | None = None  # 平时这一眼从什么时候开始等冷场的
     # 冒泡（这个频道安静很久以后它自己来说点什么）
     bubble_due_at: float = 0.0  # 到这时候还一直没人说话就冒个泡（0 = 还没定）
-    bubble_waiting: bool = False  # 上次冒泡以后还没人说话：等有人说话再冒
+    bubble_waiting: int = 0  # 连着冒了几次泡都没人说话（频道：1 次就等有人说话再冒；主动私信：连着 3 次）
+    bubble_cap: int = 0  # bubble_cap_day 那天最多冒几次（档位给的是个范围时每天随机定一次）
+    bubble_cap_day: str = ""
     bubble_last_at: float = 0.0
     bubble_day: str = ""
     bubble_count: int = 0  # bubble_day 那天冒了几次
@@ -838,6 +867,7 @@ class Engine:
         self.limiter = SlidingWindow()
         self.paused_until = 0.0  # 余额不足 / key 错误时全局暂停
         self._last_housekeep = 0.0
+        self._reach: dict[int, tuple[int, str, int | None, int | None]] | None = None  # 开了主动私信的人（每次 tick 重读）
         self._tasks: set[asyncio.Task[Any]] = set()
         self.searcher = searcher
         self.interactions: dict[tuple[int, int], deque[Interaction]] = {}  # (服务器, 人) -> 最近跟它的几次对话
@@ -1395,10 +1425,16 @@ class Engine:
         """由外部每隔几秒调用一次，检查哪些频道该跑一轮。"""
         now = self.clock()
         for channel_id, on in self.settings.scoped("channel", "bubble").items():
-            if on and channel_id not in self.states:
+            if on and on != "off" and channel_id not in self.states:
                 place = self.transport.locate(channel_id)  # 重启以后还没人说过话的频道：先建好状态，冒泡的钟才开始走
                 if place is not None and not place.dm:
                     self.state(channel_id, place.guild_id, place.parent_id, place.category_id)
+        self._reach = self.store.dm_reach_channels()
+        for channel_id in self._reach:
+            if channel_id not in self.states:
+                place = self.transport.locate(channel_id)  # 开了主动私信的人：重启以后他还没说过话，钟也要走
+                if place is not None and place.dm:
+                    self.state(channel_id, place.guild_id, private=True)
         for st in list(self.states.values()):
             if self._review_due(st, now):
                 self._kick_review(st)  # 安静了一阵：整理一下记忆
@@ -1566,14 +1602,53 @@ class Engine:
 
     # ------------------------------------------------------------------ 冒泡
 
-    def _bubble_on(self, st: ChannelState) -> bool:
-        """这个频道开了冒泡没有：只认频道自己这一级的设置（开在服务器、类别上不算，免得一下子每个频道都冒泡）。"""
-        return not st.private and bool(self.settings.overrides("channel", st.channel_id).get("bubble"))
+    def reach_changed(self) -> None:
+        """有人改了自己的主动私信设置（/ds-dm 主动）：马上照新的来。"""
+        self._reach = None
 
-    def _bubble_interval(self, view: View) -> float:
-        """安静多久以后冒泡（秒）：bubble_hours 到它的 1.5 倍之间，每次随机。"""
-        hours = float(view.bubble_hours)
-        return self.rng.uniform(hours * 3600.0, hours * 1.5 * 3600.0)
+    def _bubble_profile(self, st: ChannelState) -> _Bubble | None:
+        """这里的冒泡照什么规矩来（没开是 None）。频道：只认频道自己这一级的设置（开在服务器、类别上不算，免得一下子
+        每个频道都冒泡），时段是 config.toml 里的。私信：看对方自己用 /ds-dm 主动 定的档位和时段。"""
+        if st.private:
+            if self._reach is None:
+                self._reach = self.store.dm_reach_channels()
+            reach = self._reach.get(st.channel_id)
+            if reach is None or reach[1] not in REACH_LEVELS:
+                return None
+            low, high, least, most = REACH_LEVELS[reach[1]]
+            return _Bubble(low, high, least, most, max(1, self.ec.reach_max_unanswered), reach[2], reach[3])
+        try:
+            level = level_of(self.settings.overrides("channel", st.channel_id).get("bubble", "off"))
+        except ValueError:
+            level = "off"
+        if level == "off":
+            return None
+        low, high, least, most = BUBBLE_LEVELS[level]
+        return _Bubble(low, high, least, most, 1, self.ec.bubble_from_hour, self.ec.bubble_until_hour)
+
+    def _bubble_on(self, st: ChannelState) -> bool:
+        return self._bubble_profile(st) is not None
+
+    def _bubble_interval(self, st: ChannelState) -> float:
+        """安静多久以后冒泡（秒）：档位给的最短到最长之间，每次随机。"""
+        profile = self._bubble_profile(st)
+        low, high = (profile.low, profile.high) if profile is not None else (4.0, 6.0)
+        return self.rng.uniform(low * 3600.0, high * 3600.0)
+
+    def _bubble_cap(self, st: ChannelState, profile: _Bubble, now: float) -> int:
+        """今天最多冒几次：档位给的是个范围（主动私信的 5～7 次）时，每天随机定一次。"""
+        day = self.ledger.day(now)
+        if st.bubble_cap_day != day or not profile.least <= st.bubble_cap <= profile.most:
+            st.bubble_cap_day = day
+            st.bubble_cap = profile.least if profile.least == profile.most else self.rng.randint(profile.least, profile.most)
+        return st.bubble_cap
+
+    def _reach_off(self, st: ChannelState) -> None:
+        reach = (self._reach or {}).get(st.channel_id)
+        if reach is not None:
+            self.store.set_dm_reach(reach[0], None)
+            self._reach = None
+            log.warning("私信 %s：主动私信连着发不出去，已经替他关掉（他可以用 /ds-dm 主动 再打开）", st.channel_id)
 
     def _bubble_load(self, st: ChannelState) -> None:
         if not st.bubble_loaded:
@@ -1589,35 +1664,38 @@ class Engine:
             st.bubble_due_at = 0.0
             return
         self._bubble_load(st)
-        st.bubble_due_at = now + self._bubble_interval(view)
+        st.bubble_due_at = now + self._bubble_interval(st)
         st.bubble_unseen += 1
         if st.bubble_waiting:
-            st.bubble_waiting = False
+            st.bubble_waiting = 0
             self._bubble_save(st)
 
     def _bubble_ready(self, st: ChannelState, now: float) -> bool:
-        """该冒泡了：开着、安静够久了、是白天、今天还没冒够、上次冒的有人理过。"""
-        if not self._bubble_on(st):
+        """该冒泡了：开着、安静够久了、在能冒的时段里、今天还没冒够、前面冒的有人理过（主动私信：没有连着几次没人回）。"""
+        profile = self._bubble_profile(st)
+        if profile is None:
             return False
         view = self.view(st)
-        if not view.enabled or self._synced(st) or now < self.paused_until or now < st.error_until:
+        if not self._live(st, view) or self._synced(st) or now < self.paused_until or now < st.error_until:
             return False  # 连通的频道（几个频道共用一份记录）先不冒泡
         self._bubble_load(st)
         if st.bubble_due_at == 0.0:
-            st.bubble_due_at = now + self._bubble_interval(view)  # 刚打开、刚启动：从现在算起
+            st.bubble_due_at = now + self._bubble_interval(st)  # 刚打开、刚启动：从现在算起
             return False
-        if st.bubble_waiting or now < st.bubble_due_at:
+        if st.bubble_waiting >= profile.strikes or now < st.bubble_due_at:
             return False
         local = datetime.fromtimestamp(now, ZoneInfo(self.tz))
-        if not self.ec.bubble_from_hour <= local.hour < self.ec.bubble_until_hour:
-            # 夜里不冒：挪到早上开始以后（加一点随机，免得几个频道整点一起冒）
-            start = local.replace(hour=self.ec.bubble_from_hour, minute=0, second=0, microsecond=0)
-            if local.hour >= self.ec.bubble_until_hour:
+        if not _in_hours(local.hour, profile.from_hour, profile.until_hour):
+            # 不在能冒的时段里：挪到下一次开始以后（加一点随机，免得几个频道整点一起冒）
+            start = local.replace(hour=int(profile.from_hour or 0), minute=0, second=0, microsecond=0)
+            if start <= local:
                 start += timedelta(days=1)
             st.bubble_due_at = start.timestamp() + self.rng.uniform(0.0, 3600.0)
             return False
-        if self._bubbles_today(st, now) >= self.ec.bubble_daily_limit:
+        if self._bubbles_today(st, now) >= self._bubble_cap(st, profile, now):
             return False
+        if st.private and self.store.channel_spent(self.ledger.day(now), st.channel_id) >= view.dm_daily_budget_usd:
+            return False  # 他今天私信花的到了每人的上限：不再主动找他
         return not self._over_budget(st, view, now)[0]
 
     def _bubbles_today(self, st: ChannelState, now: float) -> int:
@@ -1638,11 +1716,16 @@ class Engine:
     ) -> str:
         """冒泡那一轮最后写的那段说明。大多数时候先替它找一条新鲜事（看这群人对什么感兴趣 → 挑一个话题 → 搜），把搜到的
         写在说明上面让它挑着说；偶尔只让它打个招呼。不能搜、看不出兴趣、没搜到新东西时也只打招呼。"""
-        greet = BUBBLE_NOTE.format(quiet=self._bubble_quiet(st, now), what=BUBBLE_GREET)
+        if st.private:
+            note = REACH_NOTE.replace("{user}", neutralize(one_line(info.dm_with or "对方", 32)).replace("{", "｛").replace("}", "｝"))
+            free, picked, share = REACH_FREE, REACH_PICK, self.ec.reach_search_share
+        else:
+            note, free, picked, share = BUBBLE_NOTE, BUBBLE_GREET, BUBBLE_PICK, 1.0 - self.ec.bubble_greet_share
+        greet = note.format(quiet=self._bubble_quiet(st, now), what=free)
         day = self.ledger.day(now)
         if not self._can_search(view) or self.store.count_usage(day, guild_id=st.guild_id, kind="search") >= int(view.daily_search_limit):
             return greet
-        if self.rng.random() >= 1.0 - self.ec.bubble_greet_share:
+        if self.rng.random() >= share:
             return greet
         if st.bubble_unseen or not any(k != "blocked" for _, k, _, _ in self.store.interests(st.channel_id)):
             await self._bubble_scout(st, conv, info, batch, now)  # 有还没看过的聊天（或者还什么都没记）：先看看大家对什么感兴趣
@@ -1656,10 +1739,10 @@ class Engine:
         if not st.bubble_found:
             return greet  # 没搜到新东西（或者搜不了）：这次就打个招呼
         links = self.store.bubble_links(st.channel_id, 8)
-        pick = BUBBLE_PICK.format(
+        pick = picked.format(
             topic=neutralize(one_line(topic, 40)), shared=BUBBLE_SHARED.format(links="、".join(links)) if links else ""
         )
-        return section + "\n" + BUBBLE_NOTE.format(quiet=self._bubble_quiet(st, now), what=pick)
+        return section + "\n" + note.format(quiet=self._bubble_quiet(st, now), what=pick)
 
     def _bubble_scout_ready(self, st: ChannelState, now: float) -> bool:
         """该看一次大家的兴趣了：开了冒泡的频道，攒了几条新消息、聊天停了一阵。没开主动发言的频道里，没叫它的消息只留
@@ -1669,7 +1752,7 @@ class Engine:
         if now - st.last_activity_at < BUBBLE_SCOUT_QUIET or now - st.bubble_scout_at < BUBBLE_SCOUT_GAP:
             return False
         view = self.view(st)
-        if not view.enabled or self._synced(st) or now < self.paused_until or not self._can_search(view):
+        if not self._live(st, view) or self._synced(st) or now < self.paused_until or not self._can_search(view):
             return False
         return not self._over_budget(st, view, now)[0]
 
@@ -1705,6 +1788,7 @@ class Engine:
             name=info.bot_name,
             limit=BUBBLE_ASK_TOPICS,
             known=BUBBLE_TOPICS_KNOWN.format(topics="、".join(neutralize(one_line(t, 40)) for t in known)) if known else "",
+            private=REACH_TOPICS_PRIVATE if st.private else "",
         )
         prompt = [
             {"role": "system", "content": system},
@@ -1755,11 +1839,11 @@ class Engine:
         day = self.ledger.day(now)
         if st.bubble_day != day:
             st.bubble_day, st.bubble_count = day, 0
-        st.bubble_due_at = now + self._bubble_interval(view)
+        st.bubble_due_at = now + self._bubble_interval(st)
         if spoke:
             st.bubble_count += 1
             st.bubble_last_at = now
-            st.bubble_waiting = True
+            st.bubble_waiting += 1
             links = [u.rstrip(_LINK_TAIL) for a in actions if a.kind == "reply" for m in a.messages for u in _LINK.findall(m)]
             if links:
                 self.store.add_bubble_links(st.channel_id, links, now)
@@ -1767,11 +1851,13 @@ class Engine:
 
     def _bubble_status(self, st: ChannelState, view: View, now: float) -> dict[str, Any]:
         self._bubble_load(st)
+        profile = self._bubble_profile(st)
+        assert profile is not None
         return {
-            "hours": int(view.bubble_hours),
             "today": self._bubbles_today(st, now),
-            "limit": self.ec.bubble_daily_limit,
-            "waiting": st.bubble_waiting,
+            "limit": self._bubble_cap(st, profile, now),
+            "waiting": st.bubble_waiting >= profile.strikes,
+            "unanswered": st.bubble_waiting,
             "due_in": max(0.0, st.bubble_due_at - now) if st.bubble_due_at else None,
         }
 
@@ -1855,7 +1941,7 @@ class Engine:
                         st.bubbling = False
                         if bubble and st.bubble_due_at <= self.clock():
                             # 这次冒泡没问成模型（出错、超了预算提前回来）：也等下一个间隔再来，别每次 tick 都试
-                            st.bubble_due_at = self.clock() + self._bubble_interval(self.view(st))
+                            st.bubble_due_at = self.clock() + self._bubble_interval(st)
                         st.gallery = []  # 找到的候选图只在这一轮里能挑
                         if cs.scrub_due:
                             self._scrub_now(cs)
@@ -2385,6 +2471,8 @@ class Engine:
                 log.warning("频道 %s：连续 %d 轮发不出消息（缺权限？），暂停主动发言 30 分钟", st.channel_id, st.send_failures)
         elif spoke:
             st.send_failures = 0
+        if bubble and st.private and decided_text and not spoke and st.send_failures >= REACH_FAIL_LIMIT:
+            self._reach_off(st)  # 主动私信连着发不出去（他关了私信、屏蔽了它）：替他关掉，免得一直白花钱
 
         u = completion.usage
         log.info(
@@ -5033,10 +5121,14 @@ class Engine:
             more_cards = len(all_names) - len(card_names)
         memories: list[tuple[int, str]] | None = None
         foreign = 0  # 组里别的服务器记的几条（记满了时别为了腾地方删它们）
+        memory_more = 0  # 太多了没列出来的几条
         if self._memory_on(view):
             assert self.memory is not None
             entries = self.memory.entries(scope)
-            memories = [(m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in entries]
+            # 记得很多时只列最近改过的那些（最多 memory_prompt_chars 字）；没列出来的它不能照编号改、删，整理记忆时全都看得到
+            picked = _newest(entries, max(0, self.ec.memory_prompt_chars), len(entries))
+            memory_more = len(entries) - len(picked)
+            memories = [(m.no, neutralize_record(one_line(m.text, self.ec.memory_entry_chars + 20))) for m in picked]
             foreign = len(self._foreign_memories(scope, st.guild_id, entries))
         st.memory_shown = frozenset(no for no, _ in memories or [])
         group = [self._server_label(g) for g in self._group_guilds(st.guild_id)[1:]] or None
@@ -5079,6 +5171,7 @@ class Engine:
             dm_memory_more=dm_more,
             group=group,
             memory_foreign=foreign,
+            memory_more=memory_more,
             sync=sync,
             sync_here=sync_here,
             sync_past=past,

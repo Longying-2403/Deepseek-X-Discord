@@ -296,7 +296,7 @@ class Prompt(unittest.TestCase):
         self.assertIs(BUILTIN_DEFAULTS["long_memory"], True)
         cfg = load_config(ROOT / "config.toml")
         self.assertEqual((cfg.bot.cards_database, cfg.bot.memory_database), ("data/cards.sqlite3", "data/memory.sqlite3"))
-        self.assertEqual((cfg.engine.card_max_chars, cfg.engine.memory_max_entries), (1600, 50))
+        self.assertEqual((cfg.engine.card_max_chars, cfg.engine.memory_max_entries), (1600, 300))
         self.assertEqual(cfg.unknown, [])
 
 
@@ -548,6 +548,35 @@ class MemoryWrites(unittest.IsolatedAsyncioTestCase):
         await engine.handle_message(msg(502, "@小D 再记一下", mentions_bot=True))
         await engine.drain()
         self.assertEqual(memory.count(GUILD), 3)
+
+    async def test_many_entries_only_recent_ones_listed(self):
+        # 记得很多：聊天里只列最近改过的那些（字数有上限），条数照全部的算；没列出来的编号改不了、删不了
+        cards, memory = stores()
+        for i in range(6):
+            memory.add(GUILD, f"第{i}条" + "字" * 6, via="command", now=100.0 + i)  # 每条 9 个字
+        memory.edit(GUILD, 1, "改过的第一条" + "字" * 3, via="command", now=500.0)
+        out = ACTIONS({"type": "memory", "delete": 3}, {"type": "memory", "delete": 6}, REPLY(1, "好"))
+        engine, llm, transport, clock = make_engine(chat([out]), cards=cards, memory=memory, engine_cfg={"memory_prompt_chars": 30})
+        await engine.handle_message(msg(501, "@小D 删掉第 3 条和第 6 条", mentions_bot=True))
+        await engine.drain()
+        system = system_text(llm.calls[0])
+        self.assertIn("（现在 6 条，最多 300 条，每条最多 200 字）", system)
+        self.assertIn("(1) 改过的第一条字字字\n(5) 第4条字字字字字字\n(6) 第5条字字字字字字\n（比较早的 3 条没列在这里", system)
+        self.assertNotIn("第2条", system)
+        self.assertEqual([m.no for m in memory.entries(GUILD)], [1, 2, 3, 4, 5])  # 第 6 条删了，没给它看的第 3 条还在
+        self.assertIn("第2条", memory.get(GUILD, 3).text)
+
+    async def test_few_entries_all_listed(self):
+        cards, memory = stores()
+        for i in range(50):
+            memory.add(GUILD, f"第{i}条" + "字" * 190, via="command", now=100.0 + i)
+        engine, llm, transport, clock = make_engine(chat([ACTIONS(REPLY(1, "好"))]), cards=cards, memory=memory)
+        await engine.handle_message(msg(501, "@小D 在吗", mentions_bot=True))
+        await engine.drain()
+        system = system_text(llm.calls[0])
+        self.assertIn("(1) 第0条", system)  # 以前的上限（50 条、每条 200 字）以内：照样全部列出来
+        self.assertIn("(50) 第49条", system)
+        self.assertNotIn("没列在这里", system)
 
 
 class Who(unittest.IsolatedAsyncioTestCase):
@@ -928,7 +957,7 @@ class Review(unittest.IsolatedAsyncioTestCase):
         st = engine.status(GUILD, CHANNEL, None)
         self.assertEqual(
             (st["cards_on"], st["memory_on"], st["card_count"], st["memory_count"], st["memory_max"], st["review_here"]),
-            (True, True, 1, 1, 50, True),
+            (True, True, 1, 1, 300, True),
         )
         engine2, *_ = make_engine()
         self.assertEqual((engine2.status(GUILD, CHANNEL, None)["cards_on"], engine2.status(GUILD, CHANNEL, None)["card_count"]), (False, 0))
