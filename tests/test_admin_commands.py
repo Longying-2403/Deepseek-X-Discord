@@ -34,6 +34,7 @@ WANTED = {  # 名字后面带 ? 的是选填的栏
     "人设": ["范围?"],
     "表情包": {"查看": [], "上传": ["图片", "名字?"], "删除": ["名字"]},
     "长期记忆": {"查看": ["编号?"], "添加": ["内容"], "删除": ["编号"], "清空": []},
+    "兴趣": {"查看": [], "添加": ["话题"], "删除": ["话题"]},
     "状态": [],
     "清空记忆": [],
 }
@@ -198,7 +199,7 @@ class Layout(WithBot):
                 node = next(o for o in node["options"] if o["name"] == name)
             return node
 
-        for path in (("设置", "值"), ("表情包", "删除", "名字"), ("长期记忆", "查看", "编号"), ("长期记忆", "删除", "编号")):
+        for path in (("设置", "值"), ("表情包", "删除", "名字"), ("长期记忆", "查看", "编号"), ("长期记忆", "删除", "编号"), ("兴趣", "删除", "话题")):
             self.assertTrue(field(*path).get("autocomplete"), path)
         keys = [c["value"] for c in field("设置", "参数")["choices"]]
         self.assertEqual(keys, [k for k in ADMIN_KEYS if k not in ("enabled", "persona")])
@@ -451,6 +452,76 @@ class Memory(WithBot):
         for path, args in ((("查看",), ()), (("添加",), ("事",)), (("删除",), (1,)), (("清空",), ())):
             said, _ = await self.run_command("长期记忆", *path, args=args)
             self.assertEqual(said, "长期记忆没有启用。", path)
+
+
+class Bubbling(WithBot):
+    """2.11.0 冒泡：开关只在本频道这一级；/dsadmin 兴趣 管它拿去搜的话题。"""
+
+    def key(self, name):
+        return NS(name=SPECS[name].label, value=name)
+
+    async def test_switch_is_for_this_channel_only(self):
+        from dsbot.commands import OWNER_SET_KEYS
+
+        said, _ = await self.run_command("设置", args=(self.key("bubble"), "开", scope("全服务器")))
+        self.assertIn(f"<#{CHANNEL}>：「冒泡」= 开", said)  # 选了全服务器也是本频道
+        self.assertIn("冒泡：开 · 安静 4～6 小时以后冒一次，只在 8～23 点，每天最多 3 次", said)
+        self.assertIn("`/dsadmin 兴趣 查看` 能看到、能加、能删", said)
+        self.assertEqual((self.overrides("channel"), self.overrides("guild")), ({"bubble": True}, {}))
+        said, _ = await self.run_command("设置", args=(self.key("bubble_hours"), "6", scope("本类别")))
+        self.assertIn(f"<#{CHANNEL}>：「冒泡间隔小时」= 6", said)
+        self.assertIn("安静 6～9 小时以后冒一次", said)
+        self.assertEqual(self.overrides("category"), {})
+        said, _ = await self.run_command("设置", args=(self.key("bubble"), "关", None))
+        self.assertIn("冒泡：关", said)
+        self.assertNotIn("bubble", OWNER_SET_KEYS)  # 主人的 设置 是全局、全服务器的：不能拿来开冒泡
+        self.assertNotIn("bubble_hours", OWNER_SET_KEYS)
+
+    async def test_status_has_a_bubble_line(self):
+        said, _ = await self.run_command("状态")
+        self.assertIn("冒泡：关（`/dsadmin 设置 参数:冒泡 值:开` 在这个频道打开）", said)
+        await self.run_command("设置", args=(self.key("bubble"), "开", None))
+        said, _ = await self.run_command("状态")
+        self.assertIn("冒泡：开 · 安静 4～6 小时以后冒一次", said)
+
+    async def test_interests(self):
+        from dsbot.commands import interest_choices
+
+        said, _ = await self.run_command("兴趣", "查看")
+        self.assertIn("还没有。", said)
+        self.assertIn("⚠️ 这个频道没开冒泡", said)
+        said, _ = await self.run_command("兴趣", "添加", args=("  显卡   价格 ",))
+        self.assertIn("已加上：「显卡 价格」。", said)
+        self.assertIn("⚠️ 这个频道没开冒泡，现在用不上", said)
+        said, _ = await self.run_command("兴趣", "添加", args=("   ",))
+        self.assertIn("要加什么话题？", said)
+        self.bot.store.use_interest(CHANNEL, "原神 新版本", 100.0, 20)  # 它冒泡时自己搜过的
+        self.bot.store.use_interest(CHANNEL, "原神 新版本", 200.0, 20)
+        self.bot.store.use_interest(OTHER_CHANNEL, "别的频道的", 100.0, 20)
+        await self.run_command("设置", args=(self.key("bubble"), "开", None))
+        said, _ = await self.run_command("兴趣", "查看")
+        self.assertIn("管理员加的：显卡 价格", said)
+        self.assertIn("它从聊天里看出来的：原神 新版本（搜过 2 次）", said)
+        self.assertNotIn("别的频道的", said)  # 每个频道各记各的
+        self.assertNotIn("⚠️", said)
+        pop = self.command("兴趣", "删除")._params["topic"].autocomplete
+        self.assertEqual([(c.name, c.value) for c in await pop(ask(), "原神")], [("原神 新版本（它从聊天里看出来的）", "原神 新版本")])
+        self.assertEqual(len(interest_choices(self.bot, CHANNEL, "")), 2)
+        said, _ = await self.run_command("兴趣", "删除", args=("原神 新版本",))
+        self.assertIn("已删掉「原神 新版本」，以后它也不会再搜这个", said)  # 它自己看出来的：记成不让搜
+        said, _ = await self.run_command("兴趣", "查看")
+        self.assertIn("不让搜的：原神 新版本", said)
+        said, _ = await self.run_command("兴趣", "删除", args=("原神 新版本",))
+        self.assertIn("已经可以搜了：从“不让搜”里拿掉了「原神 新版本」。", said)
+        said, _ = await self.run_command("兴趣", "删除", args=("显卡 价格",))
+        self.assertIn("已删掉「显卡 价格」。", said)
+        said, _ = await self.run_command("兴趣", "删除", args=("显卡 价格",))
+        self.assertIn("这个频道没记着「显卡 价格」", said)
+        self.assertEqual(self.bot.store.interests(CHANNEL), [])
+        await self.run_command("兴趣", "添加", args=("原神 新版本",))  # 不让搜的再“添加”一次：又可以搜了
+        self.bot.store.set_interest(CHANNEL, "原神 新版本", "blocked", 1.0)
+        await self.run_command("兴趣", "添加", args=("原神 新版本",))
+        self.assertEqual([(t, k) for t, k, _, _ in self.bot.store.interests(CHANNEL)], [("原神 新版本", "manual")])
 
 
 class TheRest(WithBot):

@@ -16,6 +16,7 @@
 - **记得每个人**：每个群友一张人设卡（他自己说的称呼、设定比如自称猫娘、喜好和雷点），聊天时自然地用上（默认每个服务器一张，也可以设成所有服务器共用一张，见“十一”）；还有一份这个服务器的长期记忆（约定、大事、长期的梗和剧情）。说“记住……”当场记下，平时它会趁聊天安静下来时自己整理。人设卡的原文只有本人能看、能改（`/ds-rp`），管理员也看不到；别人问起时它只会用自己的话大概说说，不会照念原文。
 - **dsowner 能在聊天里改人设**：`OWNER_ID` 本人叫它说“以后说话毒舌一点”，它会把人设改好并存进设置，说“改回去”还能撤销；别人这么说，它会让对方找 dsowner。
 - **话量可控**：多久看一眼、聊起来以后跟不跟着，都能在 Discord 里调（安静 / 普通 / 话痨三个档位一键套用）。
+- **会自己冒泡**（按频道开启）：频道安静了几个小时，它会自己来说点什么：从大家聊过的东西里看出感兴趣的话题，去搜最近的新鲜事（多半是 X 上的）分享一条，或者打个招呼。只在白天，一天最多几次，上次冒的没人理就先不冒。
 - **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
@@ -46,6 +47,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Remembers everyone**: each member gets a profile card (what they've said about themselves: what to call them, a character they've given themselves such as being a catgirl, likes and pet peeves), and it uses it naturally in chat (one per server by default, or one shared across all servers, see section 十一); there's also a long-term memory for the server (agreements, big events, long-running jokes and storylines). Say "remember …" and it saves it on the spot; otherwise it reviews the chat on its own once things go quiet. Only the card's owner can see and edit its original text (`/ds-rp`), not even admins; if someone else asks, it may sum it up roughly in its own words, but never reads the card out word for word.
 - **dsowner can change its persona in chat**: when `OWNER_ID` calls it and says something like "be snarkier from now on", it rewrites its persona and saves it to the settings, and "change it back" undoes that; if anyone else asks, it tells them to ask dsowner.
 - **You control how much it talks**: how often it glances and whether it follows a conversation can be adjusted from inside Discord (three presets: quiet, normal, chatty).
+- **Bubbles up on its own** (per channel): when a channel has been quiet for a few hours it says something by itself: it works out from the chat what people are into, looks for something recent about it (mostly on X) and shares one item, or just says hello. Daytime only, a few times a day at most, and not again until someone has spoken.
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
@@ -118,7 +120,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.7.0 之间的版本更新到 2.7.1 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。2.8.1 的 `Dockerfile` 多了一步“构建时先把代码编译好”（启动、读文件都快一些）：没换成新的也照样能跑，只是慢一点。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.10.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.11.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -148,7 +150,8 @@ python -m dsbot
 5. 想让它记得别的频道聊过的事：`/dsadmin 设置 参数:记忆共享 值:开 范围:全服务器`（见下面“七、跨频道记忆”）
 6. 给它几张表情包：`/dsadmin 表情包 上传`（见下面“十、发表情包和图”）
 7. 告诉群友：用 `/ds-rp` 可以看、改自己的人设卡（原文只有自己看得到；别人问起时它可能用自己的话大概说说），叫它“记住……”也行（见下面“十一、人设卡和长期记忆”）；想听歌就先进语音频道，再叫它“放首晴天”或者用 `/ds-music 播放`（见下面“十三、点歌”）
-8. 随时看状态：`/dsadmin 状态`（主动发言的节奏、现在的时间和时区、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/dsadmin 区域 查看` 看它在哪些地方会回应
+8. 想让它在某个频道安静久了自己冒个泡：在那个频道里 `/dsadmin 设置 参数:冒泡 值:开`（见下面“八、联网搜索”后面的“冒泡”）
+9. 随时看状态：`/dsadmin 状态`（主动发言的节奏、现在的时间和时区、上次的判断和理由、今天花了多少、缓存命中率、记忆共享、搜索、读链接和找图的次数）；`/dsadmin 区域 查看` 看它在哪些地方会回应
 
 不设置区域时，它在所有看得到的频道里都会回应点名；没开主动发言的频道里，它只在被叫到时说话。
 
@@ -169,6 +172,7 @@ python -m dsbot
 | `/dsadmin 人设` | 修改人设（弹出编辑框）。`OWNER_ID` 本人也能在聊天里让它改，见“十二” |
 | `/dsadmin 表情包 查看`、`上传`、`删除` | 这个服务器的表情包库：上传（附上图片、写个名字）；删除时「名字」一栏会列出这个服务器的表情包 |
 | `/dsadmin 长期记忆 查看`、`添加`、`删除`、`清空` | 这个服务器的长期记忆：查看（选了编号就只看那一条的全文）、添加、删除（选编号，列表里有内容）、清空（会再确认一次） |
+| `/dsadmin 兴趣 查看`、`添加`、`删除` | 这个频道的人感兴趣的话题（它冒泡时拿去搜最近的新鲜事）：它自己从聊天里看出来、搜过的会记在这里；可以自己加；删掉它看出来的，会记成“不让搜” |
 | `/dsadmin 状态` | 查看本频道的设置、主动发言的节奏（多久看一眼、现在是不是正跟着聊）、现在的时间和时区、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数、点歌的状态 |
 | `/dsadmin 清空记忆` | 清空本频道的对话记录和摘要 |
 
@@ -247,6 +251,8 @@ python -m dsbot
 | 主动发言 | 关 | 没被叫到时，自己判断要不要说话。在想让它主动聊天的频道里打开（它怎么判断见“十六”） |
 | 几分钟看一眼 | 5 | 开了主动发言时，平时隔多久看一眼这个频道：填的数到它的 1.5 倍之间，每次随机（5 就是 5～8 分钟）。看的时候最近 5 分钟没人说话就什么都不做 |
 | 聊起来就跟着 | 开 | 它开了口、或者有人叫了它之后，接着留意这场聊天：有人说话、停 5 秒就看要不要接（两次之间隔 30～45 秒）。5 分钟没人说话、或者连着 3 次都没话说，就回到平时 |
+| 冒泡 | 关 | 这个频道安静久了，它自己来说点什么（见“八”后面的“冒泡”）。只对本频道生效：选了别的范围也是本频道 |
+| 冒泡间隔小时 | 4 | 安静多久以后冒泡：填的数到它的 1.5 倍之间，每次随机（4 就是 4～6 小时）。也只对本频道生效 |
 | 冷场秒数 | 30 | 平时看一眼时，等多久没人说话、也没人在打字才判断（别人正说着不插话） |
 | 最长等待秒 | 180 | 平时看一眼时一直有人在说：最多等多久也判断一次 |
 | 每人每分钟点名 | 3 | 防止有人连续 @ 刷它 |
@@ -376,6 +382,19 @@ python -m dsbot
 - 回答里带的链接不会展开预览，免得刷屏。
 - 搜到的网页内容和文件一样当成资料处理，里面写的“忽略之前的设定”之类不会照做。
 - 部署后可以先跑一次 `docker compose exec dsbot python -m dsbot --test-search "台北 今天 天气"` 确认能搜到。DeepSeek 没搜到、或者出错了（比如余额不够），填了 `TAVILY_API_KEY` 的话会自动改用 Tavily 再搜一次（填完 `docker compose up -d --force-recreate`）。
+
+### 冒泡
+
+在某个频道里 `/dsadmin 设置 参数:冒泡 值:开`，这个频道安静久了它会自己来说点什么，像群友闲下来随手发一条：
+
+- **什么时候**：一直没人说话满 4～6 小时（“冒泡间隔小时”，每次随机）；只在 8 点到 23 点（`config.toml` 里 `[engine]` 的 `bubble_from_hour`、`bubble_until_hour`）；每个频道每天最多 3 次（`bubble_daily_limit`）；上次冒的没人理，就等有人说话以后再冒，不会对着没人的频道连发。
+- **说什么**：八成的时候分享一条新鲜事，两成的时候只打个招呼、接着以前聊过的事说一句（`bubble_greet_share`）。分享的时候，话题是从这个频道的“兴趣”里挑一个最近两天没搜过的，搜最近 3 天的消息给它看，它挑一条用自己的话说一两句、带上链接；搜到的都不合适，它就改成打招呼，或者不说。
+- **去哪搜**：用的是现成的联网搜索（DeepSeek 的搜索接口），不用 X 的账号和 key。七成的时候先只搜 X 上的（搜索词里限定 `site:x.com`），X 上没搜到再搜全网；其余时候直接搜全网的新闻（`bubble_x_share`）。每搜一次算一次联网搜索，算进每天的搜索次数；这里不能搜（没开联网搜索、今天搜够了）时它就只打招呼。
+- **兴趣是怎么来的**：开了冒泡的频道里，聊了几句（4 条以上）、停下来十分钟以后，它会单独问一次模型“这群人对什么感兴趣”，把看出来的话题（最多 3 个）记下来，一小时最多看一次。只看这个频道自己的聊天，不看人设卡、私信记忆和别的频道带来的内容；发给搜索服务的只有话题那几个词。`/dsadmin 兴趣 查看` 看得到，`添加` 可以自己加，`删除` 掉它自己看出来的话题会记成“不让搜”。它自己看出来的最多留 20 个，久没用的先去掉。
+- **有人接话**：它冒泡以后有人说话，它会照“聊起来就跟着”的规矩接着聊（这个频道没开主动发言也接）；别人叫它照旧马上回。
+- **花费**：看一次兴趣是一次很小的模型调用；冒一次泡是一次模型调用加一两次搜索（搜到了才算钱，一次 0.075 美分）。一个频道一天下来通常不到 1 美分。
+- 搜到的东西可能不准、不相关或者过时：它被要求挑可靠的、不合适就不发，但没法保证每条都合适。不放心的话题用 `/dsadmin 兴趣 删除` 拦掉，或者关掉这个频道的冒泡。
+- 冒泡只认在那个频道里开的设置（开在全服务器、类别上不算）。连通的频道（`/dsowner chatsync`）暂时不冒泡。`/dsadmin 状态` 里有一行冒泡的情况：今天冒了几次、下一次大概什么时候。重启以后，安静了多久从启动那一刻重新算。
 
 ## 九、读链接
 
@@ -632,6 +651,8 @@ python -m dsbot
 - 后台的 Message Content Intent 没打开（日志里会报 4014 之类的错误）。
 - 频道里没给 bot 发送消息的权限。
 - 你 @ 的可能是它的身份组而不是它本人——这也能识别，但如果服务器把它的身份组隐藏了就看不到。
+
+**开了冒泡，它一直不冒**：`/dsadmin 状态` 里“冒泡”那一行会写原因：还没安静够、夜里、今天冒够了、上次冒的还没人理（等有人说话）、超了预算。冒泡只认在那个频道里开的设置；重启以后要从启动那一刻重新算安静了多久。
 
 **主动发言一直不说话**
 - `/dsadmin 状态` 看看：主动发言开了吗？“主动的节奏”那一行写的下一眼还有多久？上次判断的“想法”是什么？

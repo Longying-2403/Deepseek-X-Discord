@@ -18,6 +18,8 @@ import logging
 import random
 import re
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, AsyncContextManager, Awaitable, Callable, Iterable, Protocol, Sequence
@@ -47,6 +49,12 @@ from .models import (
     Usage,
 )
 from .prompts import (
+    BUBBLE_GREET,
+    BUBBLE_TOPICS_KNOWN,
+    BUBBLE_TOPICS_SYSTEM,
+    BUBBLE_NOTE,
+    BUBBLE_PICK,
+    BUBBLE_SHARED,
     CARD_QUOTED,
     DEFAULT_PERSONA,
     DESKTOP_NO_APP,
@@ -155,6 +163,13 @@ FOLLOW_IDLE = 300.0  # 跟着的时候：这么久没人说话、也没人打字
 FOLLOW_PASSES = 3  # 跟着的时候：连着这么多次判断都决定不说，就回到平时
 FOLLOW_SETTLE = 5.0  # 跟着的时候：有人说完话，停这么久（没人接着说、打字）再判断
 FOLLOW_MAX_WAIT = 30.0  # 跟着的时候：一直有人在说，最多等这么久也判断一次
+_SEARCH_SYNTAX = ("site:", "-site:", "after:", "before:")  # 冒泡时模型自己写的这些限定去掉，由这边加
+_LINK = re.compile(r"https?://[^\s<>]+")
+_LINK_TAIL = "。，、；：！？）》」』)]>,.;:!?\"'"
+BUBBLE_ASK_TOPICS = 3  # 看大家的兴趣：一次最多要几个话题
+BUBBLE_SCOUT_MIN = 4  # 开了冒泡的频道：攒了这么多条新消息、聊天又停了一阵，就看一次大家对什么感兴趣
+BUBBLE_SCOUT_QUIET = 600.0  # 停了多久算“聊天停了”
+BUBBLE_SCOUT_GAP = 3600.0  # 两次之间至少隔多久（聊得再多一小时也只看一次）
 SPEAK_GAP = (30.0, 45.0)  # 它说过话（跟着的时候：判断过一次）之后，隔这么久（随机）才再主动判断；叫它的不受这个限制
 SEND_FAIL_LIMIT = 3  # 连续几轮发不出去（比如没权限）就暂停这个频道
 SEND_FAIL_BACKOFF = 1800.0
@@ -707,6 +722,17 @@ class ChannelState:
     next_check_at: float = 0.0  # 平时：下一次什么时候看一眼（0 = 还没看过，有人说话就看）
     gap_until: float = 0.0  # 这之前不主动判断（刚说过话、刚判断过）
     waiting_since: float | None = None  # 平时这一眼从什么时候开始等冷场的
+    # 冒泡（这个频道安静很久以后它自己来说点什么）
+    bubble_due_at: float = 0.0  # 到这时候还一直没人说话就冒个泡（0 = 还没定）
+    bubble_waiting: bool = False  # 上次冒泡以后还没人说话：等有人说话再冒
+    bubble_last_at: float = 0.0
+    bubble_day: str = ""
+    bubble_count: int = 0  # bubble_day 那天冒了几次
+    bubble_loaded: bool = False  # 上面这几项从数据库里读过了
+    bubbling: bool = False  # 现在这一轮是冒泡
+    bubble_found: bool = False  # 冒泡时替它搜的那一次有没有搜到东西
+    bubble_unseen: int = 0  # 上次看大家的兴趣以后，又有多少条群友的消息
+    bubble_scout_at: float = 0.0  # 上次看大家的兴趣是什么时候
     mention_due: bool = False
     scheduled: bool = False
     error_until: float = 0.0
@@ -921,6 +947,7 @@ class Engine:
         if st.first_human_at is None:
             st.first_human_at = now
 
+        self._bubble_heard(st, view, now)
         if st.private:
             # 私信：每句都在跟它说话。等他说完（停下几秒、不在打字）再一起回，连着发的几条只问一次；
             # 花费另有每人每天的上限（_dm_over），不按“每分钟点名几次”限
@@ -1367,13 +1394,20 @@ class Engine:
     async def tick(self) -> None:
         """由外部每隔几秒调用一次，检查哪些频道该跑一轮。"""
         now = self.clock()
+        for channel_id, on in self.settings.scoped("channel", "bubble").items():
+            if on and channel_id not in self.states:
+                place = self.transport.locate(channel_id)  # 重启以后还没人说过话的频道：先建好状态，冒泡的钟才开始走
+                if place is not None and not place.dm:
+                    self.state(channel_id, place.guild_id, place.parent_id, place.category_id)
         for st in list(self.states.values()):
             if self._review_due(st, now):
                 self._kick_review(st)  # 安静了一阵：整理一下记忆
                 continue
-            if st.scheduled or st.lock.locked() or not st.pending:
+            if st.scheduled or st.lock.locked():
                 continue
-            if st.mention_due or self._proactive_ready(st, now):
+            if st.pending and (st.mention_due or self._proactive_ready(st, now)):
+                self._wake(st)
+            elif self._bubble_ready(st, now) or self._bubble_scout_ready(st, now):
                 self._wake(st)
         if now - self._last_housekeep >= HOUSEKEEP_EVERY:
             self._last_housekeep = now
@@ -1503,8 +1537,10 @@ class Engine:
 
     def _proactive_ready(self, st: ChannelState, now: float) -> bool:
         view = self.view(st)
-        if st.private or not view.enabled or not view.proactive or st.first_human_at is None:
+        if st.private or not view.enabled or st.first_human_at is None:
             return False
+        if not view.proactive and not st.following:
+            return False  # 没开主动发言：只有冒泡以后跟着聊的那一阵才判断
         if now < self.paused_until or now < st.error_until:
             return False
         if now < st.gap_until or self._over_budget(st, view, now)[0]:
@@ -1514,7 +1550,7 @@ class Engine:
         if st.following:
             # 跟着：有人说了话（缓冲区里有真人的消息），等他说完就看要不要接
             return now - st.last_activity_at >= FOLLOW_SETTLE or now - st.first_human_at >= FOLLOW_MAX_WAIT
-        if now < st.next_check_at:
+        if not view.proactive or now < st.next_check_at:
             return False
         # 平时看一眼：最近没人说话就算了（不问模型），过几分钟再看；攒着的旧消息留着当背景
         newest = max((m.received_at for m in st.pending if not m.is_bot), default=0.0)
@@ -1528,6 +1564,217 @@ class Engine:
         # 正聊着：等停一下再开口（别人正说着不插话）；一直不停，等够了也看一次
         return now - st.last_activity_at >= view.quiet_seconds or now - st.waiting_since >= view.max_wait_seconds
 
+    # ------------------------------------------------------------------ 冒泡
+
+    def _bubble_on(self, st: ChannelState) -> bool:
+        """这个频道开了冒泡没有：只认频道自己这一级的设置（开在服务器、类别上不算，免得一下子每个频道都冒泡）。"""
+        return not st.private and bool(self.settings.overrides("channel", st.channel_id).get("bubble"))
+
+    def _bubble_interval(self, view: View) -> float:
+        """安静多久以后冒泡（秒）：bubble_hours 到它的 1.5 倍之间，每次随机。"""
+        hours = float(view.bubble_hours)
+        return self.rng.uniform(hours * 3600.0, hours * 1.5 * 3600.0)
+
+    def _bubble_load(self, st: ChannelState) -> None:
+        if not st.bubble_loaded:
+            st.bubble_loaded = True
+            st.bubble_last_at, st.bubble_waiting, st.bubble_day, st.bubble_count = self.store.bubble_state(st.channel_id)
+
+    def _bubble_save(self, st: ChannelState) -> None:
+        self.store.set_bubble_state(st.channel_id, st.bubble_last_at, st.bubble_waiting, st.bubble_day, st.bubble_count)
+
+    def _bubble_heard(self, st: ChannelState, view: View, now: float) -> None:
+        """有人说话了：冒泡的钟重新走；上次冒的泡有人理了。"""
+        if not self._bubble_on(st):
+            st.bubble_due_at = 0.0
+            return
+        self._bubble_load(st)
+        st.bubble_due_at = now + self._bubble_interval(view)
+        st.bubble_unseen += 1
+        if st.bubble_waiting:
+            st.bubble_waiting = False
+            self._bubble_save(st)
+
+    def _bubble_ready(self, st: ChannelState, now: float) -> bool:
+        """该冒泡了：开着、安静够久了、是白天、今天还没冒够、上次冒的有人理过。"""
+        if not self._bubble_on(st):
+            return False
+        view = self.view(st)
+        if not view.enabled or self._synced(st) or now < self.paused_until or now < st.error_until:
+            return False  # 连通的频道（几个频道共用一份记录）先不冒泡
+        self._bubble_load(st)
+        if st.bubble_due_at == 0.0:
+            st.bubble_due_at = now + self._bubble_interval(view)  # 刚打开、刚启动：从现在算起
+            return False
+        if st.bubble_waiting or now < st.bubble_due_at:
+            return False
+        local = datetime.fromtimestamp(now, ZoneInfo(self.tz))
+        if not self.ec.bubble_from_hour <= local.hour < self.ec.bubble_until_hour:
+            # 夜里不冒：挪到早上开始以后（加一点随机，免得几个频道整点一起冒）
+            start = local.replace(hour=self.ec.bubble_from_hour, minute=0, second=0, microsecond=0)
+            if local.hour >= self.ec.bubble_until_hour:
+                start += timedelta(days=1)
+            st.bubble_due_at = start.timestamp() + self.rng.uniform(0.0, 3600.0)
+            return False
+        if self._bubbles_today(st, now) >= self.ec.bubble_daily_limit:
+            return False
+        return not self._over_budget(st, view, now)[0]
+
+    def _bubbles_today(self, st: ChannelState, now: float) -> int:
+        return st.bubble_count if st.bubble_day == self.ledger.day(now) else 0
+
+    @staticmethod
+    def _bubble_quiet(st: ChannelState, now: float) -> str:
+        quiet = max(st.last_activity_at, st.last_speak_at, st.bubble_last_at)
+        hours = (now - quiet) / 3600.0 if quiet else 0.0
+        if hours >= 48:
+            return f" {round(hours / 24)} 天"
+        if hours >= 1:
+            return f" {round(hours)} 个小时"
+        return "好一阵"
+
+    async def _bubble_plan(
+        self, st: ChannelState, view: View, conv: Conversation, info: ChannelInfo, batch: list[IncomingMessage], now: float
+    ) -> str:
+        """冒泡那一轮最后写的那段说明。大多数时候先替它找一条新鲜事（看这群人对什么感兴趣 → 挑一个话题 → 搜），把搜到的
+        写在说明上面让它挑着说；偶尔只让它打个招呼。不能搜、看不出兴趣、没搜到新东西时也只打招呼。"""
+        greet = BUBBLE_NOTE.format(quiet=self._bubble_quiet(st, now), what=BUBBLE_GREET)
+        day = self.ledger.day(now)
+        if not self._can_search(view) or self.store.count_usage(day, guild_id=st.guild_id, kind="search") >= int(view.daily_search_limit):
+            return greet
+        if self.rng.random() >= 1.0 - self.ec.bubble_greet_share:
+            return greet
+        if st.bubble_unseen or not any(k != "blocked" for _, k, _, _ in self.store.interests(st.channel_id)):
+            await self._bubble_scout(st, conv, info, batch, now)  # 有还没看过的聊天（或者还什么都没记）：先看看大家对什么感兴趣
+        # 从记着的兴趣里挑一个最近两天没搜过的（新记下的优先）；都搜过了就不搜，免得老说同一件事
+        pool = [t for t, k, used_at, _ in self.store.interests(st.channel_id) if k != "blocked" and used_at < now - 2 * 86400.0]
+        if not pool:
+            return greet
+        topic = self.rng.choice(pool[:3])
+        st.bubble_found = False
+        section = await self._search_section(st, view, Action("search", query=topic), now)
+        if not st.bubble_found:
+            return greet  # 没搜到新东西（或者搜不了）：这次就打个招呼
+        links = self.store.bubble_links(st.channel_id, 8)
+        pick = BUBBLE_PICK.format(
+            topic=neutralize(one_line(topic, 40)), shared=BUBBLE_SHARED.format(links="、".join(links)) if links else ""
+        )
+        return section + "\n" + BUBBLE_NOTE.format(quiet=self._bubble_quiet(st, now), what=pick)
+
+    def _bubble_scout_ready(self, st: ChannelState, now: float) -> bool:
+        """该看一次大家的兴趣了：开了冒泡的频道，攒了几条新消息、聊天停了一阵。没开主动发言的频道里，没叫它的消息只留
+        6 小时：等到冒泡时才看就晚了。"""
+        if st.bubble_unseen < BUBBLE_SCOUT_MIN or not self._bubble_on(st) or self.closing:
+            return False
+        if now - st.last_activity_at < BUBBLE_SCOUT_QUIET or now - st.bubble_scout_at < BUBBLE_SCOUT_GAP:
+            return False
+        view = self.view(st)
+        if not view.enabled or self._synced(st) or now < self.paused_until or not self._can_search(view):
+            return False
+        return not self._over_budget(st, view, now)[0]
+
+    async def _bubble_scout(self, st: ChannelState, conv: Conversation, info: ChannelInfo, batch: list[IncomingMessage], now: float) -> None:
+        """看一次这个频道的人对什么感兴趣，记进兴趣里（记过的、不让搜的不动）。"""
+        st.bubble_unseen = 0
+        st.bubble_scout_at = now
+        topics = await self._bubble_topics(st, conv, info, batch, now)
+        if topics:
+            self.store.note_interests(st.channel_id, topics, now, self.ec.bubble_max_topics)
+            log.info("频道 %s：记下了 %d 个大家感兴趣的话题", st.channel_id, len(topics))
+
+    async def _bubble_topics(
+        self, st: ChannelState, conv: Conversation, info: ChannelInfo, batch: list[IncomingMessage], now: float
+    ) -> list[str]:
+        """单独问一次模型：这个频道的人对什么感兴趣（只给它看这个频道自己的聊天：别的频道带来的、人设卡、私信记忆、
+        文件和搜索结果都不给）。问不成就当没看出来。不进聊天记录。"""
+        lines: list[str] = []
+        for t in conv.turns[-60:]:
+            if t.role == "user":
+                lines += review_text(t.content)
+            else:
+                raw = t.content if isinstance(t.content, str) else json.dumps(t.content, ensure_ascii=False)
+                said = assistant_text(raw, info.bot_name)
+                if said:
+                    lines.append(said)
+        lines += [f"{neutralize(one_line(m.author_name or '某人', 30))}：{neutralize(one_line(m.text, 300))}" for m in batch if not m.is_bot and m.text]
+        chat = "\n".join(lines)[-6000:]
+        if not chat.strip() and not conv.summary:
+            return []
+        known = [t for t, k, _, _ in self.store.interests(st.channel_id) if k != "blocked"][:20]
+        system = BUBBLE_TOPICS_SYSTEM.format(
+            name=info.bot_name,
+            limit=BUBBLE_ASK_TOPICS,
+            known=BUBBLE_TOPICS_KNOWN.format(topics="、".join(neutralize(one_line(t, 40)) for t in known)) if known else "",
+        )
+        prompt = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"【更早的摘要】\n{conv.summary or '（无）'}\n\n【聊天记录】\n{chat or '（无）'}"},
+        ]
+        try:
+            completion = await self.llm.complete(prompt, thinking="off", json_mode=True, max_tokens=300, user_id=f"guild-{st.guild_id}")
+        except LLMError as exc:
+            log.warning("频道 %s：冒泡前看大家的兴趣失败：%s", st.channel_id, exc)
+            if exc.usage is not None:
+                self._record_error(st.guild_id, st.channel_id, "bubble", exc)
+            return []
+        cost = self.pricing.cost(completion.usage, now)
+        self.ledger.add(st.guild_id, cost, now)
+        self.store.record_usage(
+            ts=now, day=self.ledger.day(now), guild_id=st.guild_id, channel_id=st.channel_id, kind="bubble", outcome="topics",
+            hit=completion.usage.hit, miss=completion.usage.miss, output=completion.usage.output, cost=cost,
+        )
+        try:
+            found = json.loads(completion.content).get("topics")
+        except (ValueError, AttributeError):
+            return []
+        out: list[str] = []
+        for item in found if isinstance(found, list) else []:
+            words = [w for w in str(item).split() if not w.lower().startswith(_SEARCH_SYNTAX)]
+            topic = one_line(" ".join(words), 40).strip()
+            if topic and topic.casefold() not in {t.casefold() for t in out}:
+                out.append(topic)
+        return out[:BUBBLE_ASK_TOPICS]
+
+    def _bubble_queries(self, st: ChannelState, raw: str, now: float) -> tuple[str, list[str]] | None:
+        """冒泡时模型要搜的话题 → (话题, 依次试的搜索词)。只要最近几天的；大部分时候先只搜 X 上的，没搜到再搜全网。
+        管理员不让搜的话题返回 None。搜过的话题记进这个频道的兴趣里。"""
+        words = [w for w in raw.split() if not w.lower().startswith(_SEARCH_SYNTAX)]
+        topic = one_line(" ".join(words), 40).strip()
+        blocked = {t.casefold() for t, k, _, _ in self.store.interests(st.channel_id) if k == "blocked"}
+        if not topic or topic.casefold() in blocked:
+            return None
+        since = (datetime.fromtimestamp(now, ZoneInfo(self.tz)) - timedelta(days=self.ec.bubble_fresh_days)).date().isoformat()
+        news = f"{topic} after:{since}"
+        on_x = self.rng.random() < self.ec.bubble_x_share
+        self.store.use_interest(st.channel_id, topic, now, self.ec.bubble_max_topics)
+        return topic, ([f"{topic} site:x.com after:{since}", news] if on_x else [news])
+
+    def _bubble_done(self, st: ChannelState, view: View, spoke: bool, actions: list[Action]) -> None:
+        """冒泡那一轮问完了模型：钟重新走；真的说了话的算一次，记下发过的链接，等有人说话再冒下一次。"""
+        now = self.clock()
+        day = self.ledger.day(now)
+        if st.bubble_day != day:
+            st.bubble_day, st.bubble_count = day, 0
+        st.bubble_due_at = now + self._bubble_interval(view)
+        if spoke:
+            st.bubble_count += 1
+            st.bubble_last_at = now
+            st.bubble_waiting = True
+            links = [u.rstrip(_LINK_TAIL) for a in actions if a.kind == "reply" for m in a.messages for u in _LINK.findall(m)]
+            if links:
+                self.store.add_bubble_links(st.channel_id, links, now)
+        self._bubble_save(st)
+
+    def _bubble_status(self, st: ChannelState, view: View, now: float) -> dict[str, Any]:
+        self._bubble_load(st)
+        return {
+            "hours": int(view.bubble_hours),
+            "today": self._bubbles_today(st, now),
+            "limit": self.ec.bubble_daily_limit,
+            "waiting": st.bubble_waiting,
+            "due_in": max(0.0, st.bubble_due_at - now) if st.bubble_due_at else None,
+        }
+
     def _check_interval(self, view: View) -> float:
         """平时隔多久看一眼（秒）：check_minutes 到它的 1.5 倍之间，每次随机。"""
         low, high = check_range(view.check_minutes)
@@ -1539,13 +1786,14 @@ class Engine:
         st.waiting_since = None
         st.next_check_at = now + self._check_interval(view)
 
-    def _after_round(self, st: ChannelState, view: View, kind: str, spoke: bool, reacted: bool) -> None:
+    def _after_round(self, st: ChannelState, view: View, kind: str, spoke: bool, reacted: bool, bubble: bool = False) -> None:
         """一轮问完模型以后：定下一次什么时候再主动判断、要不要（接着）跟着这场聊天。按模型的决定算，不按发没发成功算
         （没权限发言的频道也不会一直判断）。"""
         now = self.clock()
         if spoke:
             st.last_speak_at = now
-        can_follow = not st.private and bool(view.proactive) and bool(view.follow)
+        # 冒泡以后有人接话，要能接着聊：这个频道没开主动发言也跟着（跟着的规矩一样）
+        can_follow = not st.private and bool(view.follow) and (bool(view.proactive) or bubble)
         if kind == "mention":
             if spoke:
                 st.gap_until = now + self.rng.uniform(*SPEAK_GAP)
@@ -1577,11 +1825,19 @@ class Engine:
                 if not self._live(st, self.view(st)) or (self._synced(st) and not self._sync_public(st.channel_id)):
                     st.pending.clear()  # 刚被管理员关掉的区域（或者连通的频道变成私密的了）：攒着的消息也不处理了
                     st.first_human_at = None
-                if st.pending and (any(m.trigger for m in st.pending) or self._proactive_ready(st, self.clock())):
+                go = bool(st.pending) and (any(m.trigger for m in st.pending) or self._proactive_ready(st, self.clock()))
+                bubble = not go and self._bubble_ready(st, self.clock())
+                if not go and not bubble and self._bubble_scout_ready(st, self.clock()):
+                    try:
+                        await self._bubble_scout(st, self._conversation(st), self.transport.channel_info(st.channel_id), list(st.pending), self.clock())
+                    except Exception:
+                        log.exception("频道 %s 看大家的兴趣时出错", st.channel_id)
+                        st.bubble_scout_at = self.clock()
+                if go or bubble:
                     batch = list(st.pending)
                     st.inflight = batch
                     try:
-                        await self._round(st, batch)
+                        await self._round(st, batch, bubble=bubble)
                     except Exception:
                         log.exception("频道 %s 处理一轮时出错", st.channel_id)
                         # 不能让同一批消息每次 tick 都再花一次钱：先冷却，点名也不再自动重试
@@ -1596,6 +1852,10 @@ class Engine:
                         # 这一眼没问成模型（出错、超了预算提前回来）：也过几分钟再看，别每次 tick 都来
                         if not st.following and st.next_check_at <= self.clock() and not any(m.trigger for m in batch):
                             st.next_check_at = self.clock() + self._check_interval(self.view(st))
+                        st.bubbling = False
+                        if bubble and st.bubble_due_at <= self.clock():
+                            # 这次冒泡没问成模型（出错、超了预算提前回来）：也等下一个间隔再来，别每次 tick 都试
+                            st.bubble_due_at = self.clock() + self._bubble_interval(self.view(st))
                         st.gallery = []  # 找到的候选图只在这一轮里能挑
                         if cs.scrub_due:
                             self._scrub_now(cs)
@@ -1861,12 +2121,17 @@ class Engine:
         older = batch[: max(0, len(batch) - limit)]
         return [m for m in older if m.trigger] + recent
 
-    async def _round(self, st: ChannelState, batch: list[IncomingMessage]) -> None:
+    async def _round(self, st: ChannelState, batch: list[IncomingMessage], bubble: bool = False) -> None:
+        """bubble：这一轮是冒泡（没人说话，它自己来说点什么）：照主动的那一套走，多一句说明，可以搜一次。"""
         now = self.clock()
         view = self.view(st)
         generation = st.generation
         triggers = [m for m in batch if m.trigger]
         kind = "mention" if triggers else "proactive"
+        bubble = bubble and not triggers
+        st.bubbling = bubble
+        if bubble and st.following:
+            self._stop_following(st, view, now)  # 安静了这么久：不是接着刚才那场聊天
 
         over, hard = self._over_budget(st, view, now)
         if kind == "proactive" and (over or now < self.paused_until):
@@ -1924,6 +2189,9 @@ class Engine:
             st.mention_due = st.mention_due or any(m.trigger for m in batch)
             return
         info = self.transport.channel_info(st.channel_id)
+        bubble_hint = await self._bubble_plan(st, view, conv, info, batch, now) if bubble else None
+        if st.generation != generation:
+            return  # 替它找新鲜事的时候记忆被清空了：这次不冒了
         system = self._system_prompt(st, view, conv, info)
         context, digest_marks, listed = self._shared_context(st, view, triggers, now) if kind == "mention" else ([], {}, None)
         # 连通组的记录：只附这个频道里的消息被改成了什么（别的频道的留给那边，免得记成这个频道的）
@@ -1951,6 +2219,7 @@ class Engine:
         context = context + dm_lines
         where = self._sync_label(st.channel_id) if self._synced(st) else None  # 连通组的记录：每段写明是哪个频道的
 
+
         def build(with_images: bool) -> tuple[Any, list[dict[str, Any]]]:
             content = render_round(
                 numbered,
@@ -1967,6 +2236,7 @@ class Engine:
                 cards=card_lines,
                 fresh_since=now - FRESH_SECONDS if kind == "proactive" and not st.following else None,
                 following=kind == "proactive" and st.following,
+                hint=bubble_hint,
                 where=where,
             )
             return content, self._messages(system, conv, content)
@@ -2090,7 +2360,9 @@ class Engine:
         try:
             spoke, reacted, failed_media = await self._execute(st, actions, kind, targets, elapsed=self.clock() - started)
         finally:
-            self._after_round(st, view, kind, decided_reply, decided_react)
+            self._after_round(st, view, kind, decided_reply, decided_react, bubble)
+            if bubble:
+                self._bubble_done(st, view, decided_reply, actions)
             self.store.set_outcome(row, "recited" if row in self._recited_rows else outcome)
             self._recited_rows.discard(row)
             # 对话里附着人设卡时不给管理员看模型的“想法”（里面可能引用了别人的卡）
@@ -2119,7 +2391,7 @@ class Engine:
             "[%s #%s] %s → %s | 输入 %d（命中 %d）输出 %d | $%.5f | %s",
             info.guild_name,
             info.channel_name,
-            "点名" if kind == "mention" else "主动",
+            "点名" if kind == "mention" else ("冒泡" if bubble else "主动"),
             outcome,
             u.prompt_tokens,
             u.hit,
@@ -2458,6 +2730,12 @@ class Engine:
     async def _search_section(self, st: ChannelState, view: View, action: Action, now: float) -> str:
         query = action.query or ""
         shown = neutralize(one_line(query, 60))
+        queries = [query]
+        if st.bubbling:
+            picked = self._bubble_queries(st, query, now)
+            if picked is None:
+                return ""  # 不让搜的话题（_bubble_plan 不会挑到）
+            queries = picked[1]
         if not self._can_search(view):
             return f"（想搜「{shown}」，但这里不能上网搜。凭你已有的知识回答，拿不准就直说。）"
         limit = int(view.daily_search_limit)
@@ -2470,7 +2748,12 @@ class Engine:
         # 先记一笔占住名额，再去搜：别的频道同时在搜时，也不会一起超过上限
         row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="search", outcome="pending")
         try:
-            result = await self.searcher.search(query, max_chars=self.ec.search_max_chars)
+            for query in queries:  # 冒泡：先只搜 X 上的，没搜到再搜全网（平时就一个搜索词）
+                result = await self.searcher.search(query, max_chars=self.ec.search_max_chars)
+                if result.sources or query is queries[-1]:
+                    break
+                self._finish_search(st, row, result.usage, "search", result.paid)  # 这一次也照实记账，再记一笔搜下一个
+                row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="search", outcome="pending")
         except asyncio.CancelledError:
             self._finish_search(st, row, Usage(), "error")  # 关机时被取消：别留下一笔一直“进行中”的记录
             raise
@@ -2480,6 +2763,7 @@ class Engine:
             self._finish_search(st, row, getattr(exc, "usage", None) or Usage(), "error", paid if isinstance(paid, int) else 0)
             return f"（搜「{shown}」失败了。凭你已有的知识回答，拿不准就直说。）"
         self._finish_search(st, row, result.usage, "search", result.paid)
+        st.bubble_found = bool(result.sources)
         log.info("频道 %s：搜了「%s」（%s，%d 个来源）", st.channel_id, one_line(query, 60), result.provider, len(result.sources))
         return render_search(query, result.summary, result.sources, self.ec.search_max_chars)
 
@@ -6590,7 +6874,8 @@ class Engine:
         st = self.states.get(channel_id)
         view = self.settings.view(guild_id, channel_id, parent_id, category_id)
         return {
-            "following": bool(st and st.following and view.proactive and view.follow and now - st.last_activity_at < FOLLOW_IDLE),
+            "following": bool(st and st.following and view.follow and now - st.last_activity_at < FOLLOW_IDLE),
+            "bubble": self._bubble_status(st, view, now) if st is not None and self._bubble_on(st) else None,
             "next_check_in": max(0.0, st.next_check_at - now) if st and st.next_check_at else None,
             "pending": len(st.pending) if st else 0,
             "last_speak_ago": (now - st.last_speak_at) if st and st.last_speak_at else None,

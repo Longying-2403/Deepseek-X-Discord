@@ -120,6 +120,28 @@ CREATE TABLE IF NOT EXISTS chat_syncs (
     joined_next INTEGER NOT NULL DEFAULT 0   -- 连进来时它自己那份的下一个编号：断开时比这大，就是连通期间旧版本往里写过
 );
 CREATE INDEX IF NOT EXISTS idx_msgmap_msgid ON msgmap (message_id);
+CREATE TABLE IF NOT EXISTS interests (
+    channel_id INTEGER NOT NULL,   -- 这个频道的人感兴趣的话题（冒泡时去搜新鲜事用，/dsadmin 兴趣 管）
+    topic TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- auto（它从聊天里看出来、搜过的）/ manual（管理员加的）/ blocked（管理员删掉、不让搜的）
+    added_at REAL NOT NULL,
+    used_at REAL NOT NULL DEFAULT 0,  -- 上一次拿它去搜是什么时候
+    uses INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel_id, topic)
+);
+CREATE TABLE IF NOT EXISTS bubble_state (
+    channel_id INTEGER PRIMARY KEY,  -- 开了冒泡的频道：重启以后也记得今天冒过几次、上次有没有人理
+    last_at REAL NOT NULL DEFAULT 0,
+    waiting INTEGER NOT NULL DEFAULT 0,  -- 上次冒泡以后还没人说话：等有人说话再冒
+    day TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 0     -- day 那天冒了几次
+);
+CREATE TABLE IF NOT EXISTS bubble_links (
+    channel_id INTEGER NOT NULL,   -- 冒泡时分享过的链接：不重复发
+    url TEXT NOT NULL,
+    at REAL NOT NULL,
+    PRIMARY KEY (channel_id, url)
+);
 CREATE TABLE IF NOT EXISTS chat_sync_seq (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     next_no INTEGER NOT NULL        -- 下一个新组的编号（组的 ID 是它的负数；散掉的组的编号不再用）
@@ -277,6 +299,82 @@ class Store:
     def delete_override(self, scope: str, scope_id: int, key: str) -> None:
         with self.db:
             self.db.execute("DELETE FROM overrides WHERE scope = ? AND scope_id = ? AND key = ?", (scope, scope_id, key))
+
+    # ---- 冒泡：兴趣、状态、分享过的链接 ----
+    def interests(self, channel_id: int) -> list[tuple[str, str, float, int]]:
+        """这个频道的兴趣：[(话题, auto / manual / blocked, 上次拿去搜的时间, 搜过几次)]，新加的在前。"""
+        rows = self.db.execute(
+            "SELECT topic, kind, used_at, uses FROM interests WHERE channel_id = ? ORDER BY added_at DESC, rowid DESC", (channel_id,)
+        ).fetchall()
+        return [(r["topic"], r["kind"], r["used_at"], r["uses"]) for r in rows]
+
+    def set_interest(self, channel_id: int, topic: str, kind: str, now: float) -> None:
+        """加一个话题，或者改它是哪一种（管理员加的、不让搜的）。"""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO interests (channel_id, topic, kind, added_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (channel_id, topic) DO UPDATE SET kind = excluded.kind",
+                (channel_id, topic, kind, now),
+            )
+
+    def note_interests(self, channel_id: int, topics: list[str], now: float, keep: int) -> None:
+        """它从聊天里看出来的话题：没记过的记下（已经记着的、不让搜的都不动）。自己看出来的最多留 keep 个。"""
+        with self.db:
+            for topic in topics:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO interests (channel_id, topic, kind, added_at) VALUES (?, ?, 'auto', ?)", (channel_id, topic, now)
+                )
+            self._trim_interests(channel_id, keep)
+
+    def _trim_interests(self, channel_id: int, keep: int) -> None:
+        self.db.execute(
+            "DELETE FROM interests WHERE channel_id = ? AND kind = 'auto' AND topic NOT IN "
+            "(SELECT topic FROM interests WHERE channel_id = ? AND kind = 'auto' "
+            "ORDER BY MAX(used_at, added_at) DESC, topic LIMIT ?)",
+            (channel_id, channel_id, keep),
+        )
+
+    def use_interest(self, channel_id: int, topic: str, now: float, keep: int) -> None:
+        """它拿这个话题去搜了一次：没记过的记成它自己看出来的（auto）。自己看出来的最多留 keep 个，很久没搜的先删。"""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO interests (channel_id, topic, kind, added_at, used_at, uses) VALUES (?, ?, 'auto', ?, ?, 1) "
+                "ON CONFLICT (channel_id, topic) DO UPDATE SET used_at = excluded.used_at, uses = uses + 1",
+                (channel_id, topic, now, now),
+            )
+            self._trim_interests(channel_id, keep)
+
+    def delete_interest(self, channel_id: int, topic: str) -> bool:
+        with self.db:
+            return self.db.execute("DELETE FROM interests WHERE channel_id = ? AND topic = ?", (channel_id, topic)).rowcount > 0
+
+    def bubble_state(self, channel_id: int) -> tuple[float, bool, str, int]:
+        """(上次冒泡的时间, 还在等人说话, 哪一天, 那天冒了几次)。"""
+        r = self.db.execute("SELECT last_at, waiting, day, count FROM bubble_state WHERE channel_id = ?", (channel_id,)).fetchone()
+        return (r["last_at"], bool(r["waiting"]), r["day"], r["count"]) if r is not None else (0.0, False, "", 0)
+
+    def set_bubble_state(self, channel_id: int, last_at: float, waiting: bool, day: str, count: int) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO bubble_state (channel_id, last_at, waiting, day, count) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (channel_id) DO UPDATE SET last_at = excluded.last_at, waiting = excluded.waiting, "
+                "day = excluded.day, count = excluded.count",
+                (channel_id, last_at, int(waiting), day, count),
+            )
+
+    def bubble_links(self, channel_id: int, limit: int = 20) -> list[str]:
+        rows = self.db.execute("SELECT url FROM bubble_links WHERE channel_id = ? ORDER BY at DESC LIMIT ?", (channel_id, limit)).fetchall()
+        return [r["url"] for r in rows]
+
+    def add_bubble_links(self, channel_id: int, urls: list[str], now: float, keep: int = 100) -> None:
+        with self.db:
+            for url in urls:
+                self.db.execute("INSERT OR REPLACE INTO bubble_links (channel_id, url, at) VALUES (?, ?, ?)", (channel_id, url, now))
+            self.db.execute(
+                "DELETE FROM bubble_links WHERE channel_id = ? AND url NOT IN "
+                "(SELECT url FROM bubble_links WHERE channel_id = ? ORDER BY at DESC LIMIT ?)",
+                (channel_id, channel_id, keep),
+            )
 
     # ---- 对话 ----
     def load_conversation(self, channel_id: int, guild_id: int) -> Conversation:

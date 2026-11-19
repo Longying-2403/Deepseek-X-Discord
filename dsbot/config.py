@@ -39,6 +39,8 @@ _SPEC_LIST = [
     Spec("proactive", "主动发言", bool, "admin", "没被点名时，是否自己判断要不要说话"),
     Spec("check_minutes", "几分钟看一眼", int, "admin", "开了主动发言时，平时隔多久看一眼这个频道有没有新的聊天（填 5 就是每 5～8 分钟，随机）", 1, 720),
     Spec("follow", "聊起来就跟着", bool, "admin", "它开口了、或者有人叫了它之后，接着留意这里的聊天，有人说话就看要不要接；5 分钟没人说话、或者连着几次都没话说就回到平时"),
+    Spec("bubble", "冒泡", bool, "admin", "这个频道安静久了，它自己冒个泡：说说大家感兴趣的新鲜事（多半是 X 上的）、打个招呼，也可能不说。只对本频道生效（见 /dsadmin 兴趣）"),
+    Spec("bubble_hours", "冒泡间隔小时", int, "admin", "安静多久以后冒泡：填的数到它的 1.5 倍之间，每次随机（填 4 就是 4～6 小时）", 1, 168),
     Spec("quiet_seconds", "冷场秒数", int, "admin", "平时看一眼时，等多久没人说话、也没人在打字才判断（别人正说着不插话）", 5, 3600),
     Spec("max_wait_seconds", "最长等待秒", int, "admin", "平时看一眼时一直有人在说话：最多等多久也判断一次", 30, 86400),
     Spec("mention_rate_limit", "每人每分钟点名", int, "admin", "每个人每分钟最多能叫它几次", 1, 60),
@@ -76,6 +78,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "proactive": False,
     "check_minutes": 5,
     "follow": True,
+    "bubble": False,
+    "bubble_hours": 4,
     "quiet_seconds": 30,
     "max_wait_seconds": 180,
     "mention_rate_limit": 3,
@@ -219,6 +223,14 @@ class EngineConfig:
     max_files_per_round: int = 3
     file_timeout_seconds: float = 30.0  # 解析一个文件最多等多久
     turn_merge_seconds: float = 20.0  # 同一个人这么多秒内连发算一轮
+    # 冒泡（/dsadmin 设置 参数:冒泡 在频道里打开）
+    bubble_from_hour: int = 8  # 几点以后才冒泡（bot.timezone 的时间）
+    bubble_until_hour: int = 23  # 几点以后不冒泡
+    bubble_daily_limit: int = 3  # 每个频道每天最多冒几次泡
+    bubble_greet_share: float = 0.2  # 多少比例的冒泡只打个招呼、不去搜新鲜事
+    bubble_x_share: float = 0.7  # 去搜新鲜事时，多少比例只搜 X 上的（其余搜全网的新闻）
+    bubble_fresh_days: int = 3  # 只要最近几天的
+    bubble_max_topics: int = 20  # 它自己看出来的兴趣每个频道最多留几个
     typing_chars_per_second: float = 3.0
     typing_min_seconds: float = 2.0
     typing_max_seconds: float = 10.0

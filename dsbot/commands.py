@@ -1,7 +1,7 @@
 """斜杠命令。
 
-/dsadmin …  服务器管理员（默认需要“管理服务器”权限）：区域、设置（主动发言、记忆共享、话量等）、档位、人设、表情包库、长期记忆、
-            状态、清空记忆。有几种做法的（区域、表情包、长期记忆）是子命令：/dsadmin 区域 允许、/dsadmin 长期记忆 添加……
+/dsadmin …  服务器管理员（默认需要“管理服务器”权限）：区域、设置（主动发言、记忆共享、冒泡、话量等）、档位、人设、表情包库、长期记忆、
+            兴趣（冒泡时去搜的话题）、状态、清空记忆。有几种做法的（区域、表情包、长期记忆）是子命令：/dsadmin 区域 允许、/dsadmin 长期记忆 添加……
             （2.9.0 以前叫 /ds，用“操作”一栏选做法；“区域列表”“主动”“记忆共享”三个命令并进了 区域 查看 和 设置。）
 /ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。私信里用是私信挂的那个服务器的卡。
 /ds-dm …    服务器里和私信里都能用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录。
@@ -78,7 +78,10 @@ NO_CATEGORY = "这个频道不在任何类别里，范围请选“本频道”�
 # 区域（允许回应）、人设有专门的命令；其余管理员参数走 /dsadmin 设置（主动发言、记忆共享也在里面：2.9.0 以前各有一个命令）
 ADMIN_SET_KEYS = [k for k in ADMIN_KEYS if k not in ("enabled", "persona")]
 GUILD_ONLY_KEYS = ("dm", "dm_memory", "cross_server")  # 只看全服务器这一级的参数
-OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona"]
+CHANNEL_ONLY_KEYS = ("bubble", "bubble_hours")  # 冒泡：只在本频道这一级设（开在全服务器上，每个频道都冒泡就太吵了）
+OWNER_SET_KEYS = OWNER_KEYS + [k for k in ADMIN_KEYS if k != "persona" and k not in CHANNEL_ONLY_KEYS]
+INTEREST_KINDS = {"auto": "它从聊天里看出来的", "manual": "管理员加的", "blocked": "不让搜的"}
+INTEREST_MAX_CHARS = 40
 RESET_CHOICE = "默认（恢复成上一级的设置）"
 
 
@@ -602,7 +605,67 @@ def setting_notes(bot: "DSBot", interaction: discord.Interaction, key: str, valu
         notes.append(share_text(bot, interaction))  # 这个频道现在共享不共享、来自哪一级、能翻哪些频道
         if value and scope != "channel":
             notes.append("（私密频道就算在这个范围里也不会把内容分享出去，除非在那个频道里单独开。）")
+    if key in CHANNEL_ONLY_KEYS:
+        notes.append(bubble_text(bot, interaction))
+        if key == "bubble" and value:
+            notes.append("它会从这里的聊天里看大家对什么感兴趣，去搜最近的新鲜事（多半是 X 上的）；`/dsadmin 兴趣 查看` 能看到、能加、能删。只对这个频道生效。")
     return notes
+
+
+def bubble_text(bot: "DSBot", interaction: discord.Interaction) -> str:
+    """这个频道的冒泡现在怎么样（状态里的一行；改了冒泡的设置以后也说一遍）。"""
+    st = bot.engine.status(*_ids(interaction))
+    info = st.get("bubble")
+    view = bot.settings.view(*_ids(interaction))
+    hours = int(view.bubble_hours)
+    if not bot.settings.overrides("channel", interaction.channel_id).get("bubble"):
+        return "冒泡：关（`/dsadmin 设置 参数:冒泡 值:开` 在这个频道打开）"
+    ec = bot.cfg.engine
+    text = (
+        f"冒泡：开 · 安静 {hours}～{hours * 1.5:g} 小时以后冒一次，只在 {ec.bubble_from_hour}～{ec.bubble_until_hour} 点，"
+        f"每天最多 {ec.bubble_daily_limit} 次"
+    )
+    if info is None:
+        return text + " · 有人说过话以后开始算"
+    text += f" · 今天 {info['today']} / {info['limit']} 次"
+    if info["waiting"]:
+        return text + " · 上次冒的还没人理：等有人说话再冒"
+    if info["due_in"] is None:
+        return text
+    if info["due_in"] <= 0:
+        return text + " · 该冒了（夜里、今天冒够了、超了预算时会往后等）"
+    return text + f" · 一直没人说话的话，约 {max(1, round(info['due_in'] / 60))} 分钟后"
+
+
+def interest_key(topic: str) -> str:
+    """话题：去掉头尾空白、合并中间的空白，最多 INTEREST_MAX_CHARS 个字。"""
+    return " ".join(topic.split())[:INTEREST_MAX_CHARS].strip()
+
+
+def interests_text(bot: "DSBot", channel_id: int) -> str:
+    rows = bot.store.interests(channel_id)
+    lines = [f"**<#{channel_id}> 的兴趣**（它冒泡时拿这些话题去搜最近的新鲜事）"]
+    for kind in ("manual", "auto", "blocked"):
+        names = [discord_safe(t) + (f"（搜过 {uses} 次）" if uses and kind != "blocked" else "") for t, k, _, uses in rows if k == kind]
+        if names:
+            lines.append(f"{INTEREST_KINDS[kind]}：" + "、".join(names))
+    if len(lines) == 1:
+        lines.append("还没有。打开冒泡以后，这里聊上几句、停下来一阵，它会把看出来的大家感兴趣的话题记在这里，冒泡时拿去搜；也可以用 `/dsadmin 兴趣 添加` 自己加。")
+    if not bot.settings.overrides("channel", channel_id).get("bubble"):
+        lines.append("⚠️ 这个频道没开冒泡：`/dsadmin 设置 参数:冒泡 值:开` 打开")
+    return "\n".join(lines)
+
+
+def interest_choices(bot: "DSBot", channel_id: int | None, current: str) -> list[Choice[str]]:
+    """/dsadmin 兴趣 删除 的「话题」：列出这个频道记着的（输入的字能筛选）。"""
+    if channel_id is None:
+        return []
+    words = current.strip().casefold()
+    out = []
+    for topic, kind, _, _ in bot.store.interests(channel_id):
+        if not words or words in topic.casefold():
+            out.append(Choice(name=f"{topic}（{INTEREST_KINDS[kind]}）"[:100], value=topic))
+    return out[:25]
 
 
 def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
@@ -627,6 +690,7 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         f"别名：{view.aliases or '（无）'} · 人设：{format_value(SPECS['persona'], view.persona)}",
         f"待处理消息 {st['pending']} 条 · 上次发言：{_ago(st['last_speak_ago'])}",
     ]
+    lines.append(bubble_text(bot, interaction))
     lines.append(share_text(bot, interaction))
     if st["can_search"]:
         lines.append(f"联网搜索：开 · 今天本服务器已搜 {st['searches']} / {view.daily_search_limit} 次")
@@ -2023,7 +2087,7 @@ def register_commands(bot: "DSBot") -> None:
         # 输入时 Discord 给的是命令里显示的栏名（“参数”），值是选单里那一项的参数名
         return value_choices(getattr(interaction.namespace, "参数", None), current)
 
-    @admin.command(name="设置", description="调整单项参数：主动发言、记忆共享、发图、别名、话量等（值填“默认”恢复）")
+    @admin.command(name="设置", description="调整单项参数：主动发言、冒泡、记忆共享、发图、别名等（值填“默认”恢复）")
     @app_commands.rename(key="参数", value="值", scope="范围")
     @app_commands.describe(
         key="要改哪个参数",
@@ -2038,6 +2102,8 @@ def register_commands(bot: "DSBot") -> None:
         # 私信、私信记忆、跨服务器不在任何频道、类别里：只看全服务器这一级
         whole = key.value in GUILD_ONLY_KEYS
         target = _target(interaction, scope) if not whole else ("guild", interaction.guild_id, "全服务器")
+        if key.value in CHANNEL_ONLY_KEYS:  # 冒泡只在本频道这一级设：选了别的范围也是本频道
+            target = _target(interaction, None)
         if target is None:
             await _reply(interaction, NO_CATEGORY)
             return
@@ -2243,6 +2309,48 @@ def register_commands(bot: "DSBot") -> None:
             view=ConfirmClear(bot, guild_id, interaction.user.id),
             ephemeral=True,
         )
+
+    # ------------------------------------------------------------ 兴趣（冒泡时去搜的话题）
+    likes = app_commands.Group(name="兴趣", description="这个频道的人感兴趣的话题：它冒泡时拿去搜最近的新鲜事", parent=admin)
+
+    @likes.command(name="查看", description="这个频道记着哪些感兴趣的话题、哪些不让搜")
+    async def interest_list_cmd(interaction: discord.Interaction) -> None:
+        await _reply_long(interaction, interests_text(bot, interaction.channel_id))
+
+    @likes.command(name="添加", description="给这个频道加一个感兴趣的话题")
+    @app_commands.rename(topic="话题")
+    @app_commands.describe(topic="几个词就够，比如“原神 新版本”“显卡价格”（它搜的时候会自己限定最近几天）")
+    async def interest_add_cmd(interaction: discord.Interaction, topic: str) -> None:
+        name = interest_key(topic)
+        if not name:
+            await _reply(interaction, "要加什么话题？在「话题」里填上。")
+            return
+        bot.store.set_interest(interaction.channel_id, name, "manual", time.time())
+        text = f"已加上：「{discord_safe(name)}」。"
+        if not bot.settings.overrides("channel", interaction.channel_id).get("bubble"):
+            text += "\n⚠️ 这个频道没开冒泡，现在用不上：`/dsadmin 设置 参数:冒泡 值:开` 打开"
+        await _reply(interaction, text)
+
+    async def interest_options(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
+        return interest_choices(bot, interaction.channel_id, current)
+
+    @likes.command(name="删除", description="删掉一个话题：它自己看出来的会记成“不让搜”，以后不再搜")
+    @app_commands.rename(topic="话题")
+    @app_commands.describe(topic="要删哪个（从弹出的列表里选，输入几个字能筛选）")
+    @app_commands.autocomplete(topic=interest_options)
+    async def interest_remove_cmd(interaction: discord.Interaction, topic: str) -> None:
+        name = interest_key(topic)
+        known = {t: k for t, k, _, _ in bot.store.interests(interaction.channel_id)}
+        if name not in known:
+            await _reply(interaction, f"这个频道没记着「{discord_safe(name)}」（`/dsadmin 兴趣 查看` 能看到全部）。")
+        elif known[name] == "auto":
+            # 它自己从聊天里看出来的：光删掉的话下次冒泡多半又会挑它，所以记成不让搜
+            bot.store.set_interest(interaction.channel_id, name, "blocked", time.time())
+            await _reply(interaction, f"已删掉「{discord_safe(name)}」，以后它也不会再搜这个（想让它搜就再“添加”一次）。")
+        else:
+            bot.store.delete_interest(interaction.channel_id, name)
+            done = "已删掉" if known[name] == "manual" else "已经可以搜了：从“不让搜”里拿掉了"
+            await _reply(interaction, f"{done}「{discord_safe(name)}」。")
 
     # ------------------------------------------------------------ 状态、清空记忆
     @admin.command(name="状态", description="查看本频道的设置、主动发言的节奏和今天的花费")

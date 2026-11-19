@@ -41,6 +41,8 @@ enabled = true                    # 允许回应的区域。改成 false = 所�
 proactive = false                 # 主动发言默认关，在需要的频道里用 /dsadmin 设置 参数:主动发言 值:开 打开
 check_minutes = 5                 # 开了主动发言时，平时每 5～8 分钟（随机）看一眼有没有新的聊天；只接最近 5 分钟里说的
 follow = true                     # 它开口了、或者有人叫了它之后跟着这场聊天：有人说话就看要不要接；5 分钟没人说话、连着 3 次没话说就回到平时
+bubble = false                    # 冒泡：只在频道里用 /dsadmin 设置 参数:冒泡 值:开 打开（这里填 true 没有用）
+bubble_hours = 4                  # 开了冒泡的频道：安静 4～6 小时（随机）以后冒个泡
 quiet_seconds = 30                # 平时看一眼时：等 30 秒没人说话、也没人在打字才判断（别人正说着不插话）
 max_wait_seconds = 180            # 平时看一眼时一直有人在说：最多等 180 秒也判断一次
 mention_rate_limit = 3            # 每人每分钟最多叫它 3 次
@@ -71,6 +73,12 @@ desktop = true                    # 桌面操作：你私信叫它时替你开�
 
 [engine]
 # 一般不用动
+bubble_from_hour = 8              # 冒泡：几点以后才冒（上面 timezone 的时间）
+bubble_until_hour = 23            # 几点以后不冒
+bubble_daily_limit = 3            # 每个频道每天最多冒几次泡
+bubble_greet_share = 0.2          # 多少比例的冒泡只打个招呼、不去搜新鲜事
+bubble_x_share = 0.7              # 去搜新鲜事时，多少比例先只搜 X 上的（其余搜全网的新闻；X 上没搜到也会改搜全网）
+bubble_fresh_days = 3             # 只要最近几天的
 max_batch_messages = 40           # 一轮最多带多少条新消息
 max_pending_messages = 120        # 没轮到时最多缓存多少条
 pending_max_age_seconds = 21600   # 缓存里超过 6 小时的旧消息直接丢掉

@@ -22,6 +22,7 @@ from .prompts import (
     GALLERY_FOOT,
     GALLERY_HEAD,
     HINT_MENTION,
+    BUBBLE_HEAD,
     HINT_FOLLOW,
     HINT_PASSIVE,
     HINT_PROACTIVE,
@@ -429,11 +430,13 @@ def render_round(
     where: str | None = None,
     fresh_since: float | None = None,
     following: bool = False,
+    hint: str | None = None,
 ) -> str | list[dict[str, Any]]:
     """messages: [(编号, 消息)]；images: message_id -> [(data_uri, detail)]；docs: message_id -> 放在这条消息后面的文件块。
     context：放在消息前面的背景（比如这个人刚才在别的频道跟它聊过什么）。cards：在场的人的人设卡（render_cards 的结果）。
     where：连通的频道共用的记录里，这些消息是哪个频道的（写在开头的时间后面）。kind 是 passive：别的连通频道补进来的。
     fresh_since：主动看一眼时，这个时间以前到的消息只当背景（在它们后面写一句）。following：聊起来以后跟着的那几轮。
+    hint：最后那句提示换成这一句（冒泡的那一轮）。
 
     没有图片时返回字符串；有图片时返回内容块数组，图片紧跟在它所属的那条消息后面。
     """
@@ -452,7 +455,7 @@ def render_round(
         out.docs(docs.get(m.message_id) or [])
         if i == last_stale:
             out.lines.append(STALE_NOTE.format(minutes=max(1, round((now - fresh_since) / 60))))
-    out.lines.append(_hint(kind, targets, following))
+    out.lines.append(hint if hint is not None else _hint(kind, targets, following))
     return out.finish()
 
 
@@ -480,8 +483,9 @@ def render_tool_result(
     header: str | None = None,
     gallery: Gallery | None = None,
     kind: str = "mention",
+    hint: str | None = None,
 ) -> str | list[dict[str, Any]]:
-    """看文件、打开链接、搜索、找图、翻别的频道之后，把结果交给模型。
+    """看文件、打开链接、搜索、找图、翻别的频道之后，把结果交给模型。hint：最后那句提示换成这一句（冒泡时搜完以后）。
 
     files=False 表示这次没要看文件；header 可以换掉开头那句（比如这次要打开的是链接）。"""
     out = _Builder(header if header is not None else ("（你要看的文件：）" if files else None))
@@ -491,7 +495,7 @@ def render_tool_result(
     if gallery is not None and gallery.items:
         out.gallery(gallery)
     out.lines += notes
-    out.lines.append(_hint(kind, targets))
+    out.lines.append(hint if hint is not None else _hint(kind, targets))
     return out.finish()
 
 
@@ -1075,7 +1079,7 @@ def review_text(content: Any) -> list[str]:
             fenced = True
             out.append("（内容略）")
             continue
-        if not line.strip() or line in (HINT_PROACTIVE, HINT_FOLLOW, HINT_PASSIVE) or _STALE_LINE.match(line) or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
+        if not line.strip() or line in (HINT_PROACTIVE, HINT_FOLLOW, HINT_PASSIVE) or line.startswith(BUBBLE_HEAD) or _STALE_LINE.match(line) or (line.startswith("（#") and line.endswith("在叫你，回应一下，用对方那条消息的语言回。）")):
             continue
         out.append(line)
     return out
