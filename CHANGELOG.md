@@ -2,6 +2,73 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.11.0] - 2026-11-19
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **冒泡**（按频道开启）：在某个频道里 `/dsadmin 设置 参数:冒泡 值:开`，这个频道安静久了它会自己来说点什么，像群友闲下来随手发一条。
+  - **什么时候**：一直没人说话满 4～6 小时（“冒泡间隔小时”，每次随机）；只在 8 点到 23 点；每个频道每天最多 3 次；上次冒的没人理，就等有人说话以后再冒。
+  - **说什么**：八成的时候分享一条新鲜事（从这个频道的兴趣里挑一个最近两天没搜过的话题，搜最近 3 天的消息，它挑一条用自己的话说、带上链接），两成的时候只打个招呼。搜到的都不合适，它会改成打招呼或者不说。
+  - **去哪搜**：用现成的联网搜索，不用 X 的账号和 key。七成的时候先只搜 X 上的（搜索词里限定 `site:x.com`），没搜到再搜全网；其余时候搜全网的新闻。算进每天的搜索次数。
+  - **兴趣**：开了冒泡的频道里，聊了几句、停下来十分钟以后，它会把看出来的大家感兴趣的话题记下来（一小时最多看一次；只看这个频道自己的聊天，不看人设卡和私信记忆）。新的一组命令 `/dsadmin 兴趣 查看 / 添加 / 删除`：看得到、能自己加；删掉它看出来的话题会记成“不让搜”。
+  - 冒泡以后有人接话，它会照“聊起来就跟着”的规矩接着聊（这个频道没开主动发言也接）。
+- `/dsadmin 状态` 多了一行冒泡的情况：今天冒了几次、下一次大概什么时候、是不是在等人理。
+
+**须知**
+
+- 冒泡默认关，只认在那个频道里开的设置（开在全服务器、类别上不算；主人的 `/dsowner 设置` 里没有这一项）。连通的频道（`/dsowner chatsync`）暂时不冒泡。
+- 搜到的东西可能不准、不相关或者过时：它被要求挑可靠的、不合适就不发，但没法保证每条都合适。不放心的话题用 `/dsadmin 兴趣 删除` 拦掉。
+- 花费：看一次兴趣是一次很小的模型调用；冒一次泡是一次模型调用加一两次搜索。一个频道一天通常不到 1 美分。
+- 夜里几点不冒、每天几次、X 和新闻的比例，在 `config.toml` 的 `[engine]` 里改（`bubble_from_hour`、`bubble_until_hour`、`bubble_daily_limit`、`bubble_greet_share`、`bubble_x_share`、`bubble_fresh_days`）。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.11.0 启动中`。数据库会自动多出三张表（`interests`、`bubble_state`、`bubble_links`），原来的数据不动。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `engine.py`：`_bubble_ready`（该不该冒）、`_bubble_scout`（聊天停了以后看兴趣）、`_bubble_plan`（这一轮替它找什么、最后那句说明）、`_bubble_queries`（限定最近几天、X 还是全网）、`_bubble_done`；`_round(..., bubble=True)` 照主动的那一套走，日志里写“冒泡”。
+- 一开始试过让模型自己决定搜不搜、搜什么（给它一个 `search` 动作）：用真模型演练，六次里五次只打招呼，搜的那一次话题也和聊天对不上，所以改成程序挑话题、程序搜。兴趣也不能等到冒泡时才看：没开主动发言的频道里，没叫它的消息只留 6 小时。
+- `store.py`：`interests`、`bubble_state`、`bubble_links` 三张表。`render_round` 多了 `hint`。冒泡的说明只占一行、以 `BUBBLE_HEAD` 开头，整理记忆时去掉。
+- 测试共 1453 个（新增 `tests/test_bubble.py`）。
+
+### English
+
+**Added**
+
+- **Bubbling up** (per channel): run `/dsadmin 设置 参数:冒泡 值:开` in a channel and, once the channel has been quiet for a while, the bot says something on its own, like a member dropping a message when they have a spare moment.
+  - **When**: after 4–6 hours without any message ("冒泡间隔小时", random each time); only between 8:00 and 23:00; at most 3 times a day per channel; if nobody reacted to its last one, it waits until someone speaks.
+  - **What**: 80% of the time it shares something new (it takes a topic from the channel's interests that hasn't been searched in the last two days, searches the last 3 days, and shares one item in its own words with the link); 20% of the time it just says hello. If nothing it found is suitable, it says hello instead, or stays quiet.
+  - **Where it looks**: the existing web search, with no X account or key. 70% of the time it searches X only first (`site:x.com` in the query) and falls back to the whole web; otherwise it searches the news. Searches count toward the daily search limit.
+  - **Interests**: in a channel with bubbling on, after a few messages and ten quiet minutes it notes the topics people seem interested in (at most once an hour; it only looks at the channel's own chat, not at profile cards or DM memory). New commands `/dsadmin 兴趣 查看 / 添加 / 删除`: view them, add your own, and deleting a topic it noted marks it as "do not search".
+  - If someone replies after it bubbled up, it follows the conversation by the usual "follow along" rules (even if speaking-up is off in that channel).
+- `/dsadmin 状态` has a new line about bubbling: how many times today, roughly when the next one is, and whether it is waiting for someone to speak.
+
+**Notes**
+
+- Bubbling is off by default and only honours the setting made in that channel (not server-wide or per category; the owner's `/dsowner 设置` doesn't offer it). Linked channels (`/dsowner chatsync`) don't bubble for now.
+- What it finds can be inaccurate, irrelevant or out of date: it is told to pick reliable items and to skip unsuitable ones, but that can't be guaranteed. Block topics you don't trust with `/dsadmin 兴趣 删除`.
+- Cost: noting interests is one small model call; a bubble is one model call plus one or two searches. Usually under 1 cent a day per channel.
+- The quiet hours, the daily limit and the X / news ratio are in `[engine]` of `config.toml` (`bubble_from_hour`, `bubble_until_hour`, `bubble_daily_limit`, `bubble_greet_share`, `bubble_x_share`, `bubble_fresh_days`).
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.11.0 启动中`. Three tables are added to the database automatically (`interests`, `bubble_state`, `bubble_links`); existing data is untouched.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `engine.py`: `_bubble_ready` (whether to bubble), `_bubble_scout` (noting interests after the chat stops), `_bubble_plan` (what to find for this round and the closing hint), `_bubble_queries` (last few days, X or the whole web), `_bubble_done`; `_round(..., bubble=True)` follows the proactive path and is logged as "冒泡".
+- Letting the model decide whether and what to search (by giving it a `search` action) was tried first: in a rehearsal with the real model it only said hello five times out of six, and the one search was unrelated to the chat, so the engine now picks the topic and searches. Interests also can't wait until bubble time: in channels without speaking-up, messages that don't call the bot are only kept for 6 hours.
+- `store.py`: tables `interests`, `bubble_state`, `bubble_links`. `render_round` gained `hint`. The bubble hint is a single line starting with `BUBBLE_HEAD` and is dropped when memory is tidied.
+- There are now 1453 tests (new `tests/test_bubble.py`).
+
 ## [2.10.0] - 2026-11-19
 
 > 英文版这次没有更新，还是 2.0.0。
