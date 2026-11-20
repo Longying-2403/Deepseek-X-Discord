@@ -2,6 +2,73 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.15.0] - 2026-11-20
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **更新公告**：bot 主人用 `/dsowner 公告 范围:服务器 | 私信 | 全部` 写一条更新说明，程序原样发出去（不经过模型，不花钱，不 @ 任何人）。
+  - 服务器：发到设了公告频道的服务器；私信：私信给最近 30 天私信过它、没拒收的人；全部：两边都发，同一份内容。
+  - 先弹出编辑框（标题、内容，先填好了这一版里和这个范围有关的简短说明），提交后看预览和会发到哪，点“发送”才发。
+  - 一条一条发，中间隔 1.5 秒；发完告诉主人发到了哪几个服务器、哪些没发，私信只说人数。
+- `/dsadmin 公告频道 设为`、`取消`：这个服务器的更新公告发到哪个频道。没设就不收。`/dsadmin 状态` 里多一行“更新公告”。
+- `/ds-dm 更新公告 值:开 | 关`：私信的更新公告收不收（默认收；每条私信公告末尾写着怎么拒收）。`/ds-dm 状态` 里多一行。
+
+**须知**
+
+- 公告不是模型写的：程序在发到的频道（私信）里记一条说明，下一次它在那里说话时看得到公告原文，有人问起答得上来（一直没轮到的话留 14 天）。
+- 发出去以后收不回来；不会定时发，也不会在启动时自动发。
+- 私信挂的服务器关掉了私信、或者 bot 已经不在那里的人不发。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.15.0 启动中`。
+- 数据库会自动多四张表（`announce_channels`、`announce_off`、`announcements`、`channel_notes`），原来的数据不动。斜杠命令多了 `/dsowner 公告`、`/dsadmin 公告频道`、`/ds-dm 更新公告`，启动时自动注册。
+- 升级后各服务器默认不收公告：要管理员先用 `/dsadmin 公告频道 设为` 指定频道。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新文件 `dsbot/announce.py`（范围、消息怎么拼、`Plan` / `Result`）、`dsbot/whatsnew.py`（每一版的简短说明，按 server / dm / both 标；发版时在最前面加新的一版）。
+- `engine.py`：`announce_plan`（照现在的情况会发到哪）、`announce`（发）。`store.py`：`channel_notes` 是程序替它发过的话，下一轮带进上下文后删掉。
+- `commands.py`：`AnnounceModal`、`ConfirmAnnounce`。
+- 测试共 1581 个（新增 `tests/test_announce.py`）。
+
+### English
+
+**Added**
+
+- **Update announcements**: the bot owner writes a short update note with `/dsowner 公告 范围:服务器 | 私信 | 全部` and the program sends it verbatim (no model call, no cost, no mentions).
+  - 服务器 (servers): posted to every server that has set an announcement channel. 私信 (DMs): sent by DM to people who messaged the bot in the last 30 days and haven't opted out. 全部 (all): both, same text.
+  - An edit box opens first (title and text, prefilled with this version's short notes for that scope); after submitting you see a preview and where it will go, and it is sent only when you press "发送".
+  - Sent one at a time, 1.5 s apart. The result lists the servers reached and skipped; for DMs it reports counts only.
+- `/dsadmin 公告频道 设为`, `取消`: which channel of this server receives announcements. Without one the server receives none. `/dsadmin 状态` shows it.
+- `/ds-dm 更新公告 值:开 | 关`: whether you receive announcements by DM (on by default; every DM announcement ends with how to opt out). `/ds-dm 状态` shows it.
+
+**Notes**
+
+- Announcements aren't written by the model, so the program leaves a note in each channel (or DM) it posted to; the next time the bot speaks there it sees the announcement text and can answer questions about it (the note is kept for 14 days if it never gets a turn).
+- A sent announcement can't be recalled. Nothing is scheduled or sent automatically on startup.
+- People whose DM is attached to a server that turned DMs off, or that the bot has left, are skipped.
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.15.0 启动中`.
+- Four tables are added to the database automatically (`announce_channels`, `announce_off`, `announcements`, `channel_notes`); existing data is untouched. Three slash commands are new, `/dsowner 公告`, `/dsadmin 公告频道` and `/ds-dm 更新公告`, registered on startup.
+- After upgrading no server receives announcements until an admin picks a channel with `/dsadmin 公告频道 设为`.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New files `dsbot/announce.py` (scopes, message composition, `Plan` / `Result`) and `dsbot/whatsnew.py` (short per-version notes tagged server / dm / both; add the new version at the top when releasing).
+- `engine.py`: `announce_plan` (where it would go right now) and `announce` (sending). `store.py`: `channel_notes` holds what the program posted on the bot's behalf; it is added to the next round's context and then deleted.
+- `commands.py`: `AnnounceModal`, `ConfirmAnnounce`.
+- There are now 1581 tests (new `tests/test_announce.py`).
+
 ## [2.14.0] - 2026-11-20
 
 > 英文版这次没有更新，还是 2.0.0。
