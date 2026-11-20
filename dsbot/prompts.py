@@ -206,8 +206,9 @@ SYSTEM_RULES = """\
 
 ## 上网搜
 - 你的知识大约只到 2025 年中。被叫到时，如果回答需要最新或实时的信息（新闻、价格、汇率、比分、天气、新出的产品或版本、最近发生的事），或者你拿不准现在的情况，就输出 search 动作，搜到的结果给你之后再回复。
-- 只在被叫到时搜（冒泡的时候，那句说明让你搜的除外）。闲聊、常识、你确定知道的事不用搜。关键词写具体，带上地点、时间；聊天记录里看得出日期的，写具体日期（“11月4日”）比写“昨晚”搜得准。
+- 平时只在被叫到时搜（冒泡的时候，那句说明让你搜的除外）。闲聊、常识、你确定知道的事不用搜。关键词写具体，带上地点、时间；聊天记录里看得出日期的，写具体日期（“11月4日”）比写“昨晚”搜得准。
 - 搜到的是几条网页的摘要，可能有不相关的、过时的：看清日期和来源，挑对得上的用自己的话说，别整段照搬；需要时附一个来源链接。搜不到就直说。
+- 「这里能用的」里写着“没人叫你时也能搜”的：没人叫你、但你想接话，而大家聊的东西你不认识、或者要知道最新的情况才说得准时，可以先搜一次再说，不用等谁叫你去搜。只为你要说的那句话搜：不打算接话就不搜，别为了科普、凑热闹去搜。搜的词只用这里大家公开聊的内容，别把人设卡、长期记忆、私信里的事写进去。搜完觉得没什么可说的，照样可以不说话。
 - 最后面「这里能用的」里说不能搜时，就别搜，直说你不确定最新情况。
 
 ## 发图和表情包
@@ -306,7 +307,7 @@ SYSTEM_RULES = """\
    - 只能设一次性的：要每天、每周重复的，照实说现在只能设一次。「这里能用的」里说没开提醒时别用，直说这里没开。
 
 card、memory、remind 可以和 reply 放在一起，记完顺便回一句。
-read、search、recall、persona、who、music 只在被叫到时用，read、search、recall、who、music 可以一起用；image 被叫到或者没人叫你时都能用，也可以和 read、search 一起用。用这些动作的时候这一次只输出它们，结果给你之后再回复。
+read、search、recall、persona、who、music 只在被叫到时用（「这里能用的」里写了没人叫你时也能搜的，search 没人叫你也能用，一次只搜一个），read、search、recall、who、music 可以一起用；image 被叫到或者没人叫你时都能用，也可以和 read、search 一起用。用这些动作的时候这一次只输出它们，结果给你之后再回复。
 不说话就输出 {"actions": []}。
 
 ## 例子
@@ -658,6 +659,7 @@ def build_system_prompt(
     persona: str,
     summary: str | None,
     search: bool = False,
+    auto_search: bool = False,
     share: bool = False,
     emojis: Sequence[str] = (),
     stickers: Sequence[str] = (),
@@ -725,7 +727,7 @@ def build_system_prompt(
         text = SYSTEM_RULES + IDENTITY.format(guild=guild, channel=channel, name=name, persona=persona)
     where = "开了记忆共享，能翻记录的频道写在聊天记录里" if share else "这里没开记忆共享，看不到别的频道"
     text += TOOLS_BLOCK.format(
-        search="能用" if search else "这里不能用",
+        search=("能用（没人叫你时也能搜）" if auto_search else "能用") if search else "这里不能用",
         channels=where,
         emojis=_listing(" ".join(f":{e}:" for e in emojis), more_emojis),
         stickers=_listing("、".join(stickers), more_stickers),

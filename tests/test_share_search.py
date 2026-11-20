@@ -312,8 +312,9 @@ class Search(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.store.day_stats(day)["outcomes"].get("error"), 1)
 
     async def test_not_in_proactive_rounds(self):
+        # 关掉主动搜索（3.0.0 起默认开，见 test_auto_search.py）：没人叫它时不搜
         searcher = FakeSearcher()
-        engine, llm, transport, clock = setup([SEARCH("x")], searcher=searcher, proactive=True)
+        engine, llm, transport, clock = setup([SEARCH("x")], searcher=searcher, proactive=True, proactive_search=False)
         await engine.handle_message(msg(501, "有人知道最新的 iPhone 吗"))
         clock.advance(31)
         await engine.tick()

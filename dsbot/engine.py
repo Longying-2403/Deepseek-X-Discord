@@ -250,6 +250,7 @@ def _queue_view(action: Action) -> bool:
 
 # 用完要再问一次模型的动作。read / search / recall / persona / who / music 只在被叫到时能用；image 主动聊天时也能用
 TOOL_KINDS = ("read", "search", "recall", "persona", "image", "who", "music", "desktop")
+AUTO_SEARCH = "autosearch"  # usage 表里的 kind：没人叫它时它自己搜的（主动搜索），和被叫到时的 search 分开数
 MEMORY_KINDS = ("card", "memory", "dm_memory")  # 改人设卡、长期记忆、私信记忆：和回话放在一起，不用再问一次模型
 MAX_WHO = 2
 MAX_REVIEW_CHUNKS = 4  # 一次整理最多分几段问模型（聊天记录太长时）
@@ -2719,6 +2720,8 @@ class Engine:
         # 主动聊天时也能上网找图（发图是群友的日常）；其他要查资料的动作只在被叫到时用。
         # 主动聊天时找不了（冷却中、次数用完）就当它没说要找图，不为它多问一次模型
         extra = ("image",) if kind == "proactive" and self._image_ready(st, view, now) else ()
+        if kind == "proactive" and self._auto_search_ready(st, view, now):
+            extra += ("search",)  # 主动搜索：没人叫它、它想接话时，不懂的可以先搜一下
         seen = self._seen_cards(conv, user_content)  # 这次请求里它看得到的人设卡（从记录里认：重启之后也算）
         actions, stored = self._interpret(
             st, completion, kind, targets, allow_tools=kind == "mention", extra_tools=extra, cards_here=bool(card_lines or seen)
@@ -2778,7 +2781,7 @@ class Engine:
             # 只有第一步没改人设时，第二步还能改一次人设，比如看完角色卡再照着改）
             self.store.set_outcome(row, "+".join(sorted({a.kind for a in tools})))
             if kind != "mention":
-                st.last_decision = "想发图，先去找"
+                st.last_decision = "想接话，先去搜一下" if any(a.kind == "search" for a in tools) else "想发图，先去找"
             else:
                 st.last_decision = "被点名，先去点歌" if all(a.kind == "music" for a in tools) else "被点名，先去查资料"
             allow_persona = any(m.from_owner for m in triggers) and any(a.kind == "read" for a in tools)
@@ -2936,7 +2939,7 @@ class Engine:
             # 要查资料时这一次只算这些动作；历史里也只记它们，和实际做的事一致
             picked = (
                 [a for a in tools if a.kind == "read"][:MAX_READ_TARGETS]
-                + [a for a in tools if a.kind == "search"][: max(1, self.ec.max_searches_per_round)]
+                + [a for a in tools if a.kind == "search"][: max(1, self.ec.max_searches_per_round) if kind == "mention" else 1]
                 + [a for a in tools if a.kind == "recall"][:MAX_RECALLS]
                 + [a for a in tools if a.kind == "who"][:MAX_WHO]
                 + [a for a in tools if a.kind == "image"][:1]
@@ -2994,7 +2997,9 @@ class Engine:
                 if action.kind == "music":
                     break
                 if action.kind == "search":
-                    early[index] = asyncio.ensure_future(self._search_section(st, view, action, now))
+                    early[index] = asyncio.ensure_future(
+                        self._search_section(st, view, action, now, auto=kind != "mention" and not st.bubbling)
+                    )
                 elif action.kind == "image":
                     early[index] = asyncio.ensure_future(self._image_section(st, view, action, now))
             try:
@@ -3196,7 +3201,19 @@ class Engine:
             and self.ec.max_searches_per_round > 0
         )
 
-    async def _search_section(self, st: ChannelState, view: View, action: Action, now: float) -> str:
+    def _auto_search_on(self, st: ChannelState, view: View) -> bool:
+        """这里开着主动搜索（没人叫它时也能搜）。私信里每句都算叫它，用不上。"""
+        return bool(view.proactive_search) and self._can_search(view) and not st.private
+
+    def _auto_search_ready(self, st: ChannelState, view: View, now: float) -> bool:
+        """这一轮（没人叫它）现在就能搜：开着、不是冒泡（冒泡自己会搜）、没超预算、今天还有次数（上限是 0 = 不限）。"""
+        if not self._auto_search_on(st, view) or st.bubbling or self._over_budget(st, view, now)[0]:
+            return False
+        limit = int(view.daily_proactive_search_limit)
+        return limit <= 0 or self.store.count_usage(self.ledger.day(now), guild_id=st.guild_id, kind=AUTO_SEARCH) < limit
+
+    async def _search_section(self, st: ChannelState, view: View, action: Action, now: float, *, auto: bool = False) -> str:
+        """auto：没人叫它时它自己要搜的（主动搜索）。另外记数，不占被叫到时的每日搜索上限。"""
         query = action.query or ""
         shown = neutralize(one_line(query, 60))
         queries = [query]
@@ -3207,22 +3224,23 @@ class Engine:
             queries = picked[1]
         if not self._can_search(view):
             return f"（想搜「{shown}」，但这里不能上网搜。凭你已有的知识回答，拿不准就直说。）"
-        limit = int(view.daily_search_limit)
+        limit = int(view.daily_proactive_search_limit) if auto else int(view.daily_search_limit)
         day = self.ledger.day(now)
-        if self.store.count_usage(day, guild_id=st.guild_id, kind="search") >= limit:
+        usage_kind = AUTO_SEARCH if auto else "search"
+        if (limit > 0 or not auto) and self.store.count_usage(day, guild_id=st.guild_id, kind=usage_kind) >= limit:
             return f"（想搜「{shown}」，但今天这个服务器的搜索次数用完了（{limit} 次）。凭你已有的知识回答，拿不准就直说。）"
         if self._over_budget(st, view, now)[0]:
             return f"（想搜「{shown}」，但今天的预算用完了。凭你已有的知识回答，拿不准就直说。）"
         assert self.searcher is not None
         # 先记一笔占住名额，再去搜：别的频道同时在搜时，也不会一起超过上限
-        row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="search", outcome="pending")
+        row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind=usage_kind, outcome="pending")
         try:
             for query in queries:  # 冒泡：先只搜 X 上的，没搜到再搜全网（平时就一个搜索词）
                 result = await self.searcher.search(query, max_chars=self.ec.search_max_chars)
                 if result.sources or query is queries[-1]:
                     break
                 self._finish_search(st, row, result.usage, "search", result.paid)  # 这一次也照实记账，再记一笔搜下一个
-                row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind="search", outcome="pending")
+                row = self.store.record_usage(ts=now, day=day, guild_id=st.guild_id, channel_id=st.channel_id, kind=usage_kind, outcome="pending")
         except asyncio.CancelledError:
             self._finish_search(st, row, Usage(), "error")  # 关机时被取消：别留下一笔一直“进行中”的记录
             raise
@@ -5526,6 +5544,7 @@ class Engine:
             persona=view.persona,
             summary=conv.summary,
             search=self._can_search(view),
+            auto_search=self._auto_search_on(st, view),
             share=bool(view.share_memory) and not self._sync_foreign(st),
             emojis=emojis,
             stickers=stickers,
@@ -7389,6 +7408,8 @@ class Engine:
             "day": self.ledger.day(now),
             "searches": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="search"),
             "can_search": self._can_search(view),
+            "auto_search": bool(view.proactive_search) and self._can_search(view),
+            "auto_searches": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind=AUTO_SEARCH),
             "images_found": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="image"),
             "links_opened": self.store.count_usage(self.ledger.day(now), guild_id=guild_id, kind="link"),
             "can_find_images": self._can_find_images(view),

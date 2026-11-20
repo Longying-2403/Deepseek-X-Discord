@@ -752,7 +752,13 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
     lines.append(bubble_text(bot, interaction))
     lines.append(share_text(bot, interaction))
     if st["can_search"]:
-        lines.append(f"联网搜索：开 · 今天本服务器已搜 {st['searches']} / {view.daily_search_limit} 次")
+        line = f"联网搜索：开 · 今天本服务器已搜 {st['searches']} / {view.daily_search_limit} 次"
+        if st.get("auto_search"):
+            cap = int(view.daily_proactive_search_limit)
+            line += f" · 主动搜索：开（没人叫它时也能搜），今天 {st.get('auto_searches', 0)}{f' / {cap}' if cap > 0 else ''} 次{'' if cap > 0 else '（不限）'}"
+        else:
+            line += " · 主动搜索：关"
+        lines.append(line)
     else:
         lines.append("联网搜索：关")
     link_line = LINK_MODES.get(st["links_mode"], LINK_MODES["off"])

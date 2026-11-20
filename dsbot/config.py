@@ -68,6 +68,14 @@ _SPEC_LIST = [
     Spec("files", "读文件", bool, "owner", "是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）"),
     Spec("web_search", "联网搜索", bool, "owner", "被叫到时，需要最新信息就上网搜（用 DeepSeek 的搜索，Tavily 备用）"),
     Spec("daily_search_limit", "每日搜索上限", int, "owner", "每个服务器每天最多搜几次（0 = 不搜）", 0, 1000),
+    Spec(
+        "proactive_search", "主动搜索", bool, "owner",
+        "没人叫它、它自己想接话时，碰到不懂的可以先上网搜一下再说（要开着联网搜索）",
+    ),
+    Spec(
+        "daily_proactive_search_limit", "每日主动搜索上限", int, "owner",
+        "每个服务器每天最多主动搜几次（0 = 不限）。不占被叫到时的每日搜索上限，花费照样算进预算", 0, 1000,
+    ),
     Spec("links", "读链接", bool, "owner", "被叫到时打开消息里的链接（推文走 FxTwitter，别的网页由 DeepSeek 读，Tavily 备用）"),
     Spec("daily_image_limit", "每日找图上限", int, "owner", "每个服务器每天最多上网找几次图（0 = 不找，表情包库照常能用）", 0, 1000),
     Spec("desktop", "桌面操作", bool, "owner", "替你开关电脑上登记过的程序、打开网址（只认你本人；要在电脑上运行桌面小程序）"),
@@ -106,6 +114,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "files": True,
     "web_search": True,
     "daily_search_limit": 30,
+    "proactive_search": True,
+    "daily_proactive_search_limit": 0,
     "links": True,
     "daily_image_limit": 10,
     "dm_daily_budget_usd": 0.2,

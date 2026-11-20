@@ -25,7 +25,7 @@
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
 - **能打开链接**：平时看 Discord 生成的链接预览；被叫到时真的打开：X（推特）的推文走 FxTwitter（不用账号），别的网页交给 DeepSeek 读（读不了再交给 Tavily）。要登录才能看的网站只看预览。
 - **会发表情包和图**：有表情包库（通用的放在 NAS 上，各服务器也能自己上传），也会上网找图——找到的图它先看一遍，合适才发。
-- **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 的搜索查一下再回答（不到 1 秒）。每个服务器每天有次数上限。
+- **能上网搜**：被叫到时，问到新闻、价格、比分、天气这类它不知道的最新信息，会先用 DeepSeek 的搜索查一下再回答（不到 1 秒）。每个服务器每天有次数上限。没人叫它、它自己想接话的时候，碰到不懂的也会先搜一下再说（主动搜索，默认开，见“八”）。
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **会点歌**：进语音频道后叫它“放首晴天”，或者用 `/ds-music 播放`，它会进你所在的语音频道放 B站视频的声音；同一个语音频道里的人都能切歌、暂停、停止。只能放 B站的，不放直播。
 - **能私信**：和它同在一个服务器的人可以直接私信它。私信里它用那个服务器的人设、长期记忆和你的人设卡，聊的事也会记回去，你在那个服务器的频道里叫它时也可能被提起（说“保密”的不会）；连着发几条，它等你说完再一起回；每人每天有花费上限（见“十四、私信”）。
@@ -55,6 +55,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Shareable DM memory**: mark an entry of your DM memory as shareable and it may bring that up on its own in your server; only you can mark it, and sensitive entries can't be marked.
 - **Reminders**: tell it "remind me about the meeting at 9 tomorrow" and it speaks up at that time; it first posts the exact time with confirm / cancel buttons, and can mention several people in the channel or DM one person. One-off reminders only.
 - **Update announcements**: the owner writes an update note with `/dsowner 公告` and the program sends it verbatim to servers that set an announcement channel, by DM to people who recently messaged the bot, or both; servers opt in and each person can opt out of the DM copy.
+- **Proactive search**: when nobody called it but it wants to join in and the chat is about something it doesn't know, it may search the web once on its own before speaking (on by default; the owner can turn it off or cap it).
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
@@ -127,7 +128,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.7.0 之间的版本更新到 2.7.1 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。2.8.1 的 `Dockerfile` 多了一步“构建时先把代码编译好”（启动、读文件都快一些）：没换成新的也照样能跑，只是慢一点。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.15.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 3.0.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -292,7 +293,9 @@ python -m dsbot
 | 看图 | 开 | 是否把图片发给模型 |
 | 读文件 | 开 | 是否读取群友上传的文件 |
 | 联网搜索 | 开 | 被叫到时，需要最新信息就上网搜 |
+| 主动搜索 | 开 | 没人叫它、它自己想接话时，碰到不懂的可以先上网搜一下再说（要开着联网搜索，见“八”）。`/dsowner 设置 参数:主动搜索 值:关` 关掉 |
 | 每日搜索上限 | 30 | 每个服务器每天最多搜几次，填 0 就不搜。按歌名点歌也算一次（见“十三”）。例如 `/dsowner 设置 参数:每日搜索上限 值:50` |
+| 每日主动搜索上限 | 0 | 每个服务器每天最多主动搜几次，0 = 不限。不占上面那 30 次，花费照样算进每日预算 |
 | 读链接 | 开 | 被叫到时打开消息里的链接（推文走 FxTwitter，别的网页由 DeepSeek 读，Tavily 备用） |
 | 每日找图上限 | 10 | 每个服务器每天最多上网找几次图，填 0 就不找（表情包库照常能用） |
 | 桌面操作 | 开 | 你私信它时替你开关电脑上登记过的程序、打开网址（要填 `DESKTOP_TOKEN`、电脑上运行桌面小程序，见“十五”） |
@@ -390,7 +393,13 @@ python -m dsbot
 
 - **用的是 DeepSeek 的 Search 接口**（2026-10-17 开放的 `/v1/tools/search`），用的就是 `DEEPSEEK_API_KEY`，不需要别的 key。一次通常不到 1 秒。按次收费：每 1000 次 0.75 美元（一次 0.075 美分），只有搜到结果才算钱，算进每日预算。
 - 搜到的几条（标题、网站、日期、摘要）交给它自己读，挑对得上的用自己的话说；问最近的事，它会在关键词里写上具体日期。
-- 只有被叫到时才搜，主动聊天时不搜。一轮最多搜 2 次。
+- 被叫到的一轮最多搜 2 次。
+- **主动搜索**（默认开）：没人叫它、但它想接话，而大家聊的东西它不认识、或者要知道最新的情况才说得准（新出的产品、最近的比赛、新的梗），它可以自己先搜一次再说，不用等谁叫它去搜。
+  - 只在它会主动说话的地方才有这回事（开了主动发言的频道）；闲聊、常识、别人的私事它不会去搜。搜完觉得没什么可说的，照样可以不说话。
+  - 一轮只搜一次，只开搜索：打开链接、翻别的频道这些还是要叫它才做。
+  - **默认没有次数上限**，也不占被叫到时每天那 30 次；想限制就 `/dsowner 设置 参数:每日主动搜索上限 值:20`（0 = 不限）。每次搜索照样算钱（一次 0.075 美分）、算进这个服务器的每日预算，超了预算就不搜。
+  - 不想要：`/dsowner 设置 参数:主动搜索 值:关`（可以指定服务器）。`/dsadmin 状态` 的“联网搜索”那一行写着开没开、今天主动搜了几次。
+  - 私信里每句话都算叫它，本来就能搜，不受这一项影响。冒泡自己会搜，也不算在这里。
 - 每个服务器每天最多搜 30 次，用 `/dsowner 设置 参数:每日搜索上限` 改（可以指定服务器）；`/dsowner 设置 参数:联网搜索 值:关` 关掉。超了预算也不搜。
 - 回答里带的链接不会展开预览，免得刷屏。
 - 搜到的网页内容和文件一样当成资料处理，里面写的“忽略之前的设定”之类不会照做。

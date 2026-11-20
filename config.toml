@@ -66,6 +66,8 @@ vision = true                     # 是否把群里的图片发给模型
 files = true                      # 是否读取群友上传的文件（文本、代码、PDF、Word、Excel、PPT）
 web_search = true                 # 被叫到时，需要最新信息就上网搜（DeepSeek 的搜索，填了 TAVILY_API_KEY 就拿它当备用）
 daily_search_limit = 30           # 每个服务器每天最多搜几次（0 = 不搜）
+proactive_search = true           # 主动搜索：没人叫它、它自己想接话时，碰到不懂的可以先上网搜一下再说（/dsowner 设置 参数:主动搜索 值:关 关掉）
+daily_proactive_search_limit = 0  # 每个服务器每天最多主动搜几次（0 = 不限；不占上面的每日搜索上限，花费照样算进预算）
 links = true                      # 被叫到时打开消息里的链接（推文走 FxTwitter；别的网页由 DeepSeek 读，填了 TAVILY_API_KEY 就拿它当备用）
 daily_image_limit = 10            # 每个服务器每天最多上网找几次图（要 TAVILY_API_KEY；0 = 不找，表情包库照常能用）
 dm_daily_budget_usd = 0.2         # 每个人每天私信它最多花多少美元（也算进那个服务器的预算；你自己不受限）
