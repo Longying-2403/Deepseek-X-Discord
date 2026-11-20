@@ -2,6 +2,65 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.13.0] - 2026-11-20
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **私信记忆多了一类“可共享”**：`/ds-dm 记忆 操作:设为可共享 编号:3`。标了以后，它在你私信挂的那个服务器（和它连成一组的服务器）里可以自己提起这件事：主动说话、冒泡找话题时都看得到，不用等你叫它（比如“阿明吉他练得怎么样了”）。`操作:取消共享` 改回去。
+  - 现在私信记忆一共三类：敏感（只在私信里用）、不敏感（你自己在服务器里叫它时才带上）、可共享（它在服务器里可以自己提起）。
+  - `/ds-dm 记忆` 的列表里标着〔可共享〕，`/ds-dm 状态` 里有几条可共享。
+
+**须知**
+
+- 只有本人能标，而且只能用命令：它自己不会把任何一条标成可共享。你在私信里说“这件事可以在群里说”，它会告诉你用这个命令。敏感的标不了。
+- 只在私信挂的那个服务器（和它连成一组的服务器）里用；别的服务器不用（开了“跨服务器”也不用）。那个服务器关掉了私信记忆时不用。
+- 取消共享、改成敏感、删掉以后，下一轮它就看不到了。它已经在群里说出口的话收不回来，也可能在整理记忆时被记进那个服务器的长期记忆。
+- 它聊天、整理时改了那条的内容，就不再算可共享，要本人再标一次。
+- 大家标的加起来太多时只列最近改过的（约 2000 字，`[engine]` 的 `dm_shared_prompt_chars`；填 0 = 整个关掉）。
+
+**升级须知**
+
+- 只有 `dsbot` 文件夹变了：换掉它，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.13.0 启动中`。记忆的数据库会自动多一列（`dm_memories.shared_as`），原来的数据不动，原来的私信记忆都不是可共享。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `memory.py`：`dm_memories.shared_as`（不是 NULL = 可共享，存的是标的时候他的名字）、`dm_share`、`dm_shared`；`dm_edit` 改了内容或改成敏感时清掉这个标记。
+- `engine.py`：`_shared_notes`（这个频道能列哪些），放在 system prompt 里（`SHARED_NOTES_BLOCK`），不写进频道记录，所以取消以后没有要撤回的。排好序，免得缓存失效。
+- 测试共 1492 个（新增 `tests/test_dm_shared.py`）。
+
+### English
+
+**Added**
+
+- **A third kind of DM memory: "shareable"**: `/ds-dm 记忆 操作:设为可共享 编号:3`. Once an entry is marked, the bot may bring it up on its own in the server your DMs belong to (and servers grouped with it): it sees it when it speaks up or bubbles, without you having to call it (e.g. "how's the guitar practice going?"). `操作:取消共享` undoes it.
+  - DM memory now has three kinds: sensitive (DMs only), non-sensitive (attached only when you yourself call the bot in a server), and shareable (the bot may mention it in the server on its own).
+  - The `/ds-dm 记忆` list shows 〔可共享〕, and `/ds-dm 状态` shows how many entries are shareable.
+
+**Notes**
+
+- Only the person can mark an entry, and only with the command: the bot never marks anything shareable by itself. If you tell it in a DM that something is fine to mention in the server, it points you to the command. Sensitive entries can't be marked.
+- Used only in the server your DMs belong to (and servers grouped with it), not in other servers (not even with "跨服务器" on), and not while that server has DM memory turned off.
+- After un-sharing, marking sensitive or deleting, the bot no longer sees the entry from the next round on. What it already said in the server can't be taken back, and may have been noted in that server's long-term memory when it tidied up.
+- If the bot changes the text of an entry (in chat or while tidying), the entry stops being shareable until you mark it again.
+- When many entries are shared, only the most recently changed ones are listed (about 2,000 characters, `dm_shared_prompt_chars` in `[engine]`; 0 turns the whole thing off).
+
+**Upgrading**
+
+- Only the `dsbot` folder changed: replace it, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.13.0 启动中`. One column (`dm_memories.shared_as`) is added to the memory database automatically; existing data is untouched and no existing entry is shareable.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `memory.py`: `dm_memories.shared_as` (non-NULL = shareable, holding the person's name at the time), `dm_share`, `dm_shared`; `dm_edit` clears the mark when the text changes or the entry becomes sensitive.
+- `engine.py`: `_shared_notes` (what this channel may list), placed in the system prompt (`SHARED_NOTES_BLOCK`) and never written to the channel record, so nothing needs withdrawing afterwards. Sorted, to keep the prompt cache stable.
+- There are now 1492 tests (new `tests/test_dm_shared.py`).
+
 ## [2.12.0] - 2026-11-20
 
 > 英文版这次没有更新，还是 2.0.0。
