@@ -19,6 +19,7 @@
 - **会自己冒泡**（按频道开启）：频道安静了几个小时，它会自己来说点什么：从大家聊过的东西里看出感兴趣的话题，去搜最近的新鲜事（多半是 X 上的）分享一条，或者打个招呼、提起以前聊过的事。分低、中、高三档，只在白天，上次冒的没人理就先不冒。
 - **会主动私信你**（每个人自己开）：`/ds-dm 主动 档位:低/中/高`，你一阵子没找它，它会自己来找你说句话：问候、接着你们聊过的事问一句，有时分享一条你感兴趣的新鲜事。时段自己定，连着三次没回它就先停下。
 - **会到点提醒**：叫它的时候直接说“明天早上九点提醒我开会”“半小时后提醒我关火”，它先发一条让你核对时间，点了“确认”才设上；到点在你说的那个频道里 @ 你（也可以 @ 好几个人，或者改成私信某一个人），私信里说的就私信你。只能设一次性的。见“十二”后面的“提醒”。
+- **更新公告**：你（bot 主人）用 `/dsowner 公告` 写一条更新说明，程序原样发出去：发到设了公告频道的服务器、私信给最近私信过它的人，或者两边都发。服务器没设公告频道就不收，每个人也可以拒收私信的那份。见“十二”后面的“更新公告”。
 - **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
@@ -53,6 +54,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Can DM you first** (each person opts in): after you've been quiet for a while it sends you a message on its own: a greeting, a question about something you talked about, or now and then something recent you'd like. You choose the level and the hours, and it stops after three messages without a reply.
 - **Shareable DM memory**: mark an entry of your DM memory as shareable and it may bring that up on its own in your server; only you can mark it, and sensitive entries can't be marked.
 - **Reminders**: tell it "remind me about the meeting at 9 tomorrow" and it speaks up at that time; it first posts the exact time with confirm / cancel buttons, and can mention several people in the channel or DM one person. One-off reminders only.
+- **Update announcements**: the owner writes an update note with `/dsowner 公告` and the program sends it verbatim to servers that set an announcement channel, by DM to people who recently messaged the bot, or both; servers opt in and each person can opt out of the DM copy.
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
@@ -125,7 +127,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.7.0 之间的版本更新到 2.7.1 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。2.8.1 的 `Dockerfile` 多了一步“构建时先把代码编译好”（启动、读文件都快一些）：没换成新的也照样能跑，只是慢一点。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.14.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.15.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -179,6 +181,7 @@ python -m dsbot
 | `/dsadmin 长期记忆 查看`、`添加`、`删除`、`清空` | 这个服务器的长期记忆：查看（选了编号就只看那一条的全文）、添加、删除（选编号，列表里有内容）、清空（会再确认一次） |
 | `/dsadmin 兴趣 查看`、`添加`、`删除` | 这个频道的人感兴趣的话题（它冒泡时拿去搜最近的新鲜事）：它自己从聊天里看出来、搜过的会记在这里；可以自己加；删掉它看出来的，会记成“不让搜” |
 | `/dsadmin 提醒 查看`、`取消` | 这个服务器里设着的、到点在频道里说的提醒（谁设的、什么时候、提醒谁）；取消时「编号」一栏会列出来。发私信的、私信里设的是各人自己的，这里看不到 |
+| `/dsadmin 公告频道 设为`、`取消` | bot 主人发更新公告（说 bot 有什么新功能、改了什么）时发到这个服务器的哪个频道：「频道」不填就是现在这个频道。没设就不收；`取消` 以后不再收。不会 @ 任何人 |
 | `/dsadmin 状态` | 查看本频道的设置、主动发言的节奏（多久看一眼、现在是不是正跟着聊）、现在的时间和时区、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数、点歌的状态 |
 | `/dsadmin 清空记忆` | 清空本频道的对话记录和摘要 |
 
@@ -217,10 +220,11 @@ python -m dsbot
 | 命令 | 作用 |
 |---|---|
 | `/ds-dm 服务器` | 私信里用哪个服务器的人设、长期记忆和人设卡（列出你和它都在、开着私信的服务器；人设卡设成所有服务器共用一张时，换哪个服务器都是那一张）。在服务器的频道里用、不填，就是这个服务器。换了会清空私信记录，服务器那边的记忆不受影响 |
-| `/ds-dm 状态` | 私信现在用的是哪个服务器、今天私信花了多少、私信记忆有几条、主动私信开没开 |
+| `/ds-dm 状态` | 私信现在用的是哪个服务器、今天私信花了多少、私信记忆有几条、主动私信开没开、更新公告收不收 |
 | `/ds-dm 主动` | 让它隔一阵主动私信你：档位（关 / 低 / 中 / 高）、只在几点到几点之间发（「从几点」「到几点」一起填，可以跨夜；都填 0 = 全天）。什么都不填 = 看现在的设置。只管你自己的（见“私信”那一节的“主动私信”） |
 | `/ds-dm 记忆` | 你的私信记忆：查看（不选操作；选了编号就只看那一条的全文）、删除某条、设为敏感 / 不敏感、设为可共享 / 取消共享、全部清空。编号一栏输入几个字就能从你的记忆里选。只有你自己看得到 |
 | `/ds-dm 提醒 查看`、`取消` | 你让它到点提醒的事（私信里设的、各个服务器里设的都在这里；最近错过的也会列出来）；取消时「编号」一栏会列出来 |
+| `/ds-dm 更新公告` | bot 主人发的更新公告要不要私信给你：「值」选 开 / 关，不选只看现在的设置。默认开（最近 30 天私信过它才会收到） |
 | `/ds-dm 清空` | 清空私信的聊天记录，让它从头开始 |
 
 ### `/ds-music`（所有人）
@@ -243,6 +247,7 @@ python -m dsbot
 | `/dsowner 设置` | 改任何参数（含预算、思考强度、联网搜索、读链接、每日搜索上限、每日找图上限和私信预算），可以指定某个服务器 ID，不填就是全局。参数太多，一个选单放不下：在“参数”一栏打几个字（比如“私信”“预算”）就会列出来 |
 | `/dsowner 总览` | 今天每个服务器花了多少、调用多少次、缓存命中率 |
 | `/dsowner 删除人设卡` | 填用户 ID，删掉这个人在所有服务器的人设卡和他的私信记忆（看不到内容） |
+| `/dsowner 公告` | 发一条更新公告：「范围」选 服务器 / 私信 / 全部，弹出编辑框（先填好了这一版的简短说明），看过预览、点了“发送”才发（见“十二”后面的“更新公告”） |
 | `/dsowner 服务器组` | （Beta）把几个服务器连成一组、让某个服务器退出组、查看有哪些组（见“七”）。连起来、退出之前会先说清楚会怎样，点确认才办 |
 | `/dsowner chatsync` | （Beta）把几个服务器的频道连通（共用一份聊天记录）、断开、查看有哪些连通组（见“七”的“连通频道”）。连通、断开之前会先说清楚会怎样，点确认才办 |
 
@@ -543,6 +548,23 @@ python -m dsbot
 - **bot 当时不在线**（重启、断网）：上线后晚了不到 6 小时的补发，并写明晚了多久；再晚就不发了，在 `/ds-dm 提醒 查看` 里标“错过了”（留 3 天）。`[engine]` 的 `remind_late_hours`。
 - **不想让这个服务器设提醒**：`/dsadmin 设置 参数:提醒 值:关`（已经设好的照样会提醒）。
 - 提醒的内容存在 `data/dsbot.sqlite3` 里（`reminders` 表）；办完、取消 7 天后自动删掉。
+
+### 更新公告
+
+bot 更新以后，你（bot 主人）可以告诉用它的人改了什么：
+
+- `/dsowner 公告 范围:…`，三种范围，照内容和谁有关来选：
+  - **服务器**：发到设了公告频道的服务器。只和服务器里的用法有关的更新用这个。
+  - **私信**：私信给最近 30 天私信过它、没拒收的人。只和私信有关的更新用这个。
+  - **全部**：两边都发，同一份内容。两边要写得不一样，就分两次各发一条。
+- **先写、再看、再发**：选了范围会弹出编辑框，「标题」先填好了“更新公告 · v版本号”，「内容」先填好了这一版里和这个范围有关的简短说明（写在 `dsbot/whatsnew.py` 里），照你的意思改。提交以后先给你看发出去的样子、会发到哪几个服务器、私信几个人，点“发送”才发（10 分钟内；点“不发了”就作废）。
+- **原样发，不经过模型**：发出去是“📢 **标题**”加你写的内容，不花钱；不会 @ 任何人（写了 @everyone 也不会真的提醒）。内容最多 1700 字。
+- **服务器收不收由管理员定**：`/dsadmin 公告频道 设为`（不填「频道」就是当前频道）以后才收，没设的服务器不发；`/dsadmin 公告频道 取消` 不再收。`/dsadmin 状态` 里有一行“更新公告”。
+- **私信收不收由本人定**：默认收，`/ds-dm 更新公告 值:关` 拒收（每条私信公告末尾都写着这个命令），`/ds-dm 状态` 里看得到。只发给最近 30 天私信里有过来往的人；私信挂的服务器关掉了私信、或者 bot 已经不在那个服务器里的人不发。
+- **一条一条发**，中间隔 1.5 秒（短时间内私信很多人，Discord 会限速）。发完告诉你：发到了几个服务器、哪几个没设公告频道、哪个频道没发出去（多半是没有发言权限）；私信只说发出去几个人、几个人没发出去，不说是谁。
+- **有人问起它答得上来**：公告不是它写的，所以程序在发到的频道（私信）里记了一条说明，下一次它在那里说话时会看到公告的原文（一直没轮到它说话的话，说明留 14 天）。
+- 发出去以后收不回来（要改就再发一条，或者自己去频道里删）。不会定时发，也不会在启动时自动发。
+- 存在 `data/dsbot.sqlite3` 里：`announce_channels`（各服务器的公告频道）、`announce_off`（拒收的人）、`announcements`（发过的公告：内容和发出去的数量，不记发给了谁）。
 
 ## 十三、点歌（B站）
 

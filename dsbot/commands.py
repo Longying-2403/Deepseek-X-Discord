@@ -4,9 +4,10 @@
             兴趣（冒泡时去搜的话题）、状态、清空记忆。有几种做法的（区域、表情包、长期记忆）是子命令：/dsadmin 区域 允许、/dsadmin 长期记忆 添加……
             （2.9.0 以前叫 /ds，用“操作”一栏选做法；“区域列表”“主动”“记忆共享”三个命令并进了 区域 查看 和 设置。）
 /ds-rp      所有人：查看、修改自己在这个服务器的人设卡（只有自己看得到；管理员看不到别人的卡）。私信里用是私信挂的那个服务器的卡。
-/ds-dm …    服务器里和私信里都能用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录。
+/ds-dm …    服务器里和私信里都能用：私信挂在哪个服务器（用那里的人设、记忆和人设卡）、看今天的私信额度、清空私信记录、
+            要不要私信收更新公告。
 /ds-music … 所有人：点歌（B站）、切歌、暂停、继续、停止、看队列、从队列里删歌、清空队列。切歌这些要在它放歌的语音频道里。
-/dsowner …  只注册在 CONTROL_GUILD_ID 里的服务器（可以填几个），并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡、服务器组等。
+/dsowner …  只注册在 CONTROL_GUILD_ID 里的服务器（可以填几个），并且只认 OWNER_ID：预算、思考强度、联网搜索、删人设卡、服务器组、发更新公告等。
             和 /dsadmin 一样默认只给有“管理服务器”权限的人看（bot 放在朋友的服务器、你是那里的管理也看得到）。
 
 连成一组的服务器（/dsowner 服务器组）共用一份人设卡和长期记忆：/dsadmin 长期记忆、/ds-rp 看的、改的都是组里那份。
@@ -55,6 +56,7 @@ from .groups import (
     recover,
     unlink,
 )
+from . import announce as an
 from .memory import SHARED
 from .store import SyncError
 from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
@@ -813,6 +815,7 @@ def status_text(bot: "DSBot", interaction: discord.Interaction) -> str:
         lines.append("跨服务器：开（和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的会跟着他走）")
     else:
         lines.append("跨服务器：关")
+    lines.append(announce_line(bot, interaction.guild_id))
     if st["music_on"]:
         playing = f" · 现在{st['playing']}" if st["playing"] else ""
         lines.append(f"点歌：开（/ds-music，只能放 B站的，按歌名找算一次联网搜索）{discord_safe(playing)}")
@@ -1032,6 +1035,164 @@ def guild_reminders_text(bot: "DSBot", guild_id: int) -> str:
         return f"{head}\n现在没有。群友叫它时说“明天九点提醒我……”就能设；不想让这里设提醒：`/dsadmin 设置 参数:提醒 值:关`。"
     lines = [f"({i}) {reminder_line(bot, r, owner=True)}" for i, r in enumerate(items, 1)]
     return "\n".join([head, *lines, "取消某一条：`/dsadmin 提醒 取消`。"])
+
+
+def announce_line(bot: "DSBot", guild_id: int) -> str:
+    """/dsadmin 状态 里的那一行：这个服务器收不收更新公告。"""
+    channel_id = bot.store.announce_channel(guild_id)
+    if channel_id is None:
+        return "更新公告：不收（没设公告频道。想收 bot 主人发的更新公告，用 `/dsadmin 公告频道 设为`）"
+    return f"更新公告：发到 <#{channel_id}>（`/dsadmin 公告频道 设为` 换一个，`取消` 就不再收）"
+
+
+def news_text(bot: "DSBot", user_id: int) -> str:
+    """/ds-dm 更新公告、/ds-dm 状态 里的那一行。"""
+    if bot.store.announce_off(user_id):
+        return "更新公告：关（bot 主人发更新公告时不会私信你；想收：`/ds-dm 更新公告 值:开`）"
+    return (
+        f"更新公告：开（bot 主人发更新公告时私信你一份，最近 {an.DM_DAYS} 天私信过它才会收到；"
+        "不想收：`/ds-dm 更新公告 值:关`）"
+    )
+
+
+def _servers(bot: "DSBot", guild_ids: list[int]) -> str:
+    return "、".join(server_label(bot, g) for g in guild_ids)
+
+
+def announce_plan_text(bot: "DSBot", plan: an.Plan) -> str:
+    """发之前给 bot 主人看的：会发到哪、哪些不发（服务器名只给主人看；私信只说人数）。"""
+    lines: list[str] = []
+    if plan.scope in ("server", "all"):
+        if plan.channels:
+            where = "、".join(f"{server_label(bot, g)} <#{c}>" for g, c in plan.channels)
+            lines.append(f"服务器：发到 {len(plan.channels)} 个公告频道（{where}）")
+        else:
+            lines.append("服务器：没有一个服务器设了公告频道，不发")
+        if plan.unset:
+            lines.append(f"- 没设公告频道、不发的：{_servers(bot, plan.unset)}")
+        if plan.gone:
+            lines.append(f"- 设过公告频道、但那个频道已经没了的：{_servers(bot, plan.gone)}")
+    if plan.scope in ("dm", "all"):
+        lines.append(f"私信：发给 {len(plan.people)} 个人（最近 {an.DM_DAYS} 天私信过它、没拒收的）")
+        skipped = []
+        if plan.refused:
+            skipped.append(f"{plan.refused} 人拒收")
+        if plan.stale:
+            skipped.append(f"{plan.stale} 人超过 {an.DM_DAYS} 天没私信")
+        if plan.closed:
+            skipped.append(f"{plan.closed} 人的私信现在用不了")
+        if skipped:
+            lines.append("- 不发的：" + "，".join(skipped))
+    return "\n".join(lines)
+
+
+def announce_result_text(bot: "DSBot", plan: an.Plan, result: an.Result) -> str:
+    lines = ["📢 发完了。"]
+    if plan.scope in ("server", "all"):
+        lines.append(f"服务器：发到了 {len(result.channels)} 个公告频道")
+        if result.failed_channels:
+            failed = "、".join(f"{server_label(bot, g)} <#{c}>" for g, c in result.failed_channels)
+            lines.append(f"- 没发出去的（检查 bot 在那个频道的发言权限）：{failed}")
+        if plan.unset:
+            lines.append(f"- 没设公告频道、没发的：{_servers(bot, plan.unset)}")
+        if plan.gone:
+            lines.append(f"- 公告频道已经没了、没发的：{_servers(bot, plan.gone)}")
+    if plan.scope in ("dm", "all"):
+        line = f"私信：发出去 {result.dms} 人"
+        if result.dm_failed:
+            line += f"，没发出去 {result.dm_failed} 人（关了私信，或者屏蔽了它）"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+class ConfirmAnnounce(discord.ui.View):
+    """看过预览以后再点“发送”才发（只有发起的人能点）。"""
+
+    def __init__(self, bot: "DSBot", user_id: int, scope: str, title: str, text: str):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.user_id = user_id
+        self.scope = scope
+        self.title = title
+        self.text = text
+        send: discord.ui.Button[Any] = discord.ui.Button(label="发送", style=discord.ButtonStyle.danger)
+        send.callback = self.confirm  # type: ignore[method-assign]
+        self.add_item(send)
+        drop: discord.ui.Button[Any] = discord.ui.Button(label="不发了", style=discord.ButtonStyle.secondary)
+        drop.callback = self.cancel  # type: ignore[method-assign]
+        self.add_item(drop)
+
+    async def cancel(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            await _reply(interaction, "只有发起的人能点。")
+            return
+        self.stop()
+        await interaction.response.edit_message(content="没发。", view=None)
+
+    async def confirm(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            await _reply(interaction, "只有发起的人能点。")
+            return
+        self.stop()
+        plan = self.bot.engine.announce_plan(self.scope)
+        if plan.empty:
+            await interaction.response.edit_message(content="现在没有地方可发了，没发。\n" + announce_plan_text(self.bot, plan), view=None)
+            return
+        await interaction.response.edit_message(content="发送中……（一条一条发，中间隔一会儿；发完了这里会写结果）", view=None)
+        try:
+            result = await self.bot.engine.announce(self.scope, self.title, self.text)
+            text = "上一条公告还在发：等它发完再发。" if result is None else announce_result_text(self.bot, plan, result)
+        except Exception as exc:
+            log.exception("发更新公告出错")
+            text = f"出错了：{exc}\n已经发出去的收不回来；日志里有发到了哪。"
+        try:
+            await interaction.edit_original_response(content=text if len(text) <= 1900 else text[:1900] + "…")
+        except discord.HTTPException:  # 发了很久（超过 15 分钟）：这条消息改不了了，结果在日志里
+            log.info("更新公告发完了，结果没能写回给主人：%s", text)
+
+
+class AnnounceModal(discord.ui.Modal):
+    """/dsowner 公告 的编辑框：标题和正文。提交以后先给预览，点了“发送”才发。"""
+
+    def __init__(self, bot: "DSBot", scope: str):
+        super().__init__(title=f"更新公告（{an.SCOPES[scope]}）", timeout=1800)
+        self.bot = bot
+        self.scope = scope
+        self.head = discord.ui.TextInput(
+            style=discord.TextStyle.short, default=an.default_title(), required=False, max_length=an.MAX_TITLE_CHARS
+        )
+        self.add_item(discord.ui.Label(text="标题", description="发出去时前面带 📢，加粗。", component=self.head))
+        self.text = discord.ui.TextInput(
+            style=discord.TextStyle.long, default=an.draft(scope) or None, required=True, max_length=an.MAX_CHARS
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="内容",
+                description="原样发出去，不经过模型。先填好的是这一版的简短说明，照你的意思改。",
+                component=self.text,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        title, text = an.clean_title(self.head.value or ""), (self.text.value or "").strip()
+        if not text:
+            await _reply(interaction, "没写内容，没发。")
+            return
+        plan = self.bot.engine.announce_plan(self.scope)
+        if plan.empty:
+            await _reply(interaction, "现在没有地方可发，没发。\n" + announce_plan_text(self.bot, plan))
+            return
+        await interaction.response.send_message(an.compose(title, text, dm=self.scope == "dm"), ephemeral=True)
+        notes = ["↑ 发出去就是这个样子。" + ("私信的那份末尾多一行怎么拒收。" if self.scope == "all" else "")]
+        notes.append(announce_plan_text(self.bot, plan))
+        notes.append("发出去以后收不回来。点“发送”才发（10 分钟内）。")
+        await interaction.followup.send(
+            "\n".join(notes)[:1900], view=ConfirmAnnounce(self.bot, interaction.user.id, self.scope, title, text), ephemeral=True
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception("公告预览出错", exc_info=error)
+        await _reply(interaction, f"出错了，没发：{error}")
 
 
 def withdraw_dm_memory(bot: "DSBot", user_id: int | None = None, *, guild_id: int | None = None) -> None:
@@ -1974,6 +2135,7 @@ def register_dm_commands(bot: "DSBot") -> None:
             else:
                 lines.append(f"私信记忆：{len(entries)} 条（{hidden} 条敏感，{open_ones} 条可共享），用 `/ds-dm 记忆` 查看和管理")
         lines.append(reach_text(bot, user_id))
+        lines.append(news_text(bot, user_id))
         if user_id == bot.secrets.owner_id:
             lines.append(f"今天私信花了 ${spent:.4f}（你是 bot 的主人，不受每人上限限制）")
         else:
@@ -2137,6 +2299,16 @@ def register_dm_commands(bot: "DSBot") -> None:
             await _reply(interaction, "没有这一条（从“编号”一栏列出来的里面选；已经到点、已经取消的不在里面）。")
             return
         await _reply(interaction, f"已取消：{reminder_line(bot, gone, you=interaction.user.id)}")
+
+    @dm.command(name="更新公告", description="bot 主人发的更新公告要不要私信给你：开 / 关（只管你自己的；不选 = 看现在的设置）")
+    @app_commands.rename(value="值")
+    @app_commands.describe(value="关 = 以后不私信你更新公告；开 = 照常收（不选 = 只看现在的设置）")
+    @app_commands.choices(value=[Choice(name="开", value="on"), Choice(name="关", value="off")])
+    async def dm_news(interaction: discord.Interaction, value: Optional[Choice[str]] = None) -> None:
+        user_id = interaction.user.id
+        if value is not None:
+            bot.store.set_announce_off(user_id, value.value == "off")
+        await _reply(interaction, news_text(bot, user_id))
 
     @dm.command(name="清空", description="清空私信里的聊天记录（服务器的长期记忆和你的人设卡不受影响）")
     async def dm_reset(interaction: discord.Interaction) -> None:
@@ -2592,6 +2764,36 @@ def register_commands(bot: "DSBot") -> None:
             return
         await _reply(interaction, f"已取消：{reminder_line(bot, gone, owner=True)}")
 
+    news = app_commands.Group(
+        name="公告频道", description="bot 主人发更新公告时发到这个服务器的哪个频道（没设 = 不收）", parent=admin
+    )
+
+    @news.command(name="设为", description="让更新公告发到一个频道（不填 = 就是这个频道）")
+    @app_commands.rename(channel="频道")
+    @app_commands.describe(channel="发到哪个文字频道；不填 = 现在这个频道")
+    async def news_set(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None) -> None:
+        target = channel if channel is not None else interaction.channel
+        if target is None or isinstance(target, discord.Thread):
+            await _reply(interaction, "帖子里不能设：在「频道」一栏选一个文字频道。")
+            return
+        me = getattr(interaction.guild, "me", None)
+        allowed = getattr(target, "permissions_for", None)
+        if me is not None and allowed is not None and not allowed(me).send_messages:
+            await _reply(interaction, f"它在 <#{target.id}> 没有发言权限：先给它权限，或者换一个频道。")
+            return
+        bot.store.set_announce_channel(interaction.guild_id, target.id)
+        await _reply(
+            interaction,
+            f"好了：bot 主人发更新公告时，会发到 <#{target.id}>（说的是 bot 有什么新功能、改了什么；不会 @ 任何人）。"
+            "不想收了用 `/dsadmin 公告频道 取消`。",
+        )
+
+    @news.command(name="取消", description="这个服务器不再收更新公告")
+    async def news_unset(interaction: discord.Interaction) -> None:
+        had = bot.store.announce_channel(interaction.guild_id)
+        bot.store.set_announce_channel(interaction.guild_id, None)
+        await _reply(interaction, "好了：这个服务器不再收更新公告。" if had is not None else "这个服务器本来就没设公告频道，不收更新公告。")
+
     @admin.command(name="状态", description="查看本频道的设置、主动发言的节奏和今天的花费")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, status_text(bot, interaction))
@@ -2790,6 +2992,24 @@ def register_commands(bot: "DSBot") -> None:
             text = "这个人没有人设卡。"
         text += f"\n私信记忆：删掉了 {notes} 条。" if notes else "\n这个人没有私信记忆。"
         await _reply(interaction, text + "\n之后整理聊天时，也不会拿删掉之前的聊天把它们重新写回来。")
+
+    @owner.command(name="公告", description="发一条更新公告：先弹出编辑框，看过预览、点了“发送”才发（原样发，不经过模型）")
+    @app_commands.rename(scope="范围")
+    @app_commands.describe(scope="发给谁")
+    @app_commands.choices(
+        scope=[
+            Choice(name="服务器：发到设了公告频道的服务器", value="server"),
+            Choice(name=f"私信：发给最近 {an.DM_DAYS} 天私信过它、没拒收的人", value="dm"),
+            Choice(name="全部：两边都发（同一份内容）", value="all"),
+        ]
+    )
+    async def owner_announce(interaction: discord.Interaction, scope: Choice[str]) -> None:
+        if not await is_owner(interaction):
+            return
+        if bot.engine.announcing:
+            await _reply(interaction, "上一条公告还在发：等它发完再发。")
+            return
+        await interaction.response.send_modal(AnnounceModal(bot, scope.value))
 
     async def server_options(interaction: discord.Interaction, current: str) -> list[Choice[str]]:
         return owner_server_choices(bot, interaction.user.id, current)

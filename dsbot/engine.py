@@ -138,6 +138,7 @@ from .mentions import link, merge_tiers, name_forms
 from .music import pick_link
 from .config import BUBBLE_LEVELS, REACH_LEVELS, check_range, level_of
 from .quota import SlidingWindow
+from . import announce as an
 from . import reminders as rm
 from .reminders import Reminder
 from .render import (
@@ -877,6 +878,7 @@ class Engine:
         self.transport = transport
         self.clock = clock
         self.sleep = sleep
+        self.announcing = False  # 正在发更新公告（一次只发一条）
         self.rng = rng or random.Random()
         self.image_loader = image_loader or self._load_image
         self.file_reader = file_reader or self._read_file
@@ -1491,6 +1493,7 @@ class Engine:
     def _housekeep(self, now: float) -> None:
         self.limiter.prune(60.0, now)
         self.store.tidy_reminders(now - rm.PENDING_SECONDS, now - 7 * 86400.0)
+        self.store.tidy_channel_notes(now - an.NOTE_KEEP_SECONDS)
         for key in [k for k, at in self.pinged.items() if now - at >= PING_COOLDOWN]:
             del self.pinged[key]
         self.ping_window.prune(GUILD_PING_WINDOW, now)
@@ -2235,6 +2238,89 @@ class Engine:
         else:
             self._remind_note(r.channel_id, REMIND_NOTE_FIRED_DM.format(who=rm.whom_text(r), text=r.text))
 
+    # ------------------------------------------------------------------ 更新公告
+
+    def announce_plan(self, scope: str, now: float | None = None) -> an.Plan:
+        """照现在的情况，这条公告会发到哪（/dsowner 公告 的预览、真的发的时候都用它）。"""
+        now = self.clock() if now is None else now
+        plan = an.Plan(scope)
+        here = self._guild_ids()
+        if scope in ("server", "all"):
+            chosen = self.store.announce_channels()
+            for gid in here:
+                cid = chosen.get(gid)
+                if cid is None:
+                    plan.unset.append(gid)  # 没设公告频道：不收
+                    continue
+                place = self.transport.locate(cid)
+                if place is None or place.guild_id != gid or place.dm:
+                    plan.gone.append(gid)  # 设过，但那个频道没了
+                else:
+                    plan.channels.append((gid, cid))
+        if scope in ("dm", "all"):
+            for uid, gid, cid, at in self.store.dm_people():
+                if self.store.announce_off(uid):
+                    plan.refused += 1
+                elif at < now - an.DM_DAYS * 86400.0:
+                    plan.stale += 1
+                elif gid not in here or not self.settings.get("dm", guild_id=gid):
+                    plan.closed += 1  # 私信挂的服务器没了、关掉了私信：他现在私信它，它也不回
+                else:
+                    plan.people.append((uid, cid))
+        return plan
+
+    async def announce(self, scope: str, title: str, text: str) -> an.Result | None:
+        """发一条更新公告（原样发，不问模型）。一条一条发，中间隔一会儿。已经有一条在发：不发，返回 None。"""
+        if self.announcing:
+            return None
+        self.announcing = True
+        try:
+            now = self.clock()
+            plan = self.announce_plan(scope, now)
+            result = an.Result()
+            public = an.compose(title, text)
+            note = an.NOTE.format(text=one_line(public, an.NOTE_CHARS))
+            first = True
+            for gid, cid in plan.channels:
+                if not first:
+                    await self.sleep(an.GAP_SECONDS)
+                first = False
+                try:
+                    sent = await self.transport.send(cid, public, reply_to=None, ping=False)
+                except Exception:
+                    log.exception("公告：在频道 %s 发不出去", cid)
+                    sent = None
+                if sent is None:
+                    result.failed_channels.append((gid, cid))
+                else:
+                    result.channels.append((gid, cid))
+                    self.store.add_channel_note(cid, note, now)
+            private = an.compose(title, text, dm=True)
+            send_dm = getattr(self.transport, "send_dm", None)
+            for uid, cid in plan.people:
+                if not first:
+                    await self.sleep(an.GAP_SECONDS)
+                first = False
+                try:
+                    sent = await send_dm(uid, private) if send_dm is not None else None
+                except Exception:
+                    log.exception("公告：有一条私信发不出去")
+                    sent = None
+                if sent is None:
+                    result.dm_failed += 1
+                else:
+                    result.dms += 1
+                    self.store.add_channel_note(cid, note, now)
+            failed = len(result.failed_channels) + result.dm_failed
+            self.store.add_announcement(now, scope, an.clean_title(title), text.strip()[: an.MAX_CHARS], len(result.channels), result.dms, failed)
+            log.info(
+                "更新公告（%s）：发到 %d 个服务器的公告频道、私信 %d 人；没发出去 %d 个",
+                an.SCOPES.get(scope, scope), len(result.channels), result.dms, failed,
+            )
+            return result
+        finally:
+            self.announcing = False
+
     # ------------------------------------------------------------------ 一轮
 
     def _conversation(self, st: ChannelState) -> Conversation:
@@ -2569,7 +2655,8 @@ class Engine:
             for sid, m in noted.values()
         ] + context
         remind_seen = list(st.remind_notes)  # 提醒的事（设好了、取消了、到点说过了）：程序办的，告诉它一声
-        context = remind_seen + context
+        told = self.store.channel_notes(st.channel_id)  # 程序替它在这里发过的话（更新公告）：也告诉它一声
+        context = remind_seen + [note for _, note in told] + context
         playing = st.music_seen  # 写进记录的那一行（没在放是 None）
         if kind == "mention":
             status = self.music.status(st.guild_id) if self.music is not None and not st.private else None
@@ -2670,6 +2757,8 @@ class Engine:
             if st.edit_notes.get(mid) is noted[mid]:
                 del st.edit_notes[mid]  # 已经告诉它了
         del st.remind_notes[: len(remind_seen)]  # 已经告诉它了
+        if told:
+            self.store.drop_channel_notes(i for i, _ in told)
         st.music_seen = playing
         st.unreviewed_rounds += 1
         st.digest_seen.update(digest_marks)

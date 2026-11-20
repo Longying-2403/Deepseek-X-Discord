@@ -120,6 +120,32 @@ CREATE TABLE IF NOT EXISTS reminders (
     status TEXT NOT NULL          -- pending（等本人点确认）/ set / done / missed / failed / cancelled
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, due_at);
+CREATE TABLE IF NOT EXISTS announce_channels (
+    guild_id INTEGER PRIMARY KEY, -- 这个服务器的公告频道（管理员用 /dsadmin 公告频道 设的；没有这一行 = 不收更新公告）
+    channel_id INTEGER NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS announce_off (
+    user_id INTEGER PRIMARY KEY,  -- 不要私信收更新公告的人（/ds-dm 更新公告 值:关）
+    at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    scope TEXT NOT NULL,          -- server / dm / all
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    channels INTEGER NOT NULL,    -- 发到了几个服务器的公告频道
+    dms INTEGER NOT NULL,         -- 私信发出去几个人（只记数，不记是谁）
+    failed INTEGER NOT NULL       -- 没发出去的（频道 + 私信）
+);
+CREATE TABLE IF NOT EXISTS channel_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL,  -- 程序在这个频道（私信）里替它发过的话：下一轮告诉它一声（重启了也还在）
+    note TEXT NOT NULL,
+    at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_notes ON channel_notes (channel_id, id);
 CREATE TABLE IF NOT EXISTS server_groups (
     guild_id INTEGER PRIMARY KEY,  -- 连成一组的服务器（bot 主人用 /dsowner 服务器组 连的）
     group_id INTEGER NOT NULL,     -- 哪个组：负数，组里共用的人设卡、长期记忆按它存（和服务器 ID 撞不上）
@@ -981,6 +1007,73 @@ class Store:
     def reminders_due(self, now: float) -> list[Reminder]:
         rows = self.db.execute("SELECT * FROM reminders WHERE status = 'set' AND due_at <= ? ORDER BY due_at, id", (now,))
         return [self._reminder(r) for r in rows]
+
+    # ---------------------------------------------------------------- 更新公告
+
+    def announce_channel(self, guild_id: int) -> int | None:
+        """这个服务器的公告频道；没设（不收更新公告）是 None。"""
+        r = self.db.execute("SELECT channel_id FROM announce_channels WHERE guild_id = ?", (guild_id,)).fetchone()
+        return int(r["channel_id"]) if r is not None else None
+
+    def announce_channels(self) -> dict[int, int]:
+        """服务器 -> 公告频道。"""
+        return {int(r["guild_id"]): int(r["channel_id"]) for r in self.db.execute("SELECT guild_id, channel_id FROM announce_channels")}
+
+    def set_announce_channel(self, guild_id: int, channel_id: int | None) -> None:
+        """channel_id 是 None：不收了。"""
+        with self.db:
+            if channel_id is None:
+                self.db.execute("DELETE FROM announce_channels WHERE guild_id = ?", (guild_id,))
+            else:
+                self.db.execute(
+                    "INSERT INTO announce_channels (guild_id, channel_id, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id, updated_at = excluded.updated_at",
+                    (guild_id, channel_id, time.time()),
+                )
+
+    def announce_off(self, user_id: int) -> bool:
+        """这个人是不是拒收了私信的更新公告。"""
+        return self.db.execute("SELECT 1 FROM announce_off WHERE user_id = ?", (user_id,)).fetchone() is not None
+
+    def set_announce_off(self, user_id: int, off: bool) -> None:
+        with self.db:
+            if off:
+                self.db.execute("INSERT OR REPLACE INTO announce_off (user_id, at) VALUES (?, ?)", (user_id, time.time()))
+            else:
+                self.db.execute("DELETE FROM announce_off WHERE user_id = ?", (user_id,))
+
+    def dm_people(self) -> list[tuple[int, int, int, float]]:
+        """私信过它的人：(人, 私信挂在的服务器, 私信频道, 最近一次私信里有动静的时间)。"""
+        rows = self.db.execute(
+            "SELECT h.user_id, h.guild_id, h.channel_id, MAX(h.updated_at, COALESCE(c.updated_at, 0)) AS at FROM dm_homes h "
+            "LEFT JOIN conversations c ON c.channel_id = h.channel_id WHERE h.channel_id IS NOT NULL ORDER BY h.user_id"
+        )
+        return [(int(r["user_id"]), int(r["guild_id"]), int(r["channel_id"]), float(r["at"])) for r in rows]
+
+    def add_announcement(self, ts: float, scope: str, title: str, text: str, channels: int, dms: int, failed: int) -> int:
+        with self.db:
+            cur = self.db.execute(
+                "INSERT INTO announcements (ts, scope, title, text, channels, dms, failed) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ts, scope, title, text, channels, dms, failed),
+            )
+        return int(cur.lastrowid)
+
+    def add_channel_note(self, channel_id: int, note: str, at: float) -> None:
+        with self.db:
+            self.db.execute("INSERT INTO channel_notes (channel_id, note, at) VALUES (?, ?, ?)", (channel_id, note, at))
+
+    def channel_notes(self, channel_id: int) -> list[tuple[int, str]]:
+        """还没告诉它的：(编号, 说明)，旧的在前。"""
+        rows = self.db.execute("SELECT id, note FROM channel_notes WHERE channel_id = ? ORDER BY id", (channel_id,))
+        return [(int(r["id"]), r["note"]) for r in rows]
+
+    def drop_channel_notes(self, ids: Iterable[int]) -> None:
+        with self.db:
+            self.db.executemany("DELETE FROM channel_notes WHERE id = ?", [(i,) for i in ids])
+
+    def tidy_channel_notes(self, before: float) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM channel_notes WHERE at < ?", (before,))
 
     def tidy_reminders(self, pending_before: float, gone_before: float) -> None:
         """没人点确认的作废；办完了、取消了很久的删掉。"""
