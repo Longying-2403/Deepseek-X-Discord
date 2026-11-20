@@ -122,6 +122,7 @@ memory_prompt_chars = 10000       # 聊天时最多列出多少字的长期记�
 dm_memory_max_entries = 150       # 每个人的私信记忆最多几条（满了它会自己合并、删掉旧的）
 dm_memory_entry_chars = 200       # 每条私信记忆最多多少字
 dm_memory_prompt_chars = 6000     # 私信里最多列出多少字的私信记忆（太多了只列最近改过的；整理记忆时全都看得到）
+dm_shared_prompt_chars = 2000     # 服务器里最多列出多少字群友标成“可共享”的私信记忆（太多了只列最近改过的）
 dm_memory_attach_entries = 20     # 他在服务器里叫它时，最多附上几条不敏感的私信记忆（最近改过的）
 review_idle_seconds = 600         # 频道安静 10 分钟、又攒了几轮新聊天，就整理一次记忆
 review_min_rounds = 3             # 至少攒了几轮新聊天才整理

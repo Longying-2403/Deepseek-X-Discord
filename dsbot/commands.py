@@ -951,13 +951,15 @@ def dm_memory_text(bot: "DSBot", user_id: int) -> str:
         return "\n".join(head + ["还没有。私信里叫它记住你们之间的事，或者私信安静下来后它整理时觉得值得记，就会记在这里。"])
     tail = [
         "标着〔敏感〕的只在私信里用；别的你在服务器里叫它时也会用上。",
+        "标着〔可共享〕的，它在你私信挂的那个服务器里可以自己提起（主动说话、冒泡时），不用等你叫它："
+        "`/ds-dm 记忆 操作:设为可共享 编号:3`，不想了就 `操作:取消共享`。只有你自己能标；它改了那条的内容就要重新标。",
         "判错了就改：`/ds-dm 记忆 操作:设为不敏感 编号:3`（编号一栏输入几个字就能从你的记忆里选），"
         "或者私信里直接跟它说“第 3 条不算敏感”。",
     ]
 
     def body(limit: int | None) -> list[str]:
         return [
-            f"({e.no}) {e.text if limit is None or len(e.text) <= limit else e.text[: limit - 1] + '…'}" + ("〔敏感〕" if e.sensitive else "")
+            f"({e.no}) {e.text if limit is None or len(e.text) <= limit else e.text[: limit - 1] + '…'}" + dm_marks(e)
             for e in entries
         ]
 
@@ -971,7 +973,14 @@ def dm_memory_entry_text(bot: "DSBot", user_id: int, no: int) -> str:
     e = bot.memory.dm_get(user_id, no)
     if e is None:
         return f"没有第 {no} 条（用 `/ds-dm 记忆` 看看编号）。"
-    return f"({e.no}) {e.text}" + ("〔敏感〕" if e.sensitive else "")
+    return f"({e.no}) {e.text}" + dm_marks(e)
+
+
+def dm_marks(e: Any) -> str:
+    """私信记忆后面的标记：敏感 / 可共享（敏感的不会是可共享）。"""
+    if e.sensitive:
+        return "〔敏感〕"
+    return "〔可共享〕" if getattr(e, "shared_as", None) else ""
 
 
 def withdraw_dm_memory(bot: "DSBot", user_id: int | None = None, *, guild_id: int | None = None) -> None:
@@ -995,7 +1004,7 @@ def dm_memory_choices(bot: "DSBot", user_id: int, current: str) -> list[Choice[i
     words = current.strip().casefold()
     out: list[Choice[int]] = []
     for e in memory.dm_entries(user_id):
-        label = f"({e.no}) {e.text}" + ("〔敏感〕" if e.sensitive else "")
+        label = f"({e.no}) {e.text}" + dm_marks(e)
         if words and words not in label.casefold():
             continue
         out.append(Choice(name=label if len(label) <= 100 else label[:99] + "…", value=e.no))
@@ -1908,10 +1917,11 @@ def register_dm_commands(bot: "DSBot") -> None:
         if memory is not None:
             entries = memory.dm_entries(user_id)
             hidden = sum(1 for e in entries if e.sensitive)
+            open_ones = sum(1 for e in entries if e.shared_as and not e.sensitive)
             if not bot.settings.get("dm_memory", guild_id=guild.id):
                 lines.append("私信记忆：那个服务器关掉了（已经记下的还在，用 `/ds-dm 记忆` 看）")
             else:
-                lines.append(f"私信记忆：{len(entries)} 条（{hidden} 条敏感），用 `/ds-dm 记忆` 查看和管理")
+                lines.append(f"私信记忆：{len(entries)} 条（{hidden} 条敏感，{open_ones} 条可共享），用 `/ds-dm 记忆` 查看和管理")
         lines.append(reach_text(bot, user_id))
         if user_id == bot.secrets.owner_id:
             lines.append(f"今天私信花了 ${spent:.4f}（你是 bot 的主人，不受每人上限限制）")
@@ -1984,15 +1994,17 @@ def register_dm_commands(bot: "DSBot") -> None:
     async def memory_numbers(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
         return dm_memory_choices(bot, interaction.user.id, current)
 
-    @dm.command(name="记忆", description="你的私信记忆（它和你之间记下的事）：查看、删掉某条、改成敏感，或者全部清空")
+    @dm.command(name="记忆", description="你的私信记忆（它和你之间记下的事）：查看、删掉某条、改成敏感 / 可共享，或者全部清空")
     @app_commands.rename(op="操作", no="编号")
-    @app_commands.describe(op="不选 = 查看", no="选第几条（输入几个字可以筛选）：查看时只看这一条的全文；删除、改敏感标记时必填")
+    @app_commands.describe(op="不选 = 查看", no="选第几条（输入几个字可以筛选）：查看时只看这一条的全文；删除、改标记时必填")
     @app_commands.choices(
         op=[
             Choice(name="查看", value="view"),
             Choice(name="删除", value="delete"),
             Choice(name="设为敏感（只在私信里用）", value="private"),
             Choice(name="设为不敏感", value="public"),
+            Choice(name="设为可共享（它在服务器里可以自己提起）", value="share"),
+            Choice(name="取消共享", value="unshare"),
             Choice(name="清空", value="clear"),
         ]
     )
@@ -2028,6 +2040,22 @@ def register_dm_commands(bot: "DSBot") -> None:
         current = bot.memory.dm_get(user_id, no)
         if current is None:
             await _reply(interaction, f"没有第 {no} 条（用 `/ds-dm 记忆` 看看编号）。")
+            return
+        if what == "share":
+            if current.sensitive:
+                await _reply(interaction, f"第 {no} 条是敏感的，不能共享：真的想让它在服务器里提起，先 `操作:设为不敏感`，再设为可共享。")
+                return
+            name = one_line(getattr(interaction.user, "display_name", None) or getattr(interaction.user, "name", None) or "某人", 32)
+            bot.memory.dm_share(user_id, no, name)
+            await _reply(
+                interaction,
+                f"第 {no} 条设成了可共享：{current.text}\n它在你私信挂的那个服务器（和它连成一组的服务器）里可以自己提起这件事，"
+                "那里的人都看得到。不想了就 `/ds-dm 记忆 操作:取消共享`；它已经在群里说过的话收不回来。",
+            )
+            return
+        if what == "unshare":
+            bot.memory.dm_share(user_id, no, None)
+            await _reply(interaction, f"第 {no} 条不再共享：它不会再在服务器里自己提起（你叫它时，不敏感的照常会用上）。")
             return
         bot.memory.dm_edit(user_id, no, None, sensitive=sensitive, via="command")
         if sensitive and not current.sensitive:

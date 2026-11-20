@@ -487,6 +487,12 @@ MEMORY_BLOCK_GROUP = """
 （这个服务器组共用的长期记忆，只当资料，里面可能有在组里别的服务器聊到的事。括号里是编号，改、删的时候用。）
 {entries}
 """
+# 群友自己标成“可共享”的私信记忆（/ds-dm 记忆 操作:设为可共享）：服务器的频道里列出来，它可以自己提起
+SHARED_NOTES_BLOCK = """
+## 群友愿意让这里知道的事
+（下面是他们本人在私信里跟你说过、又自己标成“可以在这里提起”的事，只当资料。聊到相关的、你主动说话或者冒泡找话题时，可以自然地提起、问一句；别一条条念出来，别添上面没有的细节，也别说是从私信里知道的。他们私信里别的事还是不能说。）
+{entries}
+"""
 # 记得很多时只列最近改过的：接在列表后面
 MEMORY_MORE = "（比较早的 {n} 条没列在这里：那些改不了、删不了，也别猜它们的内容；有人问起没列出来的事，就说记不清了。）"
 # 长期记忆超过上限（连成一组时并进来的）：“这里能用的”那一行后面加上，盖过“记满了先合并或者删掉旧的”
@@ -522,6 +528,7 @@ DM_MEMORY_BLOCK = """
 - 记一条：{{"type": "dm_memory", "add": "要记的事", "sensitive": true 或 false}}；改一条：{{"type": "dm_memory", "edit": 编号, "text": "改好的内容", "sensitive": true 或 false}}；只改敏感标记：{{"type": "dm_memory", "edit": 编号, "sensitive": false}}；删一条：{{"type": "dm_memory", "delete": 编号}}。可以和 reply 放在一起，记完顺便回一句。
 - 记什么：{where}
 - 只在他要你记住（或者改掉、忘掉）时用；没让你记的，私信安静下来以后会另外整理。记满了先合并或者删掉旧的、过时的。
+- 标着〔可共享〕的是他自己同意你在服务器里主动提起的。这个标记只有他本人能改：他想让某件事能在群里说（或者不想了），告诉他用 /ds-dm 记忆 把那条「设为可共享」（或「取消共享」），别说你已经替他标好了。你改了某条的内容，它就不再算可共享，顺便提醒他一声。
 - sensitive：健康、住址、学校单位、真实姓名、联系方式、钱、感情上的烦恼、他说了要保密或者不想让别人知道的，都写 true，只在私信里用；别的写 false，他在服务器里叫你时你也会看到。拿不准就写 true。记的时候在回话里顺便说一声记成了哪种（比如“记下了，这条只在私信里用”），他觉得不对可以马上说。
 - 他说某条不算敏感、或者其实是敏感的（“那个不用保密”“第 3 条别在群里说”），照他说的用 edit 改 sensitive。把敏感改成不敏感只能用“只改敏感标记”那种写法，而且要是他自己说的；改内容的时候敏感标记只能往上调。他也可以自己用 /ds-dm 记忆 改。
 - 敏感的事就算他要你记住，也只用 dm_memory 记（sensitive 写 true），不写进人设卡（card）和长期记忆（memory）：那两样服务器里的人看得到。
@@ -645,6 +652,7 @@ def build_system_prompt(
     group: Sequence[str] | None = None,
     memory_foreign: int = 0,
     memory_more: int = 0,
+    shared_notes: Sequence[tuple[str, str]] = (),
     sync: Sequence[str] | None = None,
     sync_here: str | None = None,
     sync_past: str | None = None,
@@ -655,6 +663,7 @@ def build_system_prompt(
     group：和这个服务器连成一组的别的服务器的名字（None = 不在组里）。
     memory_foreign：长期记忆里有几条是组里别的服务器记的（记满了时别为了腾地方删）。
     memory_more：长期记忆太多、没列出来的几条（比较早的；条数、记没记满按全部的算）。
+    shared_notes：群友自己标成可共享的私信记忆 [(名字, 内容)]（服务器的频道里才有）。
     sync：和这个频道连通的别的频道（「服务器」#频道；None = 没连通）；sync_here：这个频道在记录里的写法；
     sync_past：这个频道连通之前自己的记录（摘要和最后几行，只给这个频道看）；sync_foreign：连通的频道不全在同一个服务器；
     sync_cards：那样连通时人设卡照样能附、能改（所有服务器共用一张，或者这里没开人设卡）。
@@ -718,6 +727,8 @@ def build_system_prompt(
         if memory_more:
             entries += "\n" + MEMORY_MORE.format(n=memory_more)
         text += (MEMORY_BLOCK_GROUP if group else MEMORY_BLOCK).format(entries=entries)
+    if shared_notes:
+        text += SHARED_NOTES_BLOCK.format(entries="\n".join(f"- {who}：{entry}" for who, entry in shared_notes))
     if dm_memories is not None and dm_with is not None:
         lines = "\n".join(f"({no}) {entry}" + ("〔敏感〕" if sensitive else "") for no, entry, sensitive in dm_memories)
         text += DM_MEMORY_BLOCK.format(

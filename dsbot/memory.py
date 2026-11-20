@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS dm_memories (
     no INTEGER NOT NULL,          -- 这个人的编号（删掉的不再用，免得改错）
     text TEXT NOT NULL,
     sensitive INTEGER NOT NULL,   -- 1 = 敏感：只在他自己的私信里用
+    shared_as TEXT,               -- 不是 NULL = 可共享：他本人同意它在服务器里自己提起（存的是那时他的名字）
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     via TEXT NOT NULL,            -- chat / review / command
@@ -125,6 +126,7 @@ class DmMemory:
     sensitive: bool
     updated_at: float
     via: str
+    shared_as: str | None = None  # 可共享：他本人标的（用 /ds-dm 记忆），值是标的时候他的名字；敏感的不会是可共享
 
 
 @dataclass
@@ -948,6 +950,9 @@ class MemoryStore:
         if "origin" not in cols:  # 旧版本建的表：补上这一列（原有的记成“不知道”）
             self.db.execute("ALTER TABLE memories ADD COLUMN origin INTEGER")
             self.db.commit()
+        if "shared_as" not in {r["name"] for r in self.db.execute("PRAGMA table_info(dm_memories)")}:
+            self.db.execute("ALTER TABLE dm_memories ADD COLUMN shared_as TEXT")  # 2.13.0 以前建的表
+            self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -1118,19 +1123,36 @@ class MemoryStore:
 
     @staticmethod
     def _dm(r: Any) -> DmMemory:
-        return DmMemory(r["no"], r["text"], bool(r["sensitive"]), r["updated_at"], r["via"])
+        return DmMemory(r["no"], r["text"], bool(r["sensitive"]), r["updated_at"], r["via"], r["shared_as"])
 
     def dm_entries(self, user_id: int) -> list[DmMemory]:
         rows = self.db.execute(
-            "SELECT no, text, sensitive, updated_at, via FROM dm_memories WHERE user_id = ? ORDER BY no", (user_id,)
+            "SELECT no, text, sensitive, updated_at, via, shared_as FROM dm_memories WHERE user_id = ? ORDER BY no", (user_id,)
         )
         return [self._dm(r) for r in rows]
 
     def dm_get(self, user_id: int, no: int) -> DmMemory | None:
         r = self.db.execute(
-            "SELECT no, text, sensitive, updated_at, via FROM dm_memories WHERE user_id = ? AND no = ?", (user_id, no)
+            "SELECT no, text, sensitive, updated_at, via, shared_as FROM dm_memories WHERE user_id = ? AND no = ?", (user_id, no)
         ).fetchone()
         return self._dm(r) if r is not None else None
+
+    def dm_shared(self) -> list[tuple[int, DmMemory]]:
+        """所有人标成可共享的私信记忆：[(人, 那一条)]，最近改过的在前。"""
+        rows = self.db.execute(
+            "SELECT user_id, no, text, sensitive, updated_at, via, shared_as FROM dm_memories "
+            "WHERE shared_as IS NOT NULL AND sensitive = 0 ORDER BY updated_at DESC, user_id, no"
+        )
+        return [(int(r["user_id"]), self._dm(r)) for r in rows]
+
+    def dm_share(self, user_id: int, no: int, name: str | None) -> bool:
+        """本人把一条标成可共享（name：他现在的名字）或者取消（None）。敏感的标不了。不算改了内容（updated_at 不动）。"""
+        current = self.dm_get(user_id, no)
+        if current is None or (name is not None and current.sensitive):
+            return False
+        with self.db:
+            self.db.execute("UPDATE dm_memories SET shared_as = ? WHERE user_id = ? AND no = ?", (name, user_id, no))
+        return True
 
     def dm_add(self, user_id: int, text: str, *, sensitive: bool, via: str, now: float | None = None) -> int:
         """记一条，返回编号。调用方先检查条数上限和字数。"""
@@ -1160,10 +1182,12 @@ class MemoryStore:
         if new_text == current.text and new_sensitive == current.sensitive:
             return False
         now = time.time() if now is None else now
+        # 可共享是本人对“这句话”点的头：内容被改了（它聊天、整理时改的）、或者改成了敏感，就不再算可共享，要他再标一次
+        keep = current.shared_as if new_text == current.text and not new_sensitive else None
         with self.db:
             cur = self.db.execute(
-                "UPDATE dm_memories SET text = ?, sensitive = ?, updated_at = ?, via = ? WHERE user_id = ? AND no = ?",
-                (new_text, int(new_sensitive), now, via, user_id, no),
+                "UPDATE dm_memories SET text = ?, sensitive = ?, shared_as = ?, updated_at = ?, via = ? WHERE user_id = ? AND no = ?",
+                (new_text, int(new_sensitive), keep, now, via, user_id, no),
             )
         return cur.rowcount > 0
 

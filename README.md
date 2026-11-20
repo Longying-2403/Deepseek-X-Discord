@@ -27,7 +27,7 @@
 - **跨频道记忆**（管理员开启）：在 A 频道跟它聊过的事，换到 B 频道它也接得上；也能翻开了共享的别的频道的记录。私密频道默认不外传。
 - **会点歌**：进语音频道后叫它“放首晴天”，或者用 `/ds-music 播放`，它会进你所在的语音频道放 B站视频的声音；同一个语音频道里的人都能切歌、暂停、停止。只能放 B站的，不放直播。
 - **能私信**：和它同在一个服务器的人可以直接私信它。私信里它用那个服务器的人设、长期记忆和你的人设卡，聊的事也会记回去，你在那个服务器的频道里叫它时也可能被提起（说“保密”的不会）；连着发几条，它等你说完再一起回；每人每天有花费上限（见“十四、私信”）。
-- **私信记忆**：私信里聊到的、你们之间的事（最近在忙什么、约好的事、私信里玩的剧情），能写进人设卡的先写进人设卡，剩下的记进你自己的私信记忆，跟着你走、不分服务器。每条标着敏感不敏感：敏感的只在私信里用，不敏感的你在服务器里叫它时也会用上。用 `/ds-dm 记忆` 查看、删除、改成敏感（见“十四”）。
+- **私信记忆**：私信里聊到的、你们之间的事（最近在忙什么、约好的事、私信里玩的剧情），能写进人设卡的先写进人设卡，剩下的记进你自己的私信记忆，跟着你走、不分服务器。每条标着敏感不敏感：敏感的只在私信里用，不敏感的你在服务器里叫它时也会用上；你还可以把某条标成“可共享”，它在服务器里就能自己提起。用 `/ds-dm 记忆` 查看、删除、改成敏感或可共享（见“十四”）。
 - **跨服务器**（管理员开启）：开了的服务器之间，同一个人最近跟它聊的会跟着他走，在 A 服务器聊的到 B 服务器也接得上（见“七”）。
 - **服务器组**（Beta，bot 主人开启）：同一群人的几个服务器可以连成一组，当成一个服务器来记：共用人设卡和长期记忆，开了记忆共享的频道也能翻组里别的服务器的记录（见“七”）。
 - **连通频道**（Beta，bot 主人开启）：把几个服务器的频道连通，共用一份聊天记录：在哪个频道叫它，它都知道别的频道刚才在聊什么；它在哪个频道就只在那里说话（见“七”）。
@@ -50,6 +50,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **You control how much it talks**: how often it glances and whether it follows a conversation can be adjusted from inside Discord (three presets: quiet, normal, chatty).
 - **Bubbles up on its own** (per channel): when a channel has been quiet for a few hours it says something by itself: it works out from the chat what people are into, looks for something recent about it (mostly on X) and shares one item, or just says hello. Three levels (low / mid / high), daytime only, and not again until someone has spoken.
 - **Can DM you first** (each person opts in): after you've been quiet for a while it sends you a message on its own: a greeting, a question about something you talked about, or now and then something recent you'd like. You choose the level and the hours, and it stops after three messages without a reply.
+- **Shareable DM memory**: mark an entry of your DM memory as shareable and it may bring that up on its own in your server; only you can mark it, and sensitive entries can't be marked.
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
@@ -122,7 +123,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.7.0 之间的版本更新到 2.7.1 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。2.8.1 的 `Dockerfile` 多了一步“构建时先把代码编译好”（启动、读文件都快一些）：没换成新的也照样能跑，只是慢一点。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.12.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.13.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -215,7 +216,7 @@ python -m dsbot
 | `/ds-dm 服务器` | 私信里用哪个服务器的人设、长期记忆和人设卡（列出你和它都在、开着私信的服务器；人设卡设成所有服务器共用一张时，换哪个服务器都是那一张）。在服务器的频道里用、不填，就是这个服务器。换了会清空私信记录，服务器那边的记忆不受影响 |
 | `/ds-dm 状态` | 私信现在用的是哪个服务器、今天私信花了多少、私信记忆有几条、主动私信开没开 |
 | `/ds-dm 主动` | 让它隔一阵主动私信你：档位（关 / 低 / 中 / 高）、只在几点到几点之间发（「从几点」「到几点」一起填，可以跨夜；都填 0 = 全天）。什么都不填 = 看现在的设置。只管你自己的（见“私信”那一节的“主动私信”） |
-| `/ds-dm 记忆` | 你的私信记忆：查看（不选操作；选了编号就只看那一条的全文）、删除某条、设为敏感 / 不敏感、全部清空。编号一栏输入几个字就能从你的记忆里选。只有你自己看得到 |
+| `/ds-dm 记忆` | 你的私信记忆：查看（不选操作；选了编号就只看那一条的全文）、删除某条、设为敏感 / 不敏感、设为可共享 / 取消共享、全部清空。编号一栏输入几个字就能从你的记忆里选。只有你自己看得到 |
 | `/ds-dm 清空` | 清空私信的聊天记录，让它从头开始 |
 
 ### `/ds-music`（所有人）
@@ -580,6 +581,12 @@ python -m dsbot
   - 每人一份，跟着你走，不分服务器，换了私信挂的服务器也还在。最多 150 条，每条 200 字；快满了它会自己合并、删掉旧的。私信里只列最近改过的那些（最多约 6000 字），在服务器里只带最近改过的 20 条不敏感的；整理记忆时它全都看得到。
   - **每条标着敏感不敏感**：健康、住址、学校单位、真实姓名、联系方式、钱、感情上的烦恼，还有你说了要保密的，都算敏感，只在私信里用。不敏感的，你在私信挂着的那个服务器（以及开了“跨服务器”的服务器）里叫它时，它也会用上，**可能在大家面前提起**。
   - 敏感不敏感是它自己判断的，可能判错，两种改法：私信里直接跟它说（“第 3 条不算敏感”“那件事别在群里说”）；或者用 `/ds-dm 记忆` 查看（只有你自己看得到），选“设为敏感 / 设为不敏感”，编号一栏输入几个字就能从你的记忆里选（记得多、列表里每条截短了，查看时选上编号能看那一条的全文）。也能删掉某条、全部清空；清空之后，它整理记忆时不会拿清空之前的聊天把它们重新记回来。
+  - **可共享**（2.13.0 起）：不敏感的事平时只有你自己在服务器里叫它时才带上。想让它在服务器里自己提起（主动说话、冒泡找话题时，比如“阿明吉他练得怎么样了”），用 `/ds-dm 记忆 操作:设为可共享 编号:3` 标那一条；不想了就 `操作:取消共享`。
+    - 只有你本人能标，而且只能用命令：它自己不会把任何一条标成可共享；你在私信里跟它说“这件事可以在群里说”，它会告诉你用这个命令。敏感的标不了（先改成不敏感）。
+    - 只在你私信挂的那个服务器（和它连成一组的服务器）里用，那里每个频道的人都可能看到；别的服务器不用。那个服务器关掉了私信记忆时也不用。
+    - 取消共享、改成敏感、删掉以后，下一轮它就看不到了（这些事不写进频道记录，没有要撤回的）；它已经在群里说出口的话收不回来，也可能在整理记忆时被记进那个服务器的长期记忆。
+    - 它聊天、整理时改了那条的内容，就不再算可共享（你点头的是原来那句话），要再标一次。
+    - 大家标的加起来太多时，只列最近改过的那些（约 2000 字，`[engine]` 的 `dm_shared_prompt_chars`；填 0 = 整个关掉）。
   - **敏感的事守在私信里**：就算你叫它记住，敏感的事也只记进私信记忆、标成敏感，不会写进人设卡和长期记忆（那两样服务器里的人看得到）；说到你敏感的那些事的，整理记忆时也拦下来。敏感标记只有你自己能往下调（私信里直接说，或者用 `/ds-dm 记忆`），它整理记忆、改说法时只能往上调。私信里说的那一轮要是它还看了文件、链接、搜索结果，就不会往下调（免得被里面的话骗了），这时用 `/ds-dm 记忆` 改。
   - **撤回**：某条改成敏感、你删掉或改掉某条、它把不敏感的并进了敏感的那条、清空私信记忆、私信改挂到别的服务器，或者服务器关掉了私信记忆、跨服务器，服务器频道记录里附过的会直接从记录里拿掉（和群友删消息一样），之后谁叫它都看不到了。
   - 你在频道里叫它时带上的私信近况，只带你自己说的话（它在私信里的回话不带），说到你敏感的事的那句也不带；你在私信里刚说了敏感的事（它记成了敏感），之前的私信近况都不带了。

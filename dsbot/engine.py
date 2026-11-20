@@ -5172,6 +5172,7 @@ class Engine:
             group=group,
             memory_foreign=foreign,
             memory_more=memory_more,
+            shared_notes=self._shared_notes(st, view) if self.ec.dm_shared_prompt_chars > 0 else [],
             sync=sync,
             sync_here=sync_here,
             sync_past=past,
@@ -5190,8 +5191,34 @@ class Engine:
         limit = self.ec.dm_memory_entry_chars + 20
         entries = self.memory.dm_entries(info.dm_user)
         picked = _newest(entries, max(0, self.ec.dm_memory_prompt_chars), len(entries))
-        shown = [(e.no, neutralize_record(one_line(e.text, limit)), e.sensitive) for e in picked]
+        shown = [
+            (e.no, neutralize_record(one_line(e.text, limit)) + ("〔可共享〕" if e.shared_as and not e.sensitive else ""), e.sensitive)
+            for e in picked
+        ]
         return shown, len(entries) - len(picked)
+
+    def _shared_notes(self, st: ChannelState, view: View) -> list[tuple[str, str]]:
+        """服务器的频道里：群友自己标成“可共享”的私信记忆 [(名字, 内容)]。只列私信挂在这个服务器（或者和它连成一组的
+        服务器）的人的；没开私信记忆、连通到别的服务器的频道不列。太多了只列最近改过的（dm_shared_prompt_chars 字）。"""
+        if st.private or not self._dm_memory_on(view) or self._sync_foreign(st):
+            return []
+        assert self.memory is not None
+        here = set(self._group_guilds(st.guild_id))
+        homes: dict[int, bool] = {}
+        out: list[tuple[str, str]] = []
+        used = 0
+        limit = self.ec.dm_memory_entry_chars + 20
+        for user_id, e in self.memory.dm_shared():
+            if user_id not in homes:
+                home = self.store.dm_home(user_id)
+                homes[user_id] = home is not None and home[0] in here
+            if not homes[user_id]:
+                continue
+            if out and used + len(e.text) > max(0, self.ec.dm_shared_prompt_chars):
+                break
+            used += len(e.text)
+            out.append((neutralize(one_line(e.shared_as or "某人", 32)), neutralize_record(one_line(e.text, limit))))
+        return sorted(out)  # 排好序：放在 system prompt 里，顺序一乱缓存就失效
 
     def _check_stickers(self, st: ChannelState, actions: list[Action], info: ChannelInfo) -> tuple[list[Action], bool]:
         """贴图名对上服务器里的贴图才发（换成真实名字）；对不上的直接跳过，不当成“发不出消息”。返回 (动作, 有没有跳过)。"""

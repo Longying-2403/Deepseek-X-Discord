@@ -1645,7 +1645,7 @@ class OwnerCommand(unittest.IsolatedAsyncioTestCase):
             bot.memory.dm_add(11, f"第{i}条" + "很长的私信记忆" * 28, sensitive=i % 2 == 0, via="chat")
         text = dm_memory_text(bot, 11)
         shown, _ = self.numbers_listed(text, bot.memory.dm_entries(11))
-        tail = text.split("\n")[-2:]
+        tail = text.split("\n")[-3:]  # 最后三行是说明（敏感、可共享、怎么改）
         self.assertTrue(tail[0].startswith("标着〔敏感〕"))
         self.assertEqual(len(shown), most(text, bot.memory.dm_entries(11), lambda e, t: f"({e.no}) {t}" + ("〔敏感〕" if e.sensitive else ""), tail))
 
