@@ -18,6 +18,7 @@
 - **话量可控**：多久看一眼、聊起来以后跟不跟着，都能在 Discord 里调（安静 / 普通 / 话痨三个档位一键套用）。
 - **会自己冒泡**（按频道开启）：频道安静了几个小时，它会自己来说点什么：从大家聊过的东西里看出感兴趣的话题，去搜最近的新鲜事（多半是 X 上的）分享一条，或者打个招呼、提起以前聊过的事。分低、中、高三档，只在白天，上次冒的没人理就先不冒。
 - **会主动私信你**（每个人自己开）：`/ds-dm 主动 档位:低/中/高`，你一阵子没找它，它会自己来找你说句话：问候、接着你们聊过的事问一句，有时分享一条你感兴趣的新鲜事。时段自己定，连着三次没回它就先停下。
+- **会到点提醒**：叫它的时候直接说“明天早上九点提醒我开会”“半小时后提醒我关火”，它先发一条让你核对时间，点了“确认”才设上；到点在你说的那个频道里 @ 你（也可以 @ 好几个人，或者改成私信某一个人），私信里说的就私信你。只能设一次性的。见“十二”后面的“提醒”。
 - **省钱**：对话历史只追加（只有消息被删、最近的消息被编辑时才改那一处），尽量吃满 DeepSeek 的前缀缓存；没额度时连判断都不做；每日预算超了自动降级。
 - **能看图**：上传的图片、GIF 选单发的 GIF、贴的图片链接、链接预览的图、Discord 贴图都会一起发给模型（动图只看第一帧，可关）。
 - **能读文件**：文本和代码、PDF（扫描件会看前几页的图）、Word、Excel、PPT。叫它时附上的文件直接读；“帮我看看上面那个文件”这种，它会自己去打开。
@@ -51,6 +52,7 @@ A Discord bot powered by DeepSeek V4.1 Flash (`deepseek-flash`) that hangs out i
 - **Bubbles up on its own** (per channel): when a channel has been quiet for a few hours it says something by itself: it works out from the chat what people are into, looks for something recent about it (mostly on X) and shares one item, or just says hello. Three levels (low / mid / high), daytime only, and not again until someone has spoken.
 - **Can DM you first** (each person opts in): after you've been quiet for a while it sends you a message on its own: a greeting, a question about something you talked about, or now and then something recent you'd like. You choose the level and the hours, and it stops after three messages without a reply.
 - **Shareable DM memory**: mark an entry of your DM memory as shareable and it may bring that up on its own in your server; only you can mark it, and sensitive entries can't be marked.
+- **Reminders**: tell it "remind me about the meeting at 9 tomorrow" and it speaks up at that time; it first posts the exact time with confirm / cancel buttons, and can mention several people in the channel or DM one person. One-off reminders only.
 - **Saves money**: the conversation history is append-only (only the spot where a message was deleted, or a recent one edited, gets changed), to get the most out of DeepSeek's prefix cache; with no quota left it doesn't even run a check; over the daily budget it scales back automatically.
 - **Sees images**: uploaded images, GIFs from the GIF picker, pasted image links, link-preview images and Discord stickers are sent to the model too (only the first frame of animated images; can be turned off).
 - **Reads files**: text and code, PDF (for scans it looks at images of the first few pages), Word, Excel, PowerPoint. Files attached to the message that calls it are read directly; for requests like "can you look at that file above", it opens the file itself.
@@ -123,7 +125,7 @@ docker compose logs -f          # 看日志，确认“已登录”
 
 1. 在 File Station 里先把项目文件夹里的 `dsbot` 文件夹整个删掉，再把压缩包里的 `dsbot` 复制进来；`Dockerfile` 和 `requirements.txt` 也用压缩包里的覆盖（2.2.0 起镜像里要多装 ffmpeg、yt-dlp 和语音库，这两个文件没换的话点歌用不了）。压缩包最外面有一层 `ds-discord-bot` 文件夹，要的是它**里面**的这几样；新代码要放进项目原来的文件夹，构建只认那里。先删再复制，免得复制时遇到同名文件选了“跳过”，旧文件还留在里面。`.env` 和 `data/` 不用动；`config.toml` 没改过的话一起覆盖，改过的话留着自己的也行（新参数都有默认值）。`docker-compose.yml` 没改过的话也一起覆盖（2.2.0 把关机时的等待时间 `stop_grace_period` 加到了 45 秒，让它有时间离开语音频道）；改过的话，自己把那一行改成 `45s` 就行。从 2.2.0 到 2.7.0 之间的版本更新到 2.7.1 只有 `dsbot` 文件夹变了（想用桌面操作的话，见“十五”）。2.8.1 的 `Dockerfile` 多了一步“构建时先把代码编译好”（启动、读文件都快一些）：没换成新的也照样能跑，只是慢一点。`config.toml` 里新加的参数不加也行，都有默认值；`[deepseek]` 下面的 `search_base_url`、`search_timeout_seconds`、`search_max_uses` 从 2.5.0 起用不到了，留着也没关系。
 2. 重新构建。最稳的是 SSH 进 NAS，在项目文件夹里跑 `sudo docker compose up -d --build`（没有 `compose` 命令就用 `sudo docker-compose up -d --build`），这样一定会用新代码重建。Container Manager 的“构建”有时会沿用已有的旧镜像。
-3. 确认新版生效了：日志里会有一行 `dsbot 2.13.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
+3. 确认新版生效了：日志里会有一行 `dsbot 2.14.0 启动中`（点歌能用的话，还会有一行 `点歌：开`），接着是 `已注册 4 个全局斜杠命令：…`，列出 `/dsadmin`、`/ds-rp`、`/ds-music`、`/ds-dm`（2.9.0 起管理员的命令从 `/ds` 改名成 `/dsadmin`，写法也变了，见“四、命令”）；或者跑 `sudo docker exec dsbot python -m dsbot --version`。
 4. 如果日志里提醒 `config.toml 里有不认识的配置项`，多半是 `config.toml` 换成了新的、代码却还是旧的：回到第 1、2 步。（2.0.0 起这种情况只提醒、不会起不来；更早的版本会直接报错退出。）
 
 ### 方式 B：直接用 Python（3.11 及以上）
@@ -176,6 +178,7 @@ python -m dsbot
 | `/dsadmin 表情包 查看`、`上传`、`删除` | 这个服务器的表情包库：上传（附上图片、写个名字）；删除时「名字」一栏会列出这个服务器的表情包 |
 | `/dsadmin 长期记忆 查看`、`添加`、`删除`、`清空` | 这个服务器的长期记忆：查看（选了编号就只看那一条的全文）、添加、删除（选编号，列表里有内容）、清空（会再确认一次） |
 | `/dsadmin 兴趣 查看`、`添加`、`删除` | 这个频道的人感兴趣的话题（它冒泡时拿去搜最近的新鲜事）：它自己从聊天里看出来、搜过的会记在这里；可以自己加；删掉它看出来的，会记成“不让搜” |
+| `/dsadmin 提醒 查看`、`取消` | 这个服务器里设着的、到点在频道里说的提醒（谁设的、什么时候、提醒谁）；取消时「编号」一栏会列出来。发私信的、私信里设的是各人自己的，这里看不到 |
 | `/dsadmin 状态` | 查看本频道的设置、主动发言的节奏（多久看一眼、现在是不是正跟着聊）、现在的时间和时区、上次判断、今天花费、记忆共享、今天的搜索、读链接和找图次数、点歌的状态 |
 | `/dsadmin 清空记忆` | 清空本频道的对话记录和摘要 |
 
@@ -217,6 +220,7 @@ python -m dsbot
 | `/ds-dm 状态` | 私信现在用的是哪个服务器、今天私信花了多少、私信记忆有几条、主动私信开没开 |
 | `/ds-dm 主动` | 让它隔一阵主动私信你：档位（关 / 低 / 中 / 高）、只在几点到几点之间发（「从几点」「到几点」一起填，可以跨夜；都填 0 = 全天）。什么都不填 = 看现在的设置。只管你自己的（见“私信”那一节的“主动私信”） |
 | `/ds-dm 记忆` | 你的私信记忆：查看（不选操作；选了编号就只看那一条的全文）、删除某条、设为敏感 / 不敏感、设为可共享 / 取消共享、全部清空。编号一栏输入几个字就能从你的记忆里选。只有你自己看得到 |
+| `/ds-dm 提醒 查看`、`取消` | 你让它到点提醒的事（私信里设的、各个服务器里设的都在这里；最近错过的也会列出来）；取消时「编号」一栏会列出来 |
 | `/ds-dm 清空` | 清空私信的聊天记录，让它从头开始 |
 
 ### `/ds-music`（所有人）
@@ -267,6 +271,7 @@ python -m dsbot
 | 私信 | 开 | 让这个服务器的成员私信它（见“十四”）。只看全服务器这一级：`/dsadmin 设置 参数:私信 值:关` |
 | 私信记忆 | 开 | 私信挂在这个服务器的人，私信里聊的你们之间的事记进他的私信记忆；他在这里叫它时带上不敏感的那些（见“十四”）。只看全服务器这一级 |
 | 跨服务器 | 关 | 和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的跟着他走（见“七”）。只看全服务器这一级 |
+| 提醒 | 开 | 被叫到时可以让它到点提醒（见“十二”后面的“提醒”）。关掉以后这里不能再设新的，已经设好的照样会提醒（用 `/dsadmin 提醒 取消`） |
 
 区域（`/dsadmin 区域`）对应的参数叫“允许回应”，默认开。想让所有服务器一开始就是白名单模式，把 `config.toml` 里的 `enabled` 改成 `false`。
 
@@ -520,6 +525,24 @@ python -m dsbot
 - 别人提要求时，它会让对方去找 dsowner。群友先提、你再叫它说“可以，照他说的改”也行。改动比较大的话，记得 `/dsadmin 清空记忆`。
 
 这些规则都写在 `dsbot/prompts.py` 里，改那里要重新构建容器（Container Manager 里是项目先停止再构建）。
+
+### 提醒
+
+叫它的时候直接说，不用命令：
+
+- “明天早上九点提醒我开会”“半小时后提醒我关火”“周五晚上八点提醒我、小红和老王一起打游戏”“后天下午三点私信提醒小红交报告”。
+- **先核对再设上**：它回一句话，程序接着发一条写明日期、星期、钟点的消息，下面有“确认”和“取消”两个按钮。只有提出的人能点；点了“确认”才算设上，10 分钟没点就作废。时间不对就点“取消”再说一次。
+- **到点怎么提醒**：
+  - 在频道里说的：到点在那个频道里 @ 你。说了要提醒别人、好几个人的，一起 @（最多 10 个人，`[engine]` 的 `remind_max_targets`；不会 @everyone、@身份组）。
+  - 说了“私信提醒”的：到点私信那一个人（一次只能给一个人；他没私信过它也能收到）。提醒的是别人时，私信里会写明是谁、在哪个服务器让它提醒的。私信发不出去（他关了私信、屏蔽了它）就回到说的那个频道里 @ 他。
+  - 私信里说的：只提醒你自己，发在私信里。
+  - 到点说的那句话是设的时候它就写好的，到点由程序直接发，不再问模型，所以不花钱，也不受预算、主动发言开没开的影响。
+- **只能设一次性的**，最远一年以后。没说清楚几点的（“明天提醒我”），它会先问你。
+- **上限**：每个人最多同时挂着 15 条（私信里的、各个服务器里的加在一起）；每个服务器里到点在频道里说的最多 30 条（所有人加起来，发私信的不算）。满了它会直接告诉你，先取消几条。在 `config.toml` 的 `[engine]` 里改：`remind_max_per_person`、`remind_max_per_server`。
+- **查看、取消**：`/ds-dm 提醒 查看`、`/ds-dm 提醒 取消`（只有自己看得到）；也可以叫它“我有哪些提醒”“开会那条不用提醒了”（在频道里只列、只取消在这个服务器频道里设的那些）。管理员用 `/dsadmin 提醒 查看`、`取消` 管这个服务器频道里的。
+- **bot 当时不在线**（重启、断网）：上线后晚了不到 6 小时的补发，并写明晚了多久；再晚就不发了，在 `/ds-dm 提醒 查看` 里标“错过了”（留 3 天）。`[engine]` 的 `remind_late_hours`。
+- **不想让这个服务器设提醒**：`/dsadmin 设置 参数:提醒 值:关`（已经设好的照样会提醒）。
+- 提醒的内容存在 `data/dsbot.sqlite3` 里（`reminders` 表）；办完、取消 7 天后自动删掉。
 
 ## 十三、点歌（B站）
 

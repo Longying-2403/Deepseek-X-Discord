@@ -135,7 +135,7 @@ class IncomingMessage:
 @dataclass
 class Action:
     # "reply" | "react" | "sticker" | "meme" | "pick" | "read" | "search" | "image" | "recall" | "persona"
-    # | "card" | "memory" | "dm_memory" | "who" | "music" | "desktop"
+    # | "card" | "memory" | "dm_memory" | "who" | "music" | "desktop" | "remind"
     kind: str
     to: int | None = None  # 消息编号（#后面的数字）
     messages: list[str] = field(default_factory=list)
@@ -150,6 +150,11 @@ class Action:
     op: str | None = None  # memory：add / edit / delete；music：play / skip / pause / resume / stop / queue / remove / clear
     index: int | None = None  # memory / dm_memory：改、删第几条（记忆的编号）；music remove：队列里的第几首
     sensitive: bool | None = None  # dm_memory：敏感（只在他自己的私信里用）；None = 没写（edit 时就是不改）
+    at: str | None = None  # remind：具体的时间（"2026-11-21 09:00"）
+    minutes: float | None = None  # remind：多少分钟以后
+    who: list[str] = field(default_factory=list)  # remind：要提醒的人的名字（不写 = 说这话的人自己）
+    dm: bool = False  # remind：到点了发私信（只给一个人）
+    say: str | None = None  # remind：到点时说的那句话
 
     def to_json(self) -> dict[str, Any]:
         if self.kind == "card":
@@ -172,6 +177,25 @@ class Action:
                 d["delete"] = self.index
             if self.sensitive is not None and self.op != "delete":
                 d["sensitive"] = self.sensitive
+            return d
+        if self.kind == "remind":
+            d = {"type": "remind", "op": self.op}
+            if self.to is not None:
+                d["to"] = self.to
+            if self.op == "add":
+                if self.minutes is not None:
+                    d["in_minutes"] = self.minutes
+                elif self.at is not None:
+                    d["at"] = self.at
+                d["text"] = self.text or ""
+                if self.who:
+                    d["who"] = list(self.who)
+                if self.dm:
+                    d["dm"] = True
+                if self.say:
+                    d["say"] = self.say
+            elif self.op == "cancel" and self.text:
+                d["text"] = self.text
             return d
         if self.kind == "who":
             return {"type": "who", "name": self.name}

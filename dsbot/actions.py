@@ -23,6 +23,14 @@ _CARD_KINDS = ("card", "set_card", "update_card", "persona_card", "人设卡")
 _WHO_KINDS = ("who", "lookup_card", "find_card", "card_lookup", "查人设卡")
 _MUSIC_KINDS = ("music", "play_music", "song", "play", "点歌", "放歌")
 _DESKTOP_KINDS = ("desktop", "computer", "pc", "电脑")
+_REMIND_KINDS = ("remind", "reminder", "remind_me", "alarm", "timer", "提醒")
+_REMIND_OPS = {
+    **dict.fromkeys(("add", "set", "new", "create", "设", "设置", "添加"), "add"),
+    **dict.fromkeys(("cancel", "delete", "remove", "del", "取消", "删除", "删"), "cancel"),
+    **dict.fromkeys(("list", "show", "view", "查看", "列表"), "list"),
+}
+MAX_REMINDS = 3  # 一轮最多设几条提醒
+MAX_REMIND_NAMES = 20  # 一条提醒最多写几个名字（真的能 @ 几个由引擎按配置管）
 # 动作的几种写法（mentions_kinds 用）：翻记录只认这几个名字（"remember" 带着频道的也算翻记录，那种认得出的已经解析出来了）
 _KIND_NAMES = {"card": _CARD_KINDS, "who": _WHO_KINDS, "recall": ("recall", "history", "look_back")}
 _DESKTOP_OPS = {
@@ -254,6 +262,39 @@ def parse_actions(content: str) -> tuple[list[Action], bool]:
                 actions.append(Action("music", to, query=query, op=op))
             elif op is not None and op != "play" and not any(a.kind == "music" and a.op == op for a in actions):
                 actions.append(Action("music", to, op=op))
+        elif kind in _REMIND_KINDS:
+            raw_op = str(item.get("op", item.get("action", "")) or "").strip().lower()
+            at = item.get("at", item.get("time", item.get("when")))
+            minutes = next((item[k] for k in ("in_minutes", "minutes", "in", "after_minutes") if item.get(k) is not None), None)
+            op = _REMIND_OPS.get(raw_op) or ("add" if not raw_op and (at is not None or minutes is not None) else None)
+            if op is None or sum(a.kind == "remind" for a in actions) >= MAX_REMINDS:
+                continue
+            raw_text = item.get("text", item.get("content", item.get("what")))
+            text = " ".join(raw_text.split())[:500] if isinstance(raw_text, str) else None
+            if op == "add":
+                if not text:
+                    continue
+                names = item.get("who", item.get("users", item.get("mention")))
+                if isinstance(names, str):
+                    names = [names]
+                who = [n.strip().lstrip("@＠ ").strip()[:64] for n in names if isinstance(n, str)] if isinstance(names, list) else []
+                say = item.get("say", item.get("message"))
+                try:
+                    ahead = float(minutes) if minutes is not None and not isinstance(minutes, bool) else None
+                except (TypeError, ValueError):
+                    ahead = None
+                actions.append(
+                    Action(
+                        "remind", to, op="add", text=text,
+                        at=str(at).strip()[:40] if isinstance(at, (str, int)) and not isinstance(at, bool) and ahead is None else None,
+                        minutes=ahead,
+                        who=[n for n in dict.fromkeys(who) if n][:MAX_REMIND_NAMES],
+                        dm=item.get("dm") is True or str(item.get("dm", item.get("where", ""))).strip().lower() in (*_TRUE_WORDS, "dm", "私信"),
+                        say=" ".join(say.split())[:500] if isinstance(say, str) and say.strip() else None,
+                    )
+                )
+            elif not any(a.kind == "remind" and a.op == op and a.text == text for a in actions):
+                actions.append(Action("remind", to, op=op, text=text))
         elif kind in _DESKTOP_KINDS:
             op = _DESKTOP_OPS.get(str(item.get("op", item.get("action", "")) or "").strip().lower())
             target = _text_field(item, "target", "app", "program", "name", "url", "link")

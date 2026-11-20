@@ -123,6 +123,22 @@ class FakeTransport:
         self.mentions.append(tuple(mentions))
         return self._next_id
 
+    async def send_card(self, channel_id, text, *, confirm=None):
+        """程序直接发的话（提醒的确认、结果）：记在 cards 里 (频道, 话, 确认按钮上的提醒编号)。"""
+        if not self.can_send:
+            return None
+        self._next_id += 1
+        self.__dict__.setdefault("cards", []).append((channel_id, text, confirm))
+        return self._next_id
+
+    async def send_dm(self, user_id, text):
+        """私信一个人（到点的提醒）：记在 dms 里 (人, 话)；blocked 里的人发不出去。"""
+        if not self.can_send or user_id in self.__dict__.get("blocked", ()):
+            return None
+        self._next_id += 1
+        self.__dict__.setdefault("dms", []).append((user_id, text))
+        return self._next_id
+
     def channel_names(self, guild_id):
         return {name: set(ids) for name, ids in self.channel_map.items()}
 

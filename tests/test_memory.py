@@ -283,7 +283,7 @@ class Prompt(unittest.TestCase):
             self.skipTest("没装 discord.py")
         self.assertGreater(len(OWNER_SET_KEYS), 25)
         self.assertEqual(len(owner_key_choices("")), 25)
-        self.assertEqual([c.value for c in owner_key_choices("私信")], ["dm_daily_budget_usd", "dm", "dm_memory", "cross_server"])
+        self.assertEqual([c.value for c in owner_key_choices("私信")], ["dm_daily_budget_usd", "dm", "dm_memory", "cross_server", "reminders"])
         self.assertEqual(owner_key("每人每日私信预算美元"), "dm_daily_budget_usd")
         self.assertEqual(owner_key("daily_budget_usd"), "daily_budget_usd")
         self.assertIsNone(owner_key("persona"))  # 人设不在这里改

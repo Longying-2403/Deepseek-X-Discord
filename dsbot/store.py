@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from .reminders import Reminder
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS overrides (
     scope TEXT NOT NULL,          -- global / guild / channel
@@ -102,6 +104,22 @@ CREATE TABLE IF NOT EXISTS dm_reach (
     until_hour INTEGER,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER NOT NULL,    -- 谁让它提醒的（只有他能确认、取消）
+    owner_name TEXT NOT NULL,
+    guild_id INTEGER NOT NULL,    -- 在哪个服务器说的（私信里说的：私信挂在的那个服务器）
+    channel_id INTEGER NOT NULL,  -- 在哪个频道说的；不是私信提醒的就发在这里
+    dm INTEGER NOT NULL,          -- 1 = 到点了发私信
+    private INTEGER NOT NULL,     -- 1 = 是在私信里说的
+    targets TEXT NOT NULL,        -- 要提醒的人：[[ID, 名字], ...]
+    text TEXT NOT NULL,
+    say TEXT,                     -- 到点时说的那句话（设的时候就写好了）
+    due_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    status TEXT NOT NULL          -- pending（等本人点确认）/ set / done / missed / failed / cancelled
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, due_at);
 CREATE TABLE IF NOT EXISTS server_groups (
     guild_id INTEGER PRIMARY KEY,  -- 连成一组的服务器（bot 主人用 /dsowner 服务器组 连的）
     group_id INTEGER NOT NULL,     -- 哪个组：负数，组里共用的人设卡、长期记忆按它存（和服务器 ID 撞不上）
@@ -898,6 +916,86 @@ class Store:
                     "until_hour = excluded.until_hour, updated_at = excluded.updated_at",
                     (user_id, level, from_hour, until_hour, time.time()),
                 )
+
+    # ---------------------------------------------------------------- 提醒
+
+    @staticmethod
+    def _reminder(r: Any) -> Reminder:
+        return Reminder(
+            id=int(r["id"]),
+            owner_id=int(r["owner_id"]),
+            owner_name=r["owner_name"],
+            guild_id=int(r["guild_id"]),
+            channel_id=int(r["channel_id"]),
+            dm=bool(r["dm"]),
+            private=bool(r["private"]),
+            targets=[(int(uid), str(name)) for uid, name in json.loads(r["targets"])],
+            text=r["text"],
+            say=r["say"],
+            due_at=float(r["due_at"]),
+            created_at=float(r["created_at"]),
+            status=r["status"],
+        )
+
+    def add_reminder(self, r: Reminder) -> int:
+        """记下一条（多半是 pending：等本人点确认）。返回编号。"""
+        with self.db:
+            cur = self.db.execute(
+                "INSERT INTO reminders (owner_id, owner_name, guild_id, channel_id, dm, private, targets, text, say, due_at, "
+                "created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    r.owner_id, r.owner_name, r.guild_id, r.channel_id, int(r.dm), int(r.private),
+                    json.dumps([[uid, name] for uid, name in r.targets], ensure_ascii=False),
+                    r.text, r.say, r.due_at, r.created_at, r.status,
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    def reminder(self, rid: int) -> Reminder | None:
+        r = self.db.execute("SELECT * FROM reminders WHERE id = ?", (rid,)).fetchone()
+        return self._reminder(r) if r is not None else None
+
+    def move_reminder(self, rid: int, before: str, after: str) -> bool:
+        """状态从 before 改成 after；已经不是 before 了（别处先改了：点了两次、到点和取消撞在一起）就不改，返回 False。"""
+        with self.db:
+            cur = self.db.execute("UPDATE reminders SET status = ? WHERE id = ? AND status = ?", (after, rid, before))
+        return cur.rowcount == 1
+
+    def reminders_of(self, owner_id: int, *, missed_since: float | None = None) -> list[Reminder]:
+        """他设好的提醒，按时间排；missed_since：这之后错过了的也列出来（排在前面）。"""
+        rows = self.db.execute(
+            "SELECT * FROM reminders WHERE owner_id = ? AND (status = 'set' OR (status = 'missed' AND due_at >= ?)) "
+            "ORDER BY due_at, id",
+            (owner_id, missed_since if missed_since is not None else float("inf")),
+        )
+        return [self._reminder(r) for r in rows]
+
+    def guild_reminders(self, guild_id: int) -> list[Reminder]:
+        """这个服务器里设好的、到点在频道里说的提醒（私信里设的、发私信的不算），按时间排。"""
+        rows = self.db.execute(
+            "SELECT * FROM reminders WHERE guild_id = ? AND status = 'set' AND dm = 0 AND private = 0 ORDER BY due_at, id",
+            (guild_id,),
+        )
+        return [self._reminder(r) for r in rows]
+
+    def reminders_due(self, now: float) -> list[Reminder]:
+        rows = self.db.execute("SELECT * FROM reminders WHERE status = 'set' AND due_at <= ? ORDER BY due_at, id", (now,))
+        return [self._reminder(r) for r in rows]
+
+    def tidy_reminders(self, pending_before: float, gone_before: float) -> None:
+        """没人点确认的作废；办完了、取消了很久的删掉。"""
+        with self.db:
+            self.db.execute("UPDATE reminders SET status = 'cancelled' WHERE status = 'pending' AND created_at < ?", (pending_before,))
+            self.db.execute("DELETE FROM reminders WHERE status NOT IN ('set', 'pending') AND due_at < ?", (gone_before,))
+
+    def drop_reminders(self, *, owner_id: int | None = None, guild_id: int | None = None) -> int:
+        """删掉一个人的全部提醒，或者一个服务器里的全部提醒（bot 被踢出去、主人删掉某个人的数据）。"""
+        with self.db:
+            if owner_id is not None:
+                cur = self.db.execute("DELETE FROM reminders WHERE owner_id = ?", (owner_id,))
+            else:
+                cur = self.db.execute("DELETE FROM reminders WHERE guild_id = ?", (guild_id,))
+        return int(cur.rowcount)
 
     # ---------------------------------------------------------------- 服务器组
 

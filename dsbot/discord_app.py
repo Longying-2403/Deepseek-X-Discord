@@ -45,6 +45,7 @@ from .search import WebSearch
 from .settings import Settings
 from .store import Store
 from .tavily import Tavily
+from .reminders import button_id, parse_button
 from .render import now_text
 from .textutil import DISCORD_LIMIT, render_custom_emoji
 
@@ -272,6 +273,42 @@ class DiscordTransport:
             sent = await channel.send(text, **kwargs)
         except Exception as exc:  # HTTPException，以及网络断开时的 OSError / aiohttp 错误
             log.warning("发消息失败（频道 %s）：%r", channel_id, exc)
+            return None
+        self.remember_sent(sent.id)
+        return sent.id
+
+    async def send_card(self, channel_id: int, text: str, *, confirm: int | None = None) -> int | None:
+        """程序直接发的话（提醒的确认、结果），不 @ 任何人。confirm：带“确认 / 取消”两个按钮，按钮上记着提醒的编号；
+        点了由 DSBot.on_interaction 处理（按钮不靠内存里的 View：重启以后点也认）。"""
+        channel = await self._resolve(channel_id)
+        if channel is None:
+            return None
+        kwargs: dict[str, Any] = {"allowed_mentions": discord.AllowedMentions.none(), "suppress_embeds": True}
+        if confirm is not None:
+            view = discord.ui.View(timeout=None)
+            view.add_item(discord.ui.Button(label="确认", style=discord.ButtonStyle.success, custom_id=button_id(True, confirm)))
+            view.add_item(discord.ui.Button(label="取消", style=discord.ButtonStyle.secondary, custom_id=button_id(False, confirm)))
+            kwargs["view"] = view
+        try:
+            sent = await channel.send(text[:DISCORD_LIMIT], **kwargs)
+        except Exception as exc:
+            log.warning("发消息失败（频道 %s）：%r", channel_id, exc)
+            return None
+        finally:
+            if confirm is not None:
+                view.stop()  # 不让 discord.py 记着这个 View（点击统一在 on_interaction 里认 custom_id）
+        self.remember_sent(sent.id)
+        return sent.id
+
+    async def send_dm(self, user_id: int, text: str) -> int | None:
+        """私信一个人（到点的提醒）。他没私信过它也能发；关了私信、屏蔽了它就发不出去（返回 None）。"""
+        try:
+            user = self.client.get_user(user_id) or await self.client.fetch_user(user_id)
+            sent = await user.send(
+                text[:DISCORD_LIMIT], allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True
+            )
+        except Exception as exc:
+            log.warning("私信发不出去：%r", exc)
             return None
         self.remember_sent(sent.id)
         return sent.id
@@ -857,6 +894,23 @@ class DSBot(discord.Client):
             log.exception("解析消息 %s 失败", message.id)
             return
         await self.engine.handle_message(incoming)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """提醒的“确认 / 取消”按钮（斜杠命令由 CommandTree 自己处理，这里不管）。"""
+        if interaction.type is not discord.InteractionType.component:
+            return
+        picked = parse_button((interaction.data or {}).get("custom_id"))
+        if picked is None:
+            return
+        ok, rid = picked
+        try:
+            text, replace = self.engine.remind_decide(rid, interaction.user.id, ok)
+            if replace:
+                await interaction.response.edit_message(content=text, view=None)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except Exception:
+            log.exception("处理提醒的按钮出错")
 
     async def on_raw_typing(self, payload: discord.RawTypingEvent) -> None:
         if self.user is None or payload.user_id == self.user.id:

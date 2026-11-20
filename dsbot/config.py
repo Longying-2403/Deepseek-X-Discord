@@ -57,6 +57,7 @@ _SPEC_LIST = [
     Spec("dm", "私信", bool, "admin", "让服务器成员私信它：私信里用这个服务器的人设、长期记忆和他的人设卡；私信里聊的可能记进来，也可能在他叫它的频道里被提起（只看全服务器这一级）"),
     Spec("dm_memory", "私信记忆", bool, "admin", "私信挂在这个服务器的人：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时，带上不敏感的那些（只看全服务器这一级）"),
     Spec("cross_server", "跨服务器", bool, "admin", "和别的也开了这项的服务器之间，同一个人跟它聊过的会跟着他走：他最近几小时在那边跟它的对话、私信记忆里不敏感的那些（只看全服务器这一级）"),
+    Spec("reminders", "提醒", bool, "admin", "被叫到时可以让它到点提醒：本人点了确认才设上，到点在说的那个频道里 @ 他（或者发私信）。关掉以后已经设好的照样会提醒（用 /dsadmin 提醒 取消）"),
     # —— 主人 ——
     Spec("proactive_thinking", "主动判断思考", str, "owner", "主动判断时的思考强度", choices=("off", "low", "high")),
     Spec("mention_thinking", "点名回复思考", str, "owner", "被叫到时的思考强度", choices=("off", "low", "high")),
@@ -95,6 +96,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "dm": True,
     "dm_memory": True,
     "cross_server": False,
+    "reminders": True,
     "proactive_thinking": "low",
     "mention_thinking": "off",
     "daily_budget_usd": 1.0,
@@ -298,6 +300,10 @@ class EngineConfig:
     dm_memory_entry_chars: int = 200  # 每条私信记忆最多多少字
     dm_memory_prompt_chars: int = 6000  # 私信里最多列出多少字的私信记忆（太多了只列最近改过的；整理记忆时全都看得到）
     dm_shared_prompt_chars: int = 2000  # 服务器里最多列出多少字群友标成“可共享”的私信记忆（太多了只列最近改过的）
+    remind_max_per_person: int = 15  # 每个人最多同时挂着几条提醒（私信里的、服务器里的加在一起）
+    remind_max_per_server: int = 30  # 每个服务器里最多同时挂着几条到点在频道里说的提醒（所有人加起来）
+    remind_max_targets: int = 10  # 频道里的一条提醒最多 @ 几个人
+    remind_late_hours: float = 6.0  # 到点时 bot 不在线：上线后晚了不到这么久就补发，再晚就不发了（列表里标“错过了”）
     dm_memory_attach_entries: int = 20  # 他在服务器里叫它时，最多附上几条不敏感的私信记忆（最近改过的）
     review_idle_seconds: float = 600  # 频道安静这么久、又攒了几轮新聊天，就整理一次记忆
     review_min_rounds: int = 3  # 至少攒了几轮新聊天才整理

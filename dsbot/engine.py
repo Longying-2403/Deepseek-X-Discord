@@ -49,6 +49,28 @@ from .models import (
     Usage,
 )
 from .prompts import (
+    REMIND_AMBIGUOUS,
+    REMIND_CANCELLED,
+    REMIND_CONFIRM,
+    REMIND_DECLINED,
+    REMIND_FAILED,
+    REMIND_FULL_PERSON,
+    REMIND_FULL_SERVER,
+    REMIND_LIST,
+    REMIND_NONE,
+    REMIND_NOTE_CANCELLED,
+    REMIND_NOTE_DECLINED,
+    REMIND_NOTE_FAILED,
+    REMIND_NOTE_FIRED,
+    REMIND_NOTE_FIRED_DM,
+    REMIND_NOTE_MISSED,
+    REMIND_NOTE_SET,
+    REMIND_NOT_YOURS,
+    REMIND_NO_ONE,
+    REMIND_OFF,
+    REMIND_SET,
+    REMIND_STALE,
+    REMIND_WHICH,
     BUBBLE_GREET,
     REACH_FREE,
     REACH_NOTE,
@@ -116,6 +138,8 @@ from .mentions import link, merge_tiers, name_forms
 from .music import pick_link
 from .config import BUBBLE_LEVELS, REACH_LEVELS, check_range, level_of
 from .quota import SlidingWindow
+from . import reminders as rm
+from .reminders import Reminder
 from .render import (
     Gallery,
     assistant_text,
@@ -234,6 +258,7 @@ MAX_REVIEW_FAILURES = 3  # 同一批聊天连着整理失败几次就放弃
 DELETED_KEEP = 1000  # 每个频道记住最近多少条被删掉的消息
 SYNC_GUARD_TRIES = 5  # 连通、断开、清空等锁的时候频道又连通、断开了（用的记录变了）：最多照现在的重新等几次
 PEOPLE_KEEP = 300  # 每个频道记住最近多少个说过话、被 @ 过的人（它 @ 人时按名字找）
+MAX_REMIND_NOTES = 5  # 提醒的事（设好了、取消了、到点说过了）最多攒几句，下一轮告诉它
 MAX_PINGS_PER_ROUND = 3  # 它一次回话（一轮，可能分几条发）最多真的提醒几个人
 PING_COOLDOWN = 300.0  # 同一个人这么久之内最多被它提醒一次（之后的 @ 只显示，不发通知）
 GUILD_PINGS = 10  # 每个服务器 10 分钟内它最多提醒几次（免得被人叫着到处 @ 人）
@@ -782,6 +807,7 @@ class ChannelState:
     last_typing_at: float = 0.0  # 最近一次有人在打字
     dm_waiting: bool = False  # 私信：正在等对方说完
     dm_notice_day: str = ""  # 私信：哪天已经说过“今天聊太多了”
+    remind_notes: list[str] = field(default_factory=list)  # 提醒的事（设好了、取消了、到点说过了）：下一轮告诉它
     conv: ConvState = None  # type: ignore[assignment]  # 它现在用的那份记录（Engine.state 建的时候填上）
     conv_seen: Conversation | None = None  # 照哪次载入的记录算过上面这几样（名单、最近说话的人、正在放什么）
 
@@ -1445,6 +1471,7 @@ class Engine:
                 self._wake(st)
             elif self._bubble_ready(st, now) or self._bubble_scout_ready(st, now):
                 self._wake(st)
+        self._remind_due(now)
         if now - self._last_housekeep >= HOUSEKEEP_EVERY:
             self._last_housekeep = now
             self._housekeep(now)
@@ -1463,6 +1490,7 @@ class Engine:
 
     def _housekeep(self, now: float) -> None:
         self.limiter.prune(60.0, now)
+        self.store.tidy_reminders(now - rm.PENDING_SECONDS, now - 7 * 86400.0)
         for key in [k for k, at in self.pinged.items() if now - at >= PING_COOLDOWN]:
             del self.pinged[key]
         self.ping_window.prune(GUILD_PING_WINDOW, now)
@@ -1953,6 +1981,260 @@ class Engine:
                 if other is not st and other.mention_due and other.pending:
                     self._wake(other)  # 这一轮跑的时候连通的别的频道有人叫它：轮到那边了（等的是同一把锁）
 
+    # ------------------------------------------------------------------ 提醒
+
+    def _remind_note(self, channel_id: int, note: str) -> None:
+        """提醒是程序办的（确认、取消、到点发出去）：下一轮在这个频道里告诉它一声，免得它不知道自己说过什么。"""
+        st = self.states.get(channel_id)
+        if st is not None:
+            st.remind_notes.append(note)
+            del st.remind_notes[:-MAX_REMIND_NOTES]
+
+    async def _remind_card(self, channel_id: int, text: str, confirm: int | None = None) -> int | None:
+        """程序直接发的那几句（确认、结果）。confirm：带“确认 / 取消”按钮（按钮上记着提醒的编号）。"""
+        send = getattr(self.transport, "send_card", None)
+        try:
+            if send is not None:
+                return await send(channel_id, text, confirm=confirm)
+            if confirm is not None:
+                return None  # 发不了按钮：没法确认，不设
+            return await self.transport.send(channel_id, text, reply_to=None, ping=False)
+        except Exception:
+            log.exception("频道 %s：发提醒的消息出错", channel_id)
+            return None
+
+    def _remind_room(self, owner_id: int, guild_id: int, in_channel: bool) -> str | None:
+        """还能不能再设一条：能是 None，满了返回要告诉他的话。"""
+        mine = len(self.store.reminders_of(owner_id))
+        if mine >= self.ec.remind_max_per_person:
+            return REMIND_FULL_PERSON.format(n=mine, limit=self.ec.remind_max_per_person)
+        if in_channel and len(self.store.guild_reminders(guild_id)) >= self.ec.remind_max_per_server:
+            return REMIND_FULL_SERVER.format(limit=self.ec.remind_max_per_server)
+        return None
+
+    async def _remind_actions(
+        self,
+        st: ChannelState,
+        view: View,
+        reminds: list[Action],
+        numbered: list[tuple[int, IncomingMessage]],
+        targets: list[int],
+        kind: str,
+    ) -> None:
+        """模型写的 remind：只在被叫到时办，算在叫它的那个人头上（to 写的不是这一轮叫它的消息就算最后叫它的那个人）。"""
+        if kind != "mention" or not targets:
+            return
+        by_sid = dict(numbered)
+        for action in reminds:
+            sid = action.to if action.to in targets else targets[-1]
+            asker = by_sid.get(sid)
+            if asker is None or asker.is_bot or asker.channel_id != st.channel_id or asker.message_id in st.deleted:
+                continue  # 连通的别的频道的人叫的：到那边去设
+            name = one_line(asker.author_name or "某人", 32)
+            if not view.reminders:
+                text: str | None = REMIND_FAILED.format(name=name, reason=REMIND_OFF)
+            elif action.op == "add":
+                text = await self._remind_add(st, action, asker, name)
+            elif action.op == "cancel":
+                text = self._remind_cancel(st, action, asker, name)
+            else:
+                text = self._remind_list(st, asker, name)
+            if text:
+                await self._remind_card(st.channel_id, text)
+
+    async def _remind_people(
+        self, st: ChannelState, names: list[str], asker: IncomingMessage
+    ) -> tuple[list[tuple[int, str]], str | None]:
+        """模型写的名字 → 人。对不上、分不清是谁的返回原因（一个都不设）。"""
+        me = name_forms(asker.author_name or "") | {"我", "自己", "本人", "me"}
+        people, _ = await self._directory(st, " ".join("@" + n for n in names), "mention", {"pings_left": 0})
+        out: dict[int, str] = {}
+        for raw in names:
+            if raw in me:
+                out[asker.author_id] = one_line(asker.author_name or "某人", 32)
+                continue
+            ids: set[int] = set()
+            for form in name_forms(raw):
+                ids |= people.get(form, frozenset())
+            if not ids:
+                return [], REMIND_NO_ONE.format(who=one_line(raw, 32))
+            if len(ids) > 1:
+                return [], REMIND_AMBIGUOUS.format(who=one_line(raw, 32))
+            uid = next(iter(ids))
+            out[uid] = one_line(st.people.get(uid) or raw, 32)
+        return list(out.items()), None
+
+    async def _remind_add(self, st: ChannelState, action: Action, asker: IncomingMessage, name: str) -> str | None:
+        """照模型写的设一条：先记成等确认的，发一条带按钮的消息让本人核对时间。返回要直接告诉他的话（没设成的原因）。"""
+        now = self.clock()
+
+        def failed(reason: str) -> str:
+            self._remind_note(st.channel_id, REMIND_NOTE_FAILED.format(name=name, reason=reason))
+            return REMIND_FAILED.format(name=name, reason=reason)
+
+        text = rm.clean(action.text, rm.MAX_TEXT_CHARS)
+        if not text:
+            return failed("没写要提醒什么")
+        due = rm.parse_when(action.at, action.minutes, now, self.tz)
+        reason = rm.check_when(due, now)
+        if reason is not None or due is None:
+            return failed(reason or "时间没看懂")
+        owner = (asker.author_id, name)
+        if st.private:
+            people, dm = [owner], True  # 私信里设的：只提醒他自己
+        else:
+            people, problem = await self._remind_people(st, action.who, asker) if action.who else ([owner], None)
+            if problem is not None:
+                return failed(problem)
+            dm = action.dm
+            if dm and len(people) != 1:
+                return failed("私信提醒一次只能给一个人")
+            if len(people) > self.ec.remind_max_targets:
+                return failed(f"一条提醒最多 @ {self.ec.remind_max_targets} 个人")
+        full = self._remind_room(asker.author_id, st.guild_id, in_channel=not dm)
+        if full is not None:
+            return failed(full)
+        r = Reminder(
+            id=0,
+            owner_id=asker.author_id,
+            owner_name=name,
+            guild_id=st.guild_id,
+            channel_id=st.channel_id,
+            dm=dm,
+            private=st.private,
+            targets=people,
+            text=text,
+            say=rm.clean(action.say, rm.MAX_SAY_CHARS) or None,
+            due_at=due,
+            created_at=now,
+            status="pending",
+        )
+        r.id = self.store.add_reminder(r)
+        card = REMIND_CONFIRM.format(
+            what=rm.describe(r, now, self.tz, you=r.owner_id), name=name, minutes=int(rm.PENDING_SECONDS // 60)
+        )
+        if await self._remind_card(st.channel_id, card, confirm=r.id) is None:
+            self.store.move_reminder(r.id, "pending", "cancelled")
+            self._remind_note(st.channel_id, REMIND_NOTE_FAILED.format(name=name, reason="确认的消息发不出去"))
+        return None
+
+    def _remind_visible(self, st: ChannelState, owner_id: int) -> list[Reminder]:
+        """他在这里能看、能取消的提醒：私信里是全部；频道里只有这个服务器里设的、到点在频道里说的（别的不在这里露出来）。"""
+        mine = self.store.reminders_of(owner_id)
+        return mine if st.private else [r for r in mine if r.guild_id == st.guild_id and not r.dm and not r.private]
+
+    def _remind_cancel(self, st: ChannelState, action: Action, asker: IncomingMessage, name: str) -> str:
+        now = self.clock()
+        mine = self._remind_visible(st, asker.author_id)
+        key = (action.text or "").strip().lower()
+        hits = [r for r in mine if key in r.text.lower()] if key else mine
+        if len(hits) == 1 and self.store.move_reminder(hits[0].id, "set", "cancelled"):
+            what = rm.describe(hits[0], now, self.tz, you=asker.author_id)
+            self._remind_note(st.channel_id, REMIND_NOTE_CANCELLED.format(name=name, what=rm.describe(hits[0], now, self.tz)))
+            return REMIND_CANCELLED.format(name=name, what=what)
+        if not mine:
+            return REMIND_NONE.format(name=name)
+        lines = [f"({i}) {rm.describe(r, now, self.tz, you=asker.author_id)}" for i, r in enumerate(mine, 1)]
+        return REMIND_WHICH.format(name=name, entries="\n".join(lines))
+
+    def _remind_list(self, st: ChannelState, asker: IncomingMessage, name: str) -> str:
+        now = self.clock()
+        mine = self._remind_visible(st, asker.author_id)
+        if not mine:
+            return REMIND_NONE.format(name=name)
+        lines = [f"({i}) {rm.describe(r, now, self.tz, you=asker.author_id)}" for i, r in enumerate(mine, 1)]
+        return REMIND_LIST.format(name=name, entries="\n".join(lines))
+
+    def remind_decide(self, rid: int, user_id: int, ok: bool) -> tuple[str, bool]:
+        """有人点了确认消息上的按钮。返回 (要说的话, 是不是把那条确认消息换成这句话：不是就只给点的人看)。"""
+        now = self.clock()
+        r = self.store.reminder(rid)
+        if r is None or r.status != "pending":
+            return REMIND_STALE, True
+        if user_id != r.owner_id:
+            return REMIND_NOT_YOURS.format(name=r.owner_name), False
+        if not ok:
+            if not self.store.move_reminder(rid, "pending", "cancelled"):
+                return REMIND_STALE, True
+            self._remind_note(r.channel_id, REMIND_NOTE_DECLINED.format(name=r.owner_name, text=r.text))
+            return REMIND_DECLINED.format(text=r.text), True
+        if now - r.created_at > rm.PENDING_SECONDS:
+            problem: str | None = "确认得太晚了，再跟我说一次"
+        elif rm.check_when(r.due_at, now) is not None:
+            problem = "这个时间已经过了"
+        else:
+            problem = self._remind_room(r.owner_id, r.guild_id, in_channel=not r.dm)
+        if problem is not None:
+            self.store.move_reminder(rid, "pending", "cancelled")
+            self._remind_note(r.channel_id, REMIND_NOTE_FAILED.format(name=r.owner_name, reason=problem))
+            return REMIND_FAILED.format(name=r.owner_name, reason=problem), True
+        if not self.store.move_reminder(rid, "pending", "set"):
+            return REMIND_STALE, True
+        self._remind_note(r.channel_id, REMIND_NOTE_SET.format(name=r.owner_name, what=rm.describe(r, now, self.tz)))
+        log.info("频道 %s：设了一条提醒（到点%s）", r.channel_id, "发私信" if r.dm else "在频道里说")
+        return REMIND_SET.format(what=rm.describe(r, now, self.tz, you=r.owner_id)), True
+
+    def remind_cancel(self, rid: int, *, owner_id: int | None = None, guild_id: int | None = None) -> Reminder | None:
+        """命令里取消一条（/ds-dm 提醒：只能取消自己的；/dsadmin 提醒：只能取消这个服务器频道里的）。取消了返回那一条。"""
+        r = self.store.reminder(rid)
+        if r is None or r.status not in ("set", "missed"):
+            return None
+        if owner_id is not None and r.owner_id != owner_id:
+            return None
+        if guild_id is not None and (r.guild_id != guild_id or r.dm or r.private):
+            return None
+        if not self.store.move_reminder(rid, r.status, "cancelled"):
+            return None
+        if r.status == "set":
+            what = rm.describe(r, self.clock(), self.tz)
+            self._remind_note(r.channel_id, REMIND_NOTE_CANCELLED.format(name=r.owner_name, what=what))
+        return r
+
+    def _remind_due(self, now: float) -> None:
+        """到点了的提醒：发出去。bot 刚才不在线、晚了很久的不发（列表里标“错过了”）。"""
+        if self.closing:
+            return
+        for r in self.store.reminders_due(now):
+            if now - r.due_at > self.ec.remind_late_hours * 3600.0:
+                if self.store.move_reminder(r.id, "set", "missed"):
+                    log.info("频道 %s：有一条提醒晚了 %s，不发了", r.channel_id, rm.span_text(now - r.due_at))
+                    self._remind_note(r.channel_id, REMIND_NOTE_MISSED.format(name=r.owner_name, text=r.text))
+                continue
+            if not self.store.move_reminder(r.id, "set", "done"):
+                continue  # 先记成办完了再发：发到一半重启了也不会发两遍
+            task = asyncio.get_running_loop().create_task(self._remind_fire(r, now))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _remind_fire(self, r: Reminder, now: float) -> None:
+        sent: int | None = None
+        said_here: str | None = None  # 在说的那个频道（私信）里发出去的那句
+        try:
+            if r.private:
+                said_here = rm.fire_text(r, now, by_dm=True)
+                sent = await self.transport.send(r.channel_id, said_here, reply_to=None, ping=False)
+            else:
+                ids = [uid for uid, _ in r.targets]
+                send_dm = getattr(self.transport, "send_dm", None) if r.dm else None
+                if send_dm is not None:
+                    sent = await send_dm(ids[0], rm.fire_text(r, now, by_dm=True, guild_name=self._guild_name(r.guild_id)))
+                if sent is None:
+                    # 私信发不出去（他关了私信、屏蔽了它）：回到说的那个频道里 @ 他
+                    said_here = rm.fire_text(r, now, by_dm=False, fallback=r.dm)
+                    sent = await self.transport.send(r.channel_id, said_here, reply_to=None, ping=False, mentions=ids)
+        except Exception:
+            log.exception("频道 %s：发提醒出错", r.channel_id)
+            sent = None
+        if sent is None:
+            self.store.move_reminder(r.id, "done", "failed")
+            log.warning("频道 %s：有一条提醒发不出去（缺权限？频道没了？）", r.channel_id)
+            return
+        log.info("频道 %s：提醒发出去了（%s）", r.channel_id, "私信" if r.private or said_here is None else "频道")
+        if said_here is not None:
+            self._remind_note(r.channel_id, REMIND_NOTE_FIRED.format(text=one_line(said_here, 400)))
+        else:
+            self._remind_note(r.channel_id, REMIND_NOTE_FIRED_DM.format(who=rm.whom_text(r), text=r.text))
+
     # ------------------------------------------------------------------ 一轮
 
     def _conversation(self, st: ChannelState) -> Conversation:
@@ -2286,6 +2568,8 @@ class Engine:
             EDIT_NOTE.format(sid=sid, name=neutralize(one_line(m.author_name or "某人")), text=neutralize(one_line(m.text, 300)))
             for sid, m in noted.values()
         ] + context
+        remind_seen = list(st.remind_notes)  # 提醒的事（设好了、取消了、到点说过了）：程序办的，告诉它一声
+        context = remind_seen + context
         playing = st.music_seen  # 写进记录的那一行（没在放是 None）
         if kind == "mention":
             status = self.music.status(st.guild_id) if self.music is not None and not st.private else None
@@ -2385,6 +2669,7 @@ class Engine:
         for mid in noted:
             if st.edit_notes.get(mid) is noted[mid]:
                 del st.edit_notes[mid]  # 已经告诉它了
+        del st.remind_notes[: len(remind_seen)]  # 已经告诉它了
         st.music_seen = playing
         st.unreviewed_rounds += 1
         st.digest_seen.update(digest_marks)
@@ -2428,6 +2713,8 @@ class Engine:
         # 这一轮只有群友说的话（没看文件、链接、搜索结果……）：私信记忆的敏感标记才能照他说的往下调
         trusted = not tools and not docs
         actions = await self._apply_memory_actions(st, view, actions, numbered, targets, kind, seen, conv.turns[:before], trusted)
+        reminds = [a for a in actions if a.kind == "remind"]  # 提醒：回完话再办（发一条带确认按钮的消息）
+        actions = [a for a in actions if a.kind != "remind"]
         actions = self._live_actions(st, actions, kind, targets)  # 冲着已经删掉的消息的：不发，也不算开口
         actions, dropped = self._check_stickers(st, actions, info)
         actions, dropped_media = self._check_media(st, view, actions)
@@ -2454,6 +2741,11 @@ class Engine:
             # 对话里附着人设卡时不给管理员看模型的“想法”（里面可能引用了别人的卡）
             private_bits = bool(st.cards_shown or card_lines or seen or dm_lines or st.dm_memory_shown or self._dm_memory_in_prompt(st, view))
             st.last_decision = self._describe(kind, outcome, actions, completion, hide_reason=private_bits)
+        if reminds and st.generation == generation:
+            try:
+                await self._remind_actions(st, view, reminds, numbered, targets, kind)
+            except Exception:
+                log.exception("频道 %s：设提醒时出错", st.channel_id)
         # 发的时候才被删掉的那几条没发出去，不算“发不出消息”
         decided_text = any(a.kind == "reply" and a.messages for a in self._live_actions(st, actions, kind, targets))
         uploads = {"meme", "pick"}  # 要“附加文件”权限的那两种
@@ -5163,6 +5455,7 @@ class Engine:
             card_max=self.ec.card_max_chars,
             entry_max=self.ec.memory_entry_chars,
             music=self.music is not None and not st.private,
+            remind=bool(view.reminders),
             dm_with=neutralize(one_line(info.dm_with, 32)) if info.dm_with is not None else None,
             desktop=[neutralize(one_line(n, 40)) for n in self.desktop.app_names()] if self._desktop_here(st, view, info) else None,
             dm_memories=dm_memories,

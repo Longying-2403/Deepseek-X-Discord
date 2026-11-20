@@ -58,6 +58,7 @@ from .groups import (
 from .memory import SHARED
 from .store import SyncError
 from .prompts import DEFAULT_PERSONA, PERSONA_MAX_CHARS
+from .reminders import KEEP_SECONDS, Reminder, when_text, whom_text
 from .render import now_text
 from .textutil import one_line
 
@@ -981,6 +982,56 @@ def dm_marks(e: Any) -> str:
     if e.sensitive:
         return "〔敏感〕"
     return "〔可共享〕" if getattr(e, "shared_as", None) else ""
+
+
+def reminder_line(bot: "DSBot", r: Reminder, *, you: int | None = None, owner: bool = False) -> str:
+    """一条提醒写成一行：什么时候 · 在哪 · 提醒谁：什么事。owner：写上是谁设的（管理员看的列表）。"""
+    now = bot.engine.clock()
+    where = "私信" if r.dm or r.private else f"<#{r.channel_id}>"
+    by = f"{discord_safe(r.owner_name)} 设的 · " if owner else ""
+    missed = "〔错过了：到点时它不在线〕" if r.status == "missed" else ""
+    return (
+        f"{when_text(r.due_at, now, bot.engine.tz)} · {where} · {by}提醒{discord_safe(whom_text(r, you=you))}："
+        f"{discord_safe(r.text)}{missed}"
+    )
+
+
+def reminders_text(bot: "DSBot", user_id: int) -> str:
+    """/ds-dm 提醒 查看：他设着的全部提醒（私信里的、各个服务器里的），最近错过的也列出来。"""
+    now = bot.engine.clock()
+    mine = bot.store.reminders_of(user_id, missed_since=now - KEEP_SECONDS)
+    limit = bot.cfg.engine.remind_max_per_person
+    active = sum(r.status == "set" for r in mine)
+    head = f"**你的提醒**（{active} / {limit} 条）"
+    how = "叫它的时候直接说就行，比如“明天早上九点提醒我开会”“半小时后提醒我关火”；它会先发一条让你核对时间，点了“确认”才算设上。"
+    if not mine:
+        return f"{head}\n还没有。{how}"
+    lines = [f"({i}) {reminder_line(bot, r, you=user_id)}" for i, r in enumerate(mine, 1)]
+    return "\n".join([head, *lines, "取消：`/ds-dm 提醒 取消`（编号一栏会列出来）。只能设一次性的。"])
+
+
+def reminder_choices(bot: "DSBot", items: list[Reminder], current: str, *, you: int | None = None) -> list[Choice[int]]:
+    """“编号”一栏的候选：列表里的第几条 + 时间和内容（值是提醒在数据库里的编号）。"""
+    now = bot.engine.clock()
+    typed = current.strip().lower()
+    out: list[Choice[int]] = []
+    for i, r in enumerate(items, 1):
+        label = f"{i}. {when_text(r.due_at, now, bot.engine.tz)} 提醒{whom_text(r, you=you)}：{r.text}"
+        if typed and typed not in label.lower():
+            continue
+        out.append(Choice(name=label[:100], value=r.id))
+    return out[:25]
+
+
+def guild_reminders_text(bot: "DSBot", guild_id: int) -> str:
+    """/dsadmin 提醒 查看：这个服务器里设着的、到点在频道里说的提醒（发私信的、私信里设的是各人自己的，这里不列）。"""
+    items = bot.store.guild_reminders(guild_id)
+    limit = bot.cfg.engine.remind_max_per_server
+    head = f"**这个服务器的提醒**（{len(items)} / {limit} 条；只列到点在频道里说的）"
+    if not items:
+        return f"{head}\n现在没有。群友叫它时说“明天九点提醒我……”就能设；不想让这里设提醒：`/dsadmin 设置 参数:提醒 值:关`。"
+    lines = [f"({i}) {reminder_line(bot, r, owner=True)}" for i, r in enumerate(items, 1)]
+    return "\n".join([head, *lines, "取消某一条：`/dsadmin 提醒 取消`。"])
 
 
 def withdraw_dm_memory(bot: "DSBot", user_id: int | None = None, *, guild_id: int | None = None) -> None:
@@ -2065,6 +2116,28 @@ def register_dm_commands(bot: "DSBot") -> None:
             f"第 {no} 条改成了" + ("敏感：只在私信里用。" if sensitive else "不敏感：你在服务器里叫它时也会用上。"),
         )
 
+    remind = app_commands.Group(name="提醒", description="你让它到点提醒的事：查看、取消", parent=dm)
+
+    async def my_reminders(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
+        now = bot.engine.clock()
+        mine = bot.store.reminders_of(interaction.user.id, missed_since=now - KEEP_SECONDS)
+        return reminder_choices(bot, mine, current, you=interaction.user.id)
+
+    @remind.command(name="查看", description="你让它到点提醒的事（私信里设的、各个服务器里设的都在这里）")
+    async def remind_view(interaction: discord.Interaction) -> None:
+        await _reply_long(interaction, reminders_text(bot, interaction.user.id))
+
+    @remind.command(name="取消", description="取消一条你设的提醒")
+    @app_commands.rename(no="编号")
+    @app_commands.describe(no="取消哪一条（会列出你设着的提醒；输入几个字可以筛选）")
+    @app_commands.autocomplete(no=my_reminders)
+    async def remind_drop(interaction: discord.Interaction, no: int) -> None:
+        gone = bot.engine.remind_cancel(no, owner_id=interaction.user.id)
+        if gone is None:
+            await _reply(interaction, "没有这一条（从“编号”一栏列出来的里面选；已经到点、已经取消的不在里面）。")
+            return
+        await _reply(interaction, f"已取消：{reminder_line(bot, gone, you=interaction.user.id)}")
+
     @dm.command(name="清空", description="清空私信里的聊天记录（服务器的长期记忆和你的人设卡不受影响）")
     async def dm_reset(interaction: discord.Interaction) -> None:
         channel_id = dm_channel_of(bot, interaction)
@@ -2496,6 +2569,29 @@ def register_commands(bot: "DSBot") -> None:
             await _reply(interaction, f"{done}「{discord_safe(name)}」。")
 
     # ------------------------------------------------------------ 状态、清空记忆
+    # ------------------------------------------------------------ 提醒
+    alarms = app_commands.Group(name="提醒", description="群友让它到点在频道里提醒的事：查看、取消", parent=admin)
+
+    async def guild_alarms(interaction: discord.Interaction, current: str) -> list[Choice[int]]:
+        if interaction.guild_id is None:
+            return []
+        return reminder_choices(bot, bot.store.guild_reminders(interaction.guild_id), current)
+
+    @alarms.command(name="查看", description="这个服务器里设着的、到点在频道里说的提醒")
+    async def alarms_view(interaction: discord.Interaction) -> None:
+        await _reply_long(interaction, guild_reminders_text(bot, interaction.guild_id))
+
+    @alarms.command(name="取消", description="取消这个服务器里的一条提醒")
+    @app_commands.rename(no="编号")
+    @app_commands.describe(no="取消哪一条（会列出这个服务器里设着的；输入几个字可以筛选）")
+    @app_commands.autocomplete(no=guild_alarms)
+    async def alarms_drop(interaction: discord.Interaction, no: int) -> None:
+        gone = bot.engine.remind_cancel(no, guild_id=interaction.guild_id)
+        if gone is None:
+            await _reply(interaction, "没有这一条（从“编号”一栏列出来的里面选；已经到点、已经取消的不在里面）。")
+            return
+        await _reply(interaction, f"已取消：{reminder_line(bot, gone, owner=True)}")
+
     @admin.command(name="状态", description="查看本频道的设置、主动发言的节奏和今天的花费")
     async def status_cmd(interaction: discord.Interaction) -> None:
         await _reply(interaction, status_text(bot, interaction))

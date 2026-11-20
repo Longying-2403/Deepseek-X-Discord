@@ -35,6 +35,7 @@ WANTED = {  # 名字后面带 ? 的是选填的栏
     "表情包": {"查看": [], "上传": ["图片", "名字?"], "删除": ["名字"]},
     "长期记忆": {"查看": ["编号?"], "添加": ["内容"], "删除": ["编号"], "清空": []},
     "兴趣": {"查看": [], "添加": ["话题"], "删除": ["话题"]},
+    "提醒": {"查看": [], "取消": ["编号"]},
     "状态": [],
     "清空记忆": [],
 }
@@ -199,7 +200,7 @@ class Layout(WithBot):
                 node = next(o for o in node["options"] if o["name"] == name)
             return node
 
-        for path in (("设置", "值"), ("表情包", "删除", "名字"), ("长期记忆", "查看", "编号"), ("长期记忆", "删除", "编号"), ("兴趣", "删除", "话题")):
+        for path in (("设置", "值"), ("表情包", "删除", "名字"), ("长期记忆", "查看", "编号"), ("长期记忆", "删除", "编号"), ("兴趣", "删除", "话题"), ("提醒", "取消", "编号")):
             self.assertTrue(field(*path).get("autocomplete"), path)
         keys = [c["value"] for c in field("设置", "参数")["choices"]]
         self.assertEqual(keys, [k for k in ADMIN_KEYS if k not in ("enabled", "persona")])

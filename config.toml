@@ -54,6 +54,7 @@ long_memory = true                # 长期记忆：记住这个服务器的约�
 dm = true                         # 私信：服务器成员可以私信它（私信里用这个服务器的人设、记忆和人设卡；/dsadmin 设置 参数:私信 值:关 关掉）
 dm_memory = true                  # 私信记忆：私信里聊的、他和它之间的事记进他自己的私信记忆；他在这里叫它时带上不敏感的那些
 cross_server = false              # 跨服务器：和别的也开了的服务器之间，同一个人最近跟它聊的、私信记忆里不敏感的跟着他走
+reminders = true                  # 提醒：被叫到时可以让它到点提醒（“明天九点提醒我开会”），本人点了确认才设上；/dsadmin 设置 参数:提醒 值:关 关掉
 
 # —— 只有你能改的（这里，或 CONTROL_GUILD_ID 里那几个服务器的 /dsowner）——
 proactive_thinking = "low"        # 主动判断时思考强度：off / low / high
@@ -123,6 +124,10 @@ dm_memory_max_entries = 150       # 每个人的私信记忆最多几条（满�
 dm_memory_entry_chars = 200       # 每条私信记忆最多多少字
 dm_memory_prompt_chars = 6000     # 私信里最多列出多少字的私信记忆（太多了只列最近改过的；整理记忆时全都看得到）
 dm_shared_prompt_chars = 2000     # 服务器里最多列出多少字群友标成“可共享”的私信记忆（太多了只列最近改过的）
+remind_max_per_person = 15        # 每个人最多同时挂着几条提醒（私信里的、服务器里的加在一起）
+remind_max_per_server = 30        # 每个服务器里最多同时挂着几条到点在频道里说的提醒（所有人加起来）
+remind_max_targets = 10           # 频道里的一条提醒最多 @ 几个人
+remind_late_hours = 6.0           # 到点时 bot 不在线：上线后晚了不到 6 小时就补发，再晚就不发了（列表里标“错过了”）
 dm_memory_attach_entries = 20     # 他在服务器里叫它时，最多附上几条不敏感的私信记忆（最近改过的）
 review_idle_seconds = 600         # 频道安静 10 分钟、又攒了几轮新聊天，就整理一次记忆
 review_min_rounds = 3             # 至少攒了几轮新聊天才整理
