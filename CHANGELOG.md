@@ -2,6 +2,69 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [3.0.0] - 2026-11-20
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+> 3.0.0 是给 2.9.0～2.15.0 这一轮改动（管理员命令改成 `/dsadmin`、主动发言的新节奏、冒泡、主动私信、提醒、更新公告）加上这次的主动搜索定的版本号。代码上相对 2.15.0 只多了下面这一项；从更早的版本升级，请把中间各版的“升级须知”也看一遍。
+
+**新增**
+
+- **主动搜索**：没人叫它、但它想接话，而大家聊的东西它不认识、或者要知道最新的情况才说得准时，它可以自己先上网搜一次再说（以前只有被叫到时才能搜）。
+  - 主人的参数「主动搜索」，**默认开**；`/dsowner 设置 参数:主动搜索 值:关` 关掉（可以指定服务器）。要开着「联网搜索」。
+  - 一轮只搜一次，只开搜索：打开链接、翻别的频道这些还是要叫它才做。搜完觉得没什么可说的，照样可以不说话。
+  - 另外记数，不占被叫到时每天的搜索次数。「每日主动搜索上限」默认 0 = 不限。
+- `/dsadmin 状态` 的“联网搜索”那一行多写主动搜索开没开、今天主动搜了几次。
+
+**须知**
+
+- **升级后默认就是开着的**：开了主动发言的频道里，它会比以前多搜。每次搜索照样算钱（一次 0.075 美分）、算进服务器的每日预算，超了预算不搜。想限制次数就设「每日主动搜索上限」，不想要就关掉「主动搜索」。
+- 没开主动发言的频道、私信（每句都算叫它，本来就能搜）、冒泡（自己会搜）都不受影响。
+
+**升级须知**
+
+- `dsbot` 文件夹和 `config.toml` 变了：换掉 `dsbot`，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 3.0.0 启动中`。`config.toml` 不换也行（新的两项用默认值：开、不限）。
+- 数据库不用改。system prompt 里“上网搜”的规则改了几句，升级后第一轮对话的缓存会重新建立。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- `engine.py`：`_auto_search_on` / `_auto_search_ready`；没人叫它的那一轮把 `search` 放进 `extra_tools`；`_search_section(auto=True)` 在 `usage` 表里记成 `autosearch`（`AUTO_SEARCH`），和被叫到时的 `search` 分开数。
+- `prompts.py`：`build_system_prompt(auto_search=…)`，「这里能用的」里写“能用（没人叫你时也能搜）”。
+- 测试共 1603 个（新增 `tests/test_auto_search.py`）。
+
+### English
+
+> 3.0.0 is the version number for the round of changes from 2.9.0 to 2.15.0 (admin commands renamed to `/dsadmin`, the new pacing of proactive speaking, bubbling, proactive DMs, reminders, update announcements) plus proactive search. Compared with 2.15.0 the code only adds the item below; when upgrading from an older version, read the upgrade notes of the versions in between as well.
+
+**Added**
+
+- **Proactive search**: when nobody called the bot but it wants to join in, and the chat is about something it doesn't know or needs current information to get right, it may search the web once on its own before speaking (it could only search when called before).
+  - Owner setting 「主动搜索」, **on by default**; turn it off with `/dsowner 设置 参数:主动搜索 值:关` (optionally per server). Requires 「联网搜索」 to be on.
+  - One search per round, and only searching: opening links or reading other channels still needs a call. After searching it may still decide to say nothing.
+  - Counted separately, so it doesn't use up the daily searches for called rounds. 「每日主动搜索上限」 defaults to 0 = unlimited.
+- The "联网搜索" line of `/dsadmin 状态` also shows whether proactive search is on and how many it did today.
+
+**Notes**
+
+- **It is on after upgrading**: in channels with proactive speaking enabled the bot will search more than before. Each search is still charged (0.075 cents) and counts toward the server's daily budget; over budget it doesn't search. Set 「每日主动搜索上限」 to cap it, or turn 「主动搜索」 off.
+- Channels without proactive speaking, DMs (every message counts as a call, so it could already search) and bubbling (which searches by itself) are unaffected.
+
+**Upgrading**
+
+- The `dsbot` folder and `config.toml` changed: replace `dsbot`, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 3.0.0 启动中`. Keeping your old `config.toml` is fine (the two new settings use their defaults: on, unlimited).
+- No database change. A few sentences of the search rules in the system prompt changed, so the prompt cache is rebuilt on the first round after upgrading.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- `engine.py`: `_auto_search_on` / `_auto_search_ready`; uncalled rounds get `search` in `extra_tools`; `_search_section(auto=True)` records `autosearch` (`AUTO_SEARCH`) in the `usage` table, counted apart from `search`.
+- `prompts.py`: `build_system_prompt(auto_search=…)`; the tools block says "能用（没人叫你时也能搜）".
+- There are now 1603 tests (new `tests/test_auto_search.py`).
+
 ## [2.15.0] - 2026-11-20
 
 > 英文版这次没有更新，还是 2.0.0。
