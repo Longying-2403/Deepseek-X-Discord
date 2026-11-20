@@ -2,6 +2,79 @@
 
 每个版本的主要变化，中文在前、English below。
 
+## [2.14.0] - 2026-11-20
+
+> 英文版这次没有更新，还是 2.0.0。
+> The English edition wasn't updated this time and stays at 2.0.0.
+
+### 中文
+
+**新增**
+
+- **提醒**：叫它的时候直接说“明天早上九点提醒我开会”“半小时后提醒我关火”，到点它来说一声。
+  - 先核对再设上：它回话之后，程序发一条写明日期、星期、钟点的消息，带“确认”“取消”两个按钮；只有提出的人能点，点了“确认”才设上，10 分钟没点就作废。
+  - 在频道里说的，到点在那个频道里 @ 你；可以一起提醒别人（“提醒我、小红和老王”，最多 @ 10 个人）。
+  - 说了“私信提醒”的，到点私信那一个人（他没私信过它也能收到；提醒的是别人时会写明是谁让它提醒的）。私信发不出去就回频道里 @ 他。
+  - 私信里说的只提醒你自己，发在私信里。
+  - 只能设一次性的，最远一年以后。
+- `/ds-dm 提醒 查看`、`取消`：自己设着的全部提醒。也可以叫它“我有哪些提醒”“开会那条不用提醒了”。
+- `/dsadmin 提醒 查看`、`取消`：这个服务器频道里设着的提醒。`/dsadmin 设置 参数:提醒 值:关` 可以不让这个服务器设。
+
+**须知**
+
+- 到点说的那句话是设的时候它就写好的，到点由程序直接发，不再问模型：不花钱，也不受预算、主动发言开没开的影响。
+- 上限：每个人 15 条（私信里的、各个服务器里的加在一起），每个服务器到点在频道里说的 30 条（发私信的不算）；满了它会直接告诉你。`[engine]` 的 `remind_max_per_person`、`remind_max_per_server`、`remind_max_targets`。
+- bot 到点时不在线：上线后晚了不到 6 小时的补发并写明晚了多久；再晚就不发，列表里标“错过了”（`remind_late_hours`）。
+- 没说清楚几点的（“明天提醒我”）它会先问；要每天、每周重复的，它会说现在只能设一次。
+
+**升级须知**
+
+- `dsbot` 文件夹和 `config.toml` 变了：换掉 `dsbot`，再 `sudo docker compose up -d --build`。确认新版生效：日志里有 `dsbot 2.14.0 启动中`。`config.toml` 不换也行（新的几项用默认值）；想改上限就把 `[defaults]` 的 `reminders` 和 `[engine]` 的 `remind_*` 那几行抄过去。
+- 数据库会自动多一张表（`data/dsbot.sqlite3` 的 `reminders`），原来的数据不动。斜杠命令多了 `/ds-dm 提醒`、`/dsadmin 提醒`，启动时自动注册。
+- 英文版这次没有更新，还是 v2.0.0。
+
+**开发**
+
+- 新文件 `dsbot/reminders.py`：认时间（`parse_when`）、写给人看的话（`when_text`、`describe`、`fire_text`）、按钮的 `custom_id`。
+- 模型的 `remind` 动作（`actions.py`、`models.py`）：`at` / `in_minutes`、`text`、`who`、`dm`、`say`；`op` 还可以是 `cancel`、`list`。
+- `engine.py`：`_remind_actions`（设）、`remind_decide`（点按钮）、`_remind_due` / `_remind_fire`（到点，先记成办完了再发）、`remind_cancel`（命令）。提醒是程序办的，结果用 `remind_notes` 在下一轮告诉模型。
+- `discord_app.py`：`send_card`（带按钮的消息）、`send_dm`、`on_interaction`（按钮只认 `custom_id`，重启以后点也认）。
+- 测试共 1543 个（新增 `tests/test_reminders.py`）。
+
+### English
+
+**Added**
+
+- **Reminders**: when you call the bot, just say it ("remind me about the meeting at 9 tomorrow morning", "remind me in half an hour to turn off the stove") and it speaks up at that time.
+  - Checked before it is set: after the bot replies, a message spells out the date, weekday and time with "确认" (confirm) and "取消" (cancel) buttons. Only the person who asked can press them; the reminder is set once they confirm, and the message lapses after 10 minutes.
+  - Asked in a channel: it mentions you in that channel when the time comes, and can mention others too ("remind me, Hong and Wang", up to 10 people).
+  - Asked for by DM: it DMs that one person (even if they never messaged the bot; a reminder for someone else says who asked). If the DM can't be delivered it mentions them in the channel instead.
+  - Asked in a DM: reminds only you, in the DM.
+  - One-off reminders only, up to a year ahead.
+- `/ds-dm 提醒 查看`, `取消`: all your own reminders. You can also ask the bot which reminders you have, or tell it to drop one.
+- `/dsadmin 提醒 查看`, `取消`: the reminders set in this server's channels. `/dsadmin 设置 参数:提醒 值:关` stops the server from setting new ones.
+
+**Notes**
+
+- The line it says is written when the reminder is set and sent by the program itself, without asking the model again: it costs nothing and doesn't depend on budgets or on proactive speaking.
+- Limits: 15 per person (DMs and all servers together) and 30 channel reminders per server (DM reminders don't count); when full it tells you directly. `remind_max_per_person`, `remind_max_per_server`, `remind_max_targets` in `[engine]`.
+- If the bot is offline at the time: when it is back, a reminder less than 6 hours late is still sent and says how late it is; later than that it isn't sent and the list marks it as missed (`remind_late_hours`).
+- If you don't say what time ("remind me tomorrow") it asks first; for daily or weekly reminders it says only one-off ones are possible.
+
+**Upgrading**
+
+- The `dsbot` folder and `config.toml` changed: replace `dsbot`, then run `sudo docker compose up -d --build`. To check the new version took effect: the log shows `dsbot 2.14.0 启动中`. Keeping your old `config.toml` is fine (the new settings use their defaults); to change the limits, copy the `reminders` line in `[defaults]` and the `remind_*` lines in `[engine]`.
+- One table is added to the database automatically (`reminders` in `data/dsbot.sqlite3`); existing data is untouched. Two slash commands are new, `/ds-dm 提醒` and `/dsadmin 提醒`, registered on startup.
+- The English edition wasn't updated this time and stays at v2.0.0.
+
+**Development**
+
+- New file `dsbot/reminders.py`: time parsing (`parse_when`), the user-facing texts (`when_text`, `describe`, `fire_text`) and the buttons' `custom_id`.
+- The model's `remind` action (`actions.py`, `models.py`): `at` / `in_minutes`, `text`, `who`, `dm`, `say`; `op` may also be `cancel` or `list`.
+- `engine.py`: `_remind_actions` (setting), `remind_decide` (buttons), `_remind_due` / `_remind_fire` (firing; marked done before sending), `remind_cancel` (commands). Reminders are handled by the program, so the outcome is passed to the model on the next round through `remind_notes`.
+- `discord_app.py`: `send_card` (message with buttons), `send_dm`, `on_interaction` (buttons are matched by `custom_id` only, so they still work after a restart).
+- There are now 1543 tests (new `tests/test_reminders.py`).
+
 ## [2.13.0] - 2026-11-20
 
 > 英文版这次没有更新，还是 2.0.0。
